@@ -96,7 +96,7 @@ test('资产与别名映射：ACTIVE_MODEL_KEYS 为 7 款，新增 orchestrator-
     'claude-sonnet-5-5',
     'gpt-oss-120b',
   ]);
-  assert.equal(FEED_MODEL_KEYS.length, 18);
+  assert.equal(FEED_MODEL_KEYS.length, 20);
   assert.equal(matchPricingKeys('gemini-pro-orchestrator-argon'), 'gemini-4-argon');
   assert.equal(matchPricingKeys('MODEL_PLACEHOLDER_M681'), 'gemini-4-argon');
   assert.equal(matchPricingKeys('gemini-4-hydrogen-tiered-high'), 'gemini-4-hydrogen');
@@ -128,7 +128,7 @@ test('资产与别名映射：ACTIVE_MODEL_KEYS 为 7 款，新增 orchestrator-
   assert.equal(normalizeCatalogTierLabel('unknown-tier'), '');
 });
 
-test('Live ULTRA：7 款活跃模型 + 11 款已下架模型 + orchestrator-argon 别名归并，严禁泄露内部实验键', () => {
+test('Live ULTRA：7 款活跃模型 + 13 款已下架模型 + orchestrator-argon 别名归并，严禁泄露内部实验键', () => {
   const snap = resolvePricingCatalogSnapshot({
     rawPricingTable: DEFAULT_API_PRICES,
     live: {
@@ -153,7 +153,7 @@ test('Live ULTRA：7 款活跃模型 + 11 款已下架模型 + orchestrator-argo
   });
 
   assert.equal(Object.keys(snap.prices).length, 7);
-  assert.equal(Object.keys(snap.retiredPrices).length, 11);
+  assert.equal(Object.keys(snap.retiredPrices).length, 13);
   assert.deepEqual(snap.unpricedLiveModels, []);
   for (const activeKey of ACTIVE_MODEL_KEYS) {
     assert.ok(snap.prices[activeKey], `prices 应包含 ${activeKey}`);
@@ -248,7 +248,7 @@ test('多账号池：ULTRA 当前 + FREE 备用补充 claude-opus-4-6 / claude-s
   });
 
   assert.equal(Object.keys(snap.prices).length, 9);
-  assert.equal(Object.keys(snap.retiredPrices).length, 9);
+  assert.equal(Object.keys(snap.retiredPrices).length, 11);
   for (const extra of ['claude-opus-4-6', 'claude-sonnet-4-6']) {
     assert.ok(snap.prices[extra], `${extra} 应通过 FREE 备用池进入 prices`);
     assert.equal(snap.modelCatalogState[extra]?.availability, 'other_tier_only');
@@ -634,4 +634,111 @@ test('P1-10 & P1-11 & P2-20: 云端新未定价模型透出、IDE 可见 trial/f
   );
   assert.equal(livePreviewSnap.modelCatalogState['gemini-4-argon-trial'], undefined);
   assert.equal(livePreviewSnap.modelCatalogState['tab_flash_lite_preview'], undefined);
+});
+
+test('已定价历史 Flash-Lite（2.5/3.5）在 live 正常计价、在云端残留随活跃 Gemini 折叠进 retiredPrices，同时保留 null display_name 的 unpriced sonar 检测', async () => {
+  const { canonicalActivePricingKeys } = await import('../dist/pricing.js');
+
+  // (a) live 中存在 gemini-2.5-flash-lite（含云端误标 display_name）与 gemini-3.5-flash-lite -> 进入 prices 且采用目录标准显示名
+  const liveSnap = resolvePricingCatalogSnapshot({
+    rawPricingTable: DEFAULT_API_PRICES,
+    live: {
+      tier: 'ULTRA',
+      models: [
+        ...ACTIVE_MODEL_KEYS.map((id) => ({ model_id: id, disabled: false, quota_source: 'live' })),
+        { model_id: 'gemini-2.5-flash-lite', display_name: 'Gemini 3.5 Flash Lite', disabled: false, quota_source: 'live' },
+        { model_id: 'gemini-3.5-flash-lite', display_name: 'Gemini 3.5 Flash Lite', disabled: false, quota_source: 'live' },
+        { model_id: 'gemini-3.1-flash-lite', display_name: 'Gemini 3.1 Flash Lite', disabled: false, quota_source: 'live' },
+        { model_id: 'tab_flash_lite_preview', display_name: 'Tab Flash Lite', disabled: false, quota_source: 'live' },
+        { model_id: 'gemini-4-hydrogen-sonar', display_name: null, disabled: false, quota_source: 'live' },
+      ],
+    },
+  });
+
+  assert.ok(liveSnap.prices['gemini-2.5-flash-lite'], 'live 中已定价 gemini-2.5-flash-lite 应进入 prices');
+  assert.ok(liveSnap.prices['gemini-3.5-flash-lite'], 'live 中已定价 gemini-3.5-flash-lite 应进入 prices');
+  assert.equal(liveSnap.modelCatalogState['gemini-2.5-flash-lite']?.availability, 'available');
+  assert.equal(liveSnap.modelCatalogState['gemini-2.5-flash-lite']?.displayName, 'Gemini 2.5 Flash Lite');
+  assert.equal(liveSnap.modelCatalogState['gemini-3.5-flash-lite']?.availability, 'available');
+  assert.equal(liveSnap.modelCatalogState['gemini-3.5-flash-lite']?.displayName, 'Gemini 3.5 Flash Lite');
+  assert.equal(liveSnap.retiredPrices['gemini-2.5-flash-lite'], undefined);
+  assert.equal(liveSnap.retiredPrices['gemini-3.5-flash-lite'], undefined);
+  assert.equal(liveSnap.prices['gemini-3.1-flash-lite'], undefined);
+  assert.equal(liveSnap.retiredPrices['gemini-3.1-flash-lite'], undefined);
+  assert.equal(liveSnap.prices['tab_flash_lite_preview'], undefined);
+  assert.deepEqual(liveSnap.unpricedLiveModels, [
+    { key: 'gemini-4-hydrogen-sonar', displayName: 'gemini-4-hydrogen-sonar', disabled: false },
+  ]);
+
+  const activePricingKeys = canonicalActivePricingKeys(Object.keys(liveSnap.prices), Object.keys(DEFAULT_API_PRICES));
+  assert.equal(activePricingKeys.has('gemini-2.5-flash-lite'), true);
+  assert.equal(activePricingKeys.has('gemini-3.5-flash-lite'), true);
+  assert.equal(activePricingKeys.has('gemini-3.1-flash-lite'), false);
+  assert.equal(activePricingKeys.has('tab_flash_lite_preview'), false);
+
+  // (b) & (c) 两者未出现在 IDE live、仅残留在带活跃 Gemini 的 account_cloud 中 -> 折叠入 retiredPrices 且不进 unpricedLiveModels；
+  //     未定价的 gemini-4-hydrogen-sonar（display_name: null）继续留在 unpricedLiveModels
+  const cloudFoldSnap = resolvePricingCatalogSnapshot({
+    rawPricingTable: DEFAULT_API_PRICES,
+    live: {
+      tier: 'ULTRA',
+      models: ACTIVE_MODEL_KEYS.map((id) => ({ model_id: id, disabled: false, quota_source: 'live' })),
+    },
+    poolAccounts: [
+      {
+        source: 'cloud',
+        tier: 'FREE',
+        models: [
+          { name: 'gemini-3.8-flash', disabled: false, quota_source: 'cloud' },
+          { name: 'gemini-4-hydrogen', disabled: false, quota_source: 'cloud' },
+          { name: 'gemini-2.5-flash-lite', display_name: 'Gemini 3.5 Flash Lite', disabled: false, quota_source: 'cloud' },
+          { name: 'gemini-3.5-flash-lite', display_name: 'Gemini 3.5 Flash Lite', disabled: false, quota_source: 'cloud' },
+          { name: 'gemini-3.1-flash-lite', display_name: 'Gemini 3.1 Flash Lite', disabled: false, quota_source: 'cloud' },
+          { name: 'gemini-4-hydrogen-sonar', display_name: null, disabled: false, quota_source: 'cloud' },
+        ],
+      },
+    ],
+  });
+
+  assert.equal(cloudFoldSnap.prices['gemini-2.5-flash-lite'], undefined);
+  assert.equal(cloudFoldSnap.prices['gemini-3.5-flash-lite'], undefined);
+  assert.ok(cloudFoldSnap.retiredPrices['gemini-2.5-flash-lite'], 'cloud 残留已定价 gemini-2.5-flash-lite 应折叠至 retiredPrices');
+  assert.ok(cloudFoldSnap.retiredPrices['gemini-3.5-flash-lite'], 'cloud 残留已定价 gemini-3.5-flash-lite 应折叠至 retiredPrices');
+  assert.equal(cloudFoldSnap.modelCatalogState['gemini-2.5-flash-lite']?.availability, 'retired');
+  assert.equal(cloudFoldSnap.modelCatalogState['gemini-2.5-flash-lite']?.displayName, 'Gemini 2.5 Flash Lite');
+  assert.equal(cloudFoldSnap.modelCatalogState['gemini-3.5-flash-lite']?.availability, 'retired');
+  assert.equal(cloudFoldSnap.modelCatalogState['gemini-3.5-flash-lite']?.displayName, 'Gemini 3.5 Flash Lite');
+  assert.equal(cloudFoldSnap.retiredPrices['gemini-3.1-flash-lite'], undefined);
+  assert.equal(cloudFoldSnap.modelCatalogState['gemini-3.1-flash-lite'], undefined);
+  assert.deepEqual(cloudFoldSnap.unpricedLiveModels, [
+    { key: 'gemini-4-hydrogen-sonar', displayName: 'gemini-4-hydrogen-sonar', disabled: false },
+  ]);
+  assert.equal(cloudFoldSnap.modelCatalogState['gemini-4-hydrogen-sonar']?.availability, 'unpriced_live');
+
+  // 同步验证 activeAccount 为 account_cloud（含活跃 Gemini 与残留 2.5/3.5 flash-lite）时同样折叠入 retiredPrices
+  const activeCloudFoldSnap = resolvePricingCatalogSnapshot({
+    rawPricingTable: DEFAULT_API_PRICES,
+    activeAccount: {
+      source: 'cloud',
+      tier: 'Google AI Ultra',
+      models: [
+        ...ACTIVE_MODEL_KEYS.map((name) => ({ name, disabled: false, quota_source: 'cloud' })),
+        { name: 'gemini-2.5-flash-lite', display_name: 'Gemini 3.5 Flash Lite', disabled: false, quota_source: 'cloud' },
+        { name: 'gemini-3.5-flash-lite', display_name: 'Gemini 3.5 Flash Lite', disabled: false, quota_source: 'cloud' },
+        { name: 'gemini-3.1-flash-lite', display_name: 'Gemini 3.1 Flash Lite', disabled: false, quota_source: 'cloud' },
+        { name: 'gemini-4-hydrogen-sonar', display_name: null, disabled: false, quota_source: 'cloud' },
+      ],
+    },
+  });
+
+  assert.equal(activeCloudFoldSnap.prices['gemini-2.5-flash-lite'], undefined);
+  assert.equal(activeCloudFoldSnap.prices['gemini-3.5-flash-lite'], undefined);
+  assert.ok(activeCloudFoldSnap.retiredPrices['gemini-2.5-flash-lite']);
+  assert.ok(activeCloudFoldSnap.retiredPrices['gemini-3.5-flash-lite']);
+  assert.equal(activeCloudFoldSnap.modelCatalogState['gemini-2.5-flash-lite']?.displayName, 'Gemini 2.5 Flash Lite');
+  assert.equal(activeCloudFoldSnap.modelCatalogState['gemini-3.5-flash-lite']?.displayName, 'Gemini 3.5 Flash Lite');
+  assert.equal(activeCloudFoldSnap.retiredPrices['gemini-3.1-flash-lite'], undefined);
+  assert.deepEqual(activeCloudFoldSnap.unpricedLiveModels, [
+    { key: 'gemini-4-hydrogen-sonar', displayName: 'gemini-4-hydrogen-sonar', disabled: false },
+  ]);
 });

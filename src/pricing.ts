@@ -403,6 +403,63 @@ export function mergePricingEntries(
   }
 }
 
+const LEGACY_INTERNAL_TRIAL_LITE_IDS = new Set([
+  'gemini-3.1-flash-lite',
+  'gemini-4-argon-trial',
+]);
+
+function buildKnownPricedKeys(
+  rawPricingTable?: Record<string, ApiPricingEntry> | null,
+  extraPricingKeys?: Iterable<string>
+): Set<string> {
+  const known = new Set<string>();
+  for (const k of FEED_MODEL_KEYS) {
+    const norm = normalizeModelId(k);
+    if (norm) known.add(norm);
+  }
+  if (rawPricingTable) {
+    for (const k of Object.keys(rawPricingTable)) {
+      const norm = normalizeModelId(k);
+      if (norm) known.add(norm);
+    }
+  }
+  if (extraPricingKeys) {
+    for (const rawKey of extraPricingKeys) {
+      const norm = normalizeModelId(String(rawKey));
+      if (norm) known.add(norm);
+    }
+  }
+  return known;
+}
+
+function isPricedCatalogFlashLiteModel(
+  rawId: string,
+  canonicalKey: string,
+  knownPricedKeys: ReadonlySet<string>
+): boolean {
+  const id = stripModelProviderPrefix(String(rawId ?? '')).trim();
+  if (!id) return false;
+  if (
+    /^(?:chat_|tab_|model_placeholder_)/i.test(id) ||
+    /(?:^|[-_])(?:image|tiered|safety[-_]le|control|exp[-_][a-z0-9]+|trial)(?:$|[-_])/i.test(id)
+  ) {
+    return false;
+  }
+  const normId = normalizeModelId(id);
+  const normKey = normalizeModelId(canonicalKey);
+  if (
+    !normId ||
+    LEGACY_INTERNAL_TRIAL_LITE_IDS.has(normId) ||
+    (normKey && LEGACY_INTERNAL_TRIAL_LITE_IDS.has(normKey))
+  ) {
+    return false;
+  }
+  if (!/(?:^|[-_])flash[-_]lite(?:$|[-_])/i.test(id)) {
+    return false;
+  }
+  return knownPricedKeys.has(normId) || (Boolean(normKey) && knownPricedKeys.has(normKey));
+}
+
 export function isInternalNonChatModelId(rawId: string): boolean {
   const id = stripModelProviderPrefix(String(rawId ?? '')).trim();
   if (!id) return false;
@@ -418,14 +475,16 @@ export function canonicalActivePricingKeys(
 ): Set<string> {
   const source = modelIds ? Array.from(modelIds) : [];
   const effectiveActive = new Set(Array.from(getEffectiveActiveModelKeys(), (k) => normalizeModelId(k)));
+  const knownPricedKeys = buildKnownPricedKeys(DEFAULT_API_PRICES, extraPricingKeys);
   const keys = new Set<string>();
   for (const rawId of source) {
     const trimmed = String(rawId).trim();
     if (!trimmed) continue;
     const baseId = trimmed.replace(/(?:^|[-_])disabled$/i, '').trim();
     const normBase = normalizeModelId(baseId);
-    if (!baseId || (!effectiveActive.has(normBase) && isInternalNonChatModelId(baseId))) continue;
     const matched = matchPricingKeys(baseId, extraPricingKeys);
+    const isPricedFlashLite = isPricedCatalogFlashLiteModel(baseId, matched, knownPricedKeys);
+    if (!baseId || (!effectiveActive.has(normBase) && !isPricedFlashLite && isInternalNonChatModelId(baseId))) continue;
     if (matched) keys.add(matched);
   }
   if (keys.size === 0) {
@@ -545,11 +604,6 @@ interface ExtractedCatalogCandidate {
   disabled: boolean;
 }
 
-const LEGACY_INTERNAL_TRIAL_LITE_IDS = new Set([
-  'gemini-3.1-flash-lite',
-  'gemini-4-argon-trial',
-]);
-
 function isUserVisiblePreviewChatModel(
   sourceKind: CatalogSourceKind,
   baseId: string,
@@ -585,6 +639,7 @@ function extractCatalogModels(
   extraKeys: Set<string>,
   effectiveActiveSet: Set<string>,
   feedModelSet: Set<string>,
+  knownPricedKeys: ReadonlySet<string>,
   timestampSeconds: number
 ): ExtractedCatalogCandidate[] {
   if (!Array.isArray(rawModels) || rawModels.length === 0) return [];
@@ -601,21 +656,22 @@ function extractCatalogModels(
     const rawDisplayName = typeof (m.display_name ?? m.displayName) === 'string'
       ? String(m.display_name ?? m.displayName).trim()
       : '';
-    if (
-      !effectiveActiveSet.has(normBase) &&
-      isInternalNonChatModelId(baseId) &&
-      !isUserVisiblePreviewChatModel(sourceKind, baseId, normBase, rawDisplayName, feedModelSet)
-    ) {
-      continue;
-    }
-    const disabled = m.disabled === true || hasDisabledSuffix;
-
     const foundPricing = lookupPricingEntry(rawPricingTable, baseId);
     const resolvedPricing = foundPricing
       ? resolvePricingForTimestamp(foundPricing.entry, timestampSeconds, foundPricing.key)
       : null;
     const canonicalKey = foundPricing?.key || matchPricingKeys(baseId, extraKeys) || normBase;
     if (!canonicalKey || FORBIDDEN_CATALOG_KEYS.has(canonicalKey)) continue;
+    const isPricedFlashLite = isPricedCatalogFlashLiteModel(baseId, canonicalKey, knownPricedKeys);
+    if (
+      !effectiveActiveSet.has(normBase) &&
+      !isPricedFlashLite &&
+      isInternalNonChatModelId(baseId) &&
+      !isUserVisiblePreviewChatModel(sourceKind, baseId, normBase, rawDisplayName, feedModelSet)
+    ) {
+      continue;
+    }
+    const disabled = m.disabled === true || hasDisabledSuffix;
 
     parsed.push({
       canonicalKey,
@@ -686,6 +742,7 @@ export function resolvePricingCatalogSnapshot(
     .filter((k) => Boolean(k) && !FORBIDDEN_CATALOG_KEYS.has(k));
   const effectiveActiveSet = new Set<string>(effectiveActiveList);
   const feedModelSet = new Set<string>(FEED_MODEL_KEYS);
+  const knownPricedKeys = buildKnownPricedKeys(rawPricingTable);
 
   let primaryKind: CatalogSourceKind | null = null;
   let primaryTier = '';
@@ -700,6 +757,7 @@ export function resolvePricingCatalogSnapshot(
       extraKeys,
       effectiveActiveSet,
       feedModelSet,
+      knownPricedKeys,
       timestampSeconds
     );
     if (extracted.length > 0) {
@@ -717,6 +775,7 @@ export function resolvePricingCatalogSnapshot(
       extraKeys,
       effectiveActiveSet,
       feedModelSet,
+      knownPricedKeys,
       timestampSeconds
     );
     if (extracted.length > 0) {
@@ -737,6 +796,7 @@ export function resolvePricingCatalogSnapshot(
       extraKeys,
       effectiveActiveSet,
       feedModelSet,
+      knownPricedKeys,
       timestampSeconds
     );
     if (extracted.length > 0 || accKind === 'account_cloud') {
@@ -802,6 +862,7 @@ export function resolvePricingCatalogSnapshot(
       extraKeys,
       effectiveActiveSet,
       feedModelSet,
+      knownPricedKeys,
       timestampSeconds
     );
     for (const c of extracted) {
@@ -882,7 +943,9 @@ export function resolvePricingCatalogSnapshot(
   }
 
   for (const key of publicCandidateKeys) {
-    if (!key || FORBIDDEN_CATALOG_KEYS.has(key) || (!effectiveActiveSet.has(key) && isInternalNonChatModelId(key))) continue;
+    if (!key || FORBIDDEN_CATALOG_KEYS.has(key)) continue;
+    const isPricedFlashLite = isPricedCatalogFlashLiteModel(key, key, knownPricedKeys);
+    if (!effectiveActiveSet.has(key) && !isPricedFlashLite && isInternalNonChatModelId(key)) continue;
     if (Object.hasOwn(rawActivePrices, key)) continue;
     const entry = Object.hasOwn(rawPricingTable, key) ? rawPricingTable[key] : lookupPricingEntry(rawPricingTable, key)?.entry;
     if (!entry) continue;
