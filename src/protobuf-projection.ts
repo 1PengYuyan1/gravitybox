@@ -2,16 +2,14 @@
 import { bt } from './i18n.js';
 export type ProtoSelection = { [field: number]: true | ProtoSelection };
 export const GENERATION_PROJECTION: ProtoSelection = {
-  1: { 3: true, 4: true, 9: true, 19: true, 21: true },
+  1: { 3: true, 4: true, 9: { 4: { 1: true } }, 19: true, 21: true },
   2: true,
-  3: { 27: { 8: true, 12: true, 20: true }, 28: true },
   4: true,
 };
 export const STEP_PROJECTION: ProtoSelection = {
-  1: true,
+  1: { 1: true },
   9: true,
   12: true,
-  24: { 8: true, 12: true, 20: true },
 };
 export const HUD_STEP_METADATA_PROJECTION: ProtoSelection = {
   1: true,
@@ -72,8 +70,11 @@ export interface ProtoProjectionLimits {
   maxFieldBytes: number;
   maxFields: number;
   maxMs: number;
+  chunkBytes?: number;
   skipOversizedLeafFields?: boolean;
 }
+
+export const USAGE_PROJECTION_VERSION = 2;
 
 export const DEFAULT_PROTO_LIMITS: ProtoProjectionLimits = {
   maxReadBytes: 4 * 1024 * 1024,
@@ -81,6 +82,15 @@ export const DEFAULT_PROTO_LIMITS: ProtoProjectionLimits = {
   maxFieldBytes: 64 * 1024,
   maxFields: 20000,
   maxMs: 1500,
+};
+
+export const USAGE_PROTO_LIMITS: ProtoProjectionLimits = {
+  maxReadBytes: 16 * 1024 * 1024,
+  maxOutputBytes: 256 * 1024,
+  maxFieldBytes: 64 * 1024,
+  maxFields: 100_000,
+  maxMs: 4000,
+  chunkBytes: 16 * 1024,
 };
 
 export function projectProtobuf(
@@ -97,7 +107,8 @@ export function projectProtobuf(
     if(performance.now()-started>limits.maxMs)throw Error(bt('proto.err.time_budget'));
     if(offset<0||length<0||offset+length>size)throw Error(bt('proto.err.out_of_bounds'));
     if(offset>=cacheStart&&offset+length<=cacheStart+cache.length)return cache.subarray(offset-cacheStart,offset-cacheStart+length);
-    const take=Math.min(size-offset,Math.max(length,65536));
+    const minChunk=limits.chunkBytes&&limits.chunkBytes>0?limits.chunkBytes:65536;
+    const take=Math.min(size-offset,Math.max(length,minChunk));
     if(bytesRead+take>limits.maxReadBytes)throw Error(bt('proto.err.byte_budget'));
     const chunk=readChunk(offset,take);bytesRead+=chunk.byteLength;
     if(chunk.byteLength!==take)throw Error(bt('proto.err.incomplete_read'));

@@ -19,6 +19,7 @@ import {
   type ApiPricingInterval,
 } from './pricing.js';
 import {
+  isFileCacheEntryReusable,
   ledgerEventsEqual,
   resolveDatabaseModelFullName,
   type AvailableAccountUsageOption,
@@ -405,8 +406,11 @@ export class UsageStatsManager {
       const raw = JSON.parse(await readFile(this.persistCachePath, 'utf8'));
       if (raw && raw.version === 3 && typeof raw.entries === 'object' && raw.entries !== null) {
         for (const [k, v] of Object.entries(raw.entries as Record<string, any>)) {
-          if (v && typeof v.mtimeMs === 'number' && typeof v.size === 'number' && Array.isArray(v.events) && v.events.every((e: GenerationEvent) => typeof e.event_key === 'string' && !/\borchestrator\b|^gemini-flash-worker|^MODEL_PLACEHOLDER_M66[789]$|^Gemini\s+Flash$/i.test(e.model)) && !v.hasError && !this.fileCache.has(k)) {
-            this.setFileCacheEntry(k, v);
+          if (v && typeof v.mtimeMs === 'number' && typeof v.size === 'number' && Array.isArray(v.events) && v.events.every((e: GenerationEvent) => typeof e.event_key === 'string' && !/\borchestrator\b|^gemini-flash-worker|^MODEL_PLACEHOLDER_M66[789]$|^Gemini\s+Flash$/i.test(e.model)) && isFileCacheEntryReusable(v) && !this.fileCache.has(k)) {
+            this.setFileCacheEntry(k, {
+              ...v,
+              skippedLargeRecords: Number.isFinite(v.skippedLargeRecords) ? Number(v.skippedLargeRecords) : 0,
+            });
           }
         }
       }
@@ -418,7 +422,7 @@ export class UsageStatsManager {
     this.fileCacheDirty = false;
     const entries: Record<string, any> = {};
     for (const [k, v] of this.fileCache.entries()) {
-      if (!v.hasError) entries[k] = v;
+      if (isFileCacheEntryReusable(v)) entries[k] = v;
     }
     const targetPath = this.persistCachePath;
     this.persistSaveChain = this.persistSaveChain
@@ -1266,7 +1270,8 @@ export class UsageStatsManager {
       const p=dbPaths[nextDatabase++]!;
       // forceRefresh 绕过内存摘要 TTL 并重新读取目录与全部 .db/.db-wal 物理 stat；
       // 对物理指纹完全一致且无错误的历史静态库直接命中 fileCache，消除全盘冷重扫引发的 30s 超时。
-      const bypassFileCache = Boolean(this.fileCache.get(p)?.hasError);
+      const cachedEntry = this.fileCache.get(p);
+      const bypassFileCache = Boolean(cachedEntry && !isFileCacheEntryReusable(cachedEntry));
       const res = await this.scanDatabaseEvents(p, bypassFileCache, signal);
       if (!res.cacheHit) allCacheHits = false;
       if (this.largeLedger && !this.ledgerUnavailable) {
@@ -1358,7 +1363,7 @@ export class UsageStatsManager {
       const rawPricing = await this.getRawPricingTable();
       if (this.rateLocksUnavailable && !this.pricingWarnings.some(w => /费率账本|rate ledger/i.test(w))) this.pricingWarnings.push(bt('usage.warn.rate_ledger_unreadable_no_reprice'));
       const revision = await this.ledger.version();
-      const aggregateKey = JSON.stringify([revision, this.calendarKey(), rawPricing, accountId ?? 'all', this.knownAccounts]);
+      const aggregateKey = JSON.stringify([revision, this.calendarKey(), rawPricing, accountId ?? 'all', this.knownAccounts, skippedLargeRecords]);
       const prior = this.cachedSummariesByAccount.get(accKey)?.data;
       const existingSnapshot = prior?.snapshot_id ? this.snapshots.get(prior.snapshot_id) : undefined;
       const totalScanned = dbPaths.length + archivedDbCount;
@@ -1369,6 +1374,7 @@ export class UsageStatsManager {
         const hasReadError = this.ledgerCorrupt || this.archivedUnavailable || failedDatabasesCount > 0 || skippedLargeRecords > 0 || (prior.unknown_time_records ?? 0) > 0;
         const reused: TokenUsageSummary = { ...prior, availability, has_error: hasReadError, hasError: hasReadError,
           databases_scanned: totalScanned, databases_discovered: totalDiscovered,
+          generations_scanned: generationsScanned, skipped_large_records: skippedLargeRecords,
           failed_databases_count: failedDatabasesCount, database_diagnostics: diagnostics, last_attempt_at: Math.floor(Date.now() / 1000),
           pricing_warnings: reusedWarnings, pricing_warning_codes: buildPricingWarningCodes(reusedWarnings) };
         existingSnapshot.expires = Date.now() + 600000;
@@ -1396,7 +1402,7 @@ export class UsageStatsManager {
       this.snapshots.set(id, { summary: result, ledger: previous?.ledger ?? aggregated.ledger_snapshot, events: [], prices: {}, rawPricing,
         expires: Date.now() + 600000, pins: previous?.pins ?? 0 });
       const ledgerVersion = JSON.stringify([aggregated.ledger_snapshot.revision, aggregated.ledger_snapshot.rateRevision]);
-      this.lastAggregationKeysByAccount.set(accKey, JSON.stringify([ledgerVersion, this.calendarKey(), rawPricing, accountId ?? 'all', this.knownAccounts]));
+      this.lastAggregationKeysByAccount.set(accKey, JSON.stringify([ledgerVersion, this.calendarKey(), rawPricing, accountId ?? 'all', this.knownAccounts, skippedLargeRecords]));
       this.cachedSummariesByAccount.set(accKey, { data: result, expiresAt: Date.now() + (failedDatabasesCount > 0 ? 2000 : 30000) });
       this.periodKey = this.calendarKey();
       this.clearLedgerEventsMap();
@@ -1479,7 +1485,7 @@ export class UsageStatsManager {
     const pricing = this.resolvePricingTableFromRaw(rawPricing, now);
     const calKey = this.calendarKey();
     const aggKey = allCacheHits && failedDatabasesCount === 0
-      ? `${accKey}|${calKey}|${this.lastDiscoveredDatabaseCount}|${dbPaths.map(p => { const c = this.fileCache.get(p); return c ? `${p}:${c.mtimeMs}:${c.size}:${c.walMtimeMs}:${c.walSize}:${c.hasError ? 1 : 0}` : p; }).join(';')}|arch:${archivedStampParts.join(';')}|${JSON.stringify(rawPricing)}|${this.pricingWarnings.join(',')}`
+      ? `${accKey}|${calKey}|${this.lastDiscoveredDatabaseCount}|${dbPaths.map(p => { const c = this.fileCache.get(p); return c ? `${p}:${c.mtimeMs}:${c.size}:${c.walMtimeMs}:${c.walSize}:${c.hasError ? 1 : 0}:${c.skippedLargeRecords}:${c.projectionVersion ?? 0}` : p; }).join(';')}|arch:${archivedStampParts.join(';')}|${JSON.stringify(rawPricing)}|${this.pricingWarnings.join(',')}`
       : '';
     const cachedByAccEntry = this.cachedSummariesByAccount.get(accKey);
     if (aggKey && aggKey === this.lastAggregationKeysByAccount.get(accKey) && cachedByAccEntry?.data && this.periodKey === calKey) {

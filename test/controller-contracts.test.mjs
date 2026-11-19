@@ -7,9 +7,16 @@ import { join } from "node:path";
 import { BundleCache } from "../dist/bundle-cache.js";
 import { Controller } from "../dist/controller.js";
 import { dictionaryFromEntries } from "../dist/dictionary.js";
-import { spawn } from "node:child_process";
+import { isApplicationRunning } from "../dist/discovery.js";
+import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
+import { createHash } from "node:crypto";
+import { createServer as createHttpServer } from "node:http";
+import { createServer as createHttpsServer } from "node:https";
 import { createConnection } from "node:net";
+import { promisify } from "node:util";
+
+const execFileAsync = promisify(execFile);
 
 // Fixture state and hooks are scoped to this group; child cases run serially.
 describeContractGroup("连接与控制 · evolution", { concurrency: false }, async () => {
@@ -86,4 +93,231 @@ test('P0-01/P1-31：Controller 状态与错误不含未解析 backend 前缀，�
     await c.stop();
   }
 });
+});
+
+function encodeWsTextFrame(text) {
+  const payload = Buffer.from(text, 'utf8');
+  if (payload.length < 126) {
+    return Buffer.concat([Buffer.from([0x81, payload.length]), payload]);
+  }
+  const header = Buffer.alloc(4);
+  header[0] = 0x81;
+  header[1] = 126;
+  header.writeUInt16BE(payload.length, 2);
+  return Buffer.concat([header, payload]);
+}
+
+function createMockCdpBrowserServer(pageUrl, dictVersion) {
+  const receivedMethods = [];
+  const sockets = new Set();
+  const bootedPages = new Set();
+  const server = createHttpServer((req, res) => {
+    const addr = server.address();
+    const port = typeof addr === 'object' && addr ? addr.port : 0;
+    if (req.url === '/json/version') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/browser/mock` }));
+      return;
+    }
+    if (req.url === '/json/list') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify([
+        {
+          id: 'page-1',
+          type: 'page',
+          url: pageUrl,
+          webSocketDebuggerUrl: `ws://127.0.0.1:${port}/devtools/page/page-1`,
+        },
+      ]));
+      return;
+    }
+    res.writeHead(404);
+    res.end();
+  });
+  server.on('upgrade', (req, socket) => {
+    const key = req.headers['sec-websocket-key'];
+    if (!key) { socket.destroy(); return; }
+    const accept = createHash('sha1').update(`${key}258EAFA5-E914-47DA-95CA-C5AB0DC85B11`).digest('base64');
+    socket.write(
+      `HTTP/1.1 101 Switching Protocols\r\nUpgrade: websocket\r\nConnection: Upgrade\r\nSec-WebSocket-Accept: ${accept}\r\n\r\n`
+    );
+    sockets.add(socket);
+    const targetUrl = req.url || '';
+    let buf = Buffer.alloc(0);
+    socket.on('data', (chunk) => {
+      buf = Buffer.concat([buf, chunk]);
+      while (buf.length >= 2) {
+        const opcode = buf[0] & 0x0f;
+        const masked = (buf[1] & 0x80) !== 0;
+        let len = buf[1] & 0x7f;
+        let offset = 2;
+        if (len === 126) {
+          if (buf.length < 4) break;
+          len = buf.readUInt16BE(2);
+          offset = 4;
+        } else if (len === 127) {
+          if (buf.length < 10) break;
+          len = Number(buf.readBigUInt64BE(2));
+          offset = 10;
+        }
+        const maskOffset = offset;
+        if (masked) offset += 4;
+        if (buf.length < offset + len) break;
+        const payload = Buffer.from(buf.subarray(offset, offset + len));
+        if (masked) {
+          const mask = buf.subarray(maskOffset, maskOffset + 4);
+          for (let i = 0; i < payload.length; i++) payload[i] ^= mask[i % 4];
+        }
+        buf = buf.subarray(offset + len);
+        if (opcode === 0x8) { socket.end(); break; }
+        if (opcode === 0x1) {
+          const msg = JSON.parse(payload.toString('utf8'));
+          if (msg?.method) receivedMethods.push(msg.method);
+          if (typeof msg?.id === 'number') {
+            let result = {};
+            if (msg.method === 'Page.getFrameTree') {
+              result = { frameTree: { frame: { id: 'f1', url: pageUrl } } };
+            } else if (msg.method === 'Page.createIsolatedWorld') {
+              result = { executionContextId: 1 };
+            } else if (msg.method === 'Page.addScriptToEvaluateOnNewDocument') {
+              result = { identifier: 'reg-1' };
+            } else if (msg.method === 'Runtime.evaluate') {
+              const expr = String(msg.params?.expression || '');
+              if (expr.includes('globalThis.__GRAVITYBOX_BOOT__=')) {
+                bootedPages.add(targetUrl);
+                result = { result: { type: 'undefined' } };
+              } else if (expr.includes('document.querySelector')) {
+                result = { result: { type: 'boolean', value: true } };
+              } else if (expr === 'globalThis.__GRAVITYBOX_ENGINE_V1__?.state()') {
+                result = bootedPages.has(targetUrl)
+                  ? { result: { type: 'object', value: { active: true, version: dictVersion, languageMode: 'zh', runtimeId: 'mock' } } }
+                  : { result: { type: 'undefined' } };
+              } else {
+                result = { result: { type: 'undefined' } };
+              }
+            }
+            socket.write(encodeWsTextFrame(JSON.stringify({ id: msg.id, result })));
+          }
+        }
+      }
+    });
+    socket.on('close', () => sockets.delete(socket));
+  });
+  return {
+    server,
+    receivedMethods,
+    async close() {
+      for (const s of sockets) s.destroy();
+      await new Promise((resolve) => server.close(() => resolve()));
+    },
+  };
+}
+
+describeContractGroup("连接与控制 · debug-port-missing", { concurrency: false }, async () => {
+  test('isApplicationRunning 拒绝对 Insiders 与无效路径返回 true', async () => {
+    assert.equal(await isApplicationRunning(''), false);
+    assert.equal(await isApplicationRunning('/Applications/Antigravity - Insiders.app'), false);
+    assert.equal(await isApplicationRunning('/tmp/gravitybox-nonexistent-antigravity.app'), false);
+  });
+
+  test('未运行时保持 waiting；已运行但无 DevToolsActivePort 时切到 debug-port-missing 并支持中英文与恢复连接', async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), 'gb-debug-port-'));
+    const keyPath = join(profileDir, 'mock-key.pem');
+    const certPath = join(profileDir, 'mock-cert.pem');
+    await execFileAsync('/usr/bin/openssl', [
+      'req', '-x509', '-newkey', 'rsa:2048', '-nodes',
+      '-keyout', keyPath, '-out', certPath, '-days', '1', '-subj', '/CN=127.0.0.1',
+    ]);
+    const [key, cert] = await Promise.all([readFile(keyPath), readFile(certPath)]);
+    const httpsServer = createHttpsServer({ key, cert }, (req, res) => {
+      if (req.url === '/main.js') {
+        res.writeHead(200, { 'Content-Type': 'application/javascript' });
+        res.end('console.log("Settings");');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/html' });
+      res.end('<!doctype html><html><body></body></html>');
+    });
+    await new Promise((resolve) => httpsServer.listen(0, '127.0.0.1', resolve));
+    const httpsPort = httpsServer.address().port;
+    const pageUrl = `https://127.0.0.1:${httpsPort}/`;
+
+    const dictionary = dictionaryFromEntries({ Settings: '设置' });
+    const mockServer = createMockCdpBrowserServer(pageUrl, dictionary.version);
+    await new Promise((resolve) => mockServer.server.listen(0, '127.0.0.1', resolve));
+    const port = mockServer.server.address().port;
+
+    let appRunning = false;
+    let endpoint = undefined;
+    let ctrl;
+    try {
+      ctrl = new Controller({
+        appPath: '/Applications/Antigravity.app',
+        profile: profileDir,
+        dictionary,
+        hudEnabled: true,
+        locale: 'zh-Hans',
+        configuredLanguage: 'zh-Hans',
+        isAppRunning: async () => appRunning,
+        discoverEndpoint: async () => endpoint,
+        inspectAppBundle: async () => ({ version: '2.33.0', legacyPatch: false }),
+        verifyPage: async () => true,
+        onStatus: () => {},
+      });
+
+      // 1) 未运行时保持 waiting
+      await ctrl.start();
+      assert.equal(ctrl.status.mode, 'waiting');
+      assert.equal(ctrl.status.message, '等待 Antigravity 打开');
+
+      // 2) 已运行但无 DevToolsActivePort 时进入 debug-port-missing（中文）
+      appRunning = true;
+      await ctrl.resume();
+      assert.equal(ctrl.status.mode, 'debug-port-missing');
+      assert.equal(ctrl.status.appVersion, '2.33.0');
+      assert.equal(
+        ctrl.status.message,
+        '检测到 Antigravity 已在运行但未开启调试端口（2.33.0 起默认关闭），请安全重启以恢复汉化与 HUD'
+      );
+
+      // 3) 切换英文/暂停汉化（保留 HUD）时维持 debug-port-missing 并切换英文提示
+      await ctrl.setLocale('en', 'en', { hasTargetDictionary: false });
+      assert.equal(ctrl.status.mode, 'debug-port-missing');
+      assert.equal(
+        ctrl.status.message,
+        'Antigravity is running without a debug port (opt-in since 2.33.0). Safe-relaunch via GravityBox to restore localization & HUD'
+      );
+
+      // 4) 切换回中文并验证 pause() 不覆盖 debug-port-missing
+      await ctrl.setLocale('zh-Hans', 'zh-Hans', { hasTargetDictionary: true });
+      assert.equal(ctrl.status.mode, 'debug-port-missing');
+      assert.match(ctrl.status.message, /未开启调试端口/);
+      await ctrl.pause();
+      assert.equal(ctrl.status.mode, 'debug-port-missing');
+      await ctrl.resume();
+      assert.equal(ctrl.status.mode, 'debug-port-missing');
+
+      // 5) 模拟安全重启后写入 DevToolsActivePort 并提供真实 CDP 端点，验证自动恢复连接
+      endpoint = {
+        port,
+        pid: process.pid,
+        browserURL: `ws://127.0.0.1:${port}/devtools/browser/mock`,
+        appVersion: '2.33.0',
+        legacyPatch: false,
+      };
+      await writeFile(join(profileDir, 'DevToolsActivePort'), `${port}\n/devtools/browser/mock\n`);
+      for (let i = 0; i < 100; i++) {
+        if (mockServer.receivedMethods.includes('Target.setDiscoverTargets') && ctrl.status.windows === 1) break;
+        await new Promise((r) => setTimeout(r, 30));
+      }
+      assert.equal(mockServer.receivedMethods.includes('Target.setDiscoverTargets'), true);
+      assert.equal(ctrl.status.windows, 1);
+      assert.equal(['connected', 'adaptive'].includes(ctrl.status.mode), true);
+    } finally {
+      await ctrl?.stop();
+      await mockServer.close();
+      await new Promise((resolve) => httpsServer.close(() => resolve()));
+      await rm(profileDir, { recursive: true, force: true });
+    }
+  });
 });

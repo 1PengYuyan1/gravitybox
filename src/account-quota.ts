@@ -437,13 +437,17 @@ export function accountErrorCode(error: unknown): AccountErrorCode | null {
 
 const AUTH_REQUIRED_CODES = new Set<AccountErrorCode>(['refresh_failed', 'missing_refresh_token', 'token_invalid']);
 
+const MISSING_OAUTH_CLIENT_PATTERN = /^(?:Google OAuth credentials are not configured, so standby accounts cannot refresh tokens in the background \(optional credentials can be set in \.env\)|未配置 Google OAuth 凭据，备用账号无法后台刷新 Token（可在 \.env 中配置可选凭据）|Credentials expired without background auto-refresh; switch to this account or re-save the current account to refresh quota|登录凭据已过期（未配置后台自动续期），请切换至此账号或重新「保存当前账号」刷新配额)$/;
+
 export function accountCredentialReadiness(account: Account, now = Date.now() / 1000): { state: 'ready' | 'needs_refresh' | 'needs_authorization'; message: string } {
   const rawError = account.quota_refresh_error ?? '';
   const errorCode = account.quota_refresh_error_code ?? null;
   // Keep official HTTP 403 / #3501 license checks in 'ready' unless explicit auth failure also occurred.
   const isHttp403Only = /HTTP\s*403|\b3501\b/i.test(rawError) && !/invalid_grant|HTTP\s*401/i.test(rawError);
+  // Missing local OAuth client config only blocks background auto-refresh; switching or re-saving still works.
+  const isMissingOAuthClient = errorCode === 'missing_oauth_client' || MISSING_OAUTH_CLIENT_PATTERN.test(rawError.trim());
   if ((errorCode && AUTH_REQUIRED_CODES.has(errorCode))
-    || (!isHttp403Only && /invalid_grant|授权.*(?:失效|过期)|重新(?:登录|授权|获取)|请重新添加|登录凭据(?:无法刷新|无效|已失效)|缺少登录凭据|re-?authoriz|sign in again|expired|HTTP\s*401|Unable to refresh login credentials|missing login credentials|please add this account again/i.test(rawError))) {
+    || (!isHttp403Only && !isMissingOAuthClient && /invalid_grant|授权.*(?:失效|过期)|重新(?:登录|授权|获取)|请重新添加|登录凭据(?:无法刷新|无效|已失效)|缺少登录凭据|re-?authoriz|sign in again|expired|HTTP\s*401|Unable to refresh login credentials|missing login credentials|please add this account again/i.test(rawError))) {
     return { state: 'needs_authorization', message: bt('account_quota.readiness.needs_auth') };
   }
   if (!account.token?.access_token || account.token.access_token === 'pending_refresh' || !Number.isFinite(account.token.expiry_timestamp) || account.token.expiry_timestamp <= now + 30) {
@@ -461,7 +465,7 @@ const STORED_QUOTA_ERROR_PATTERNS: Array<[RegExp, string]> = [
   [/^HTTP 403\s*(?:\(Official product license verification failed, error 3501; check this account in the official app\)|（官方产品许可校验未通过，错误码 3501；请在官方应用核对该账号状态）)$/, 'account_cloud.err.http_3501'],
   [/^(?:Project context returned no verifiable quota|项目上下文未返回可验证配额)$/, 'account_cloud.err.project_no_verifiable_quota'],
   [/^(?:This account is missing login credentials; please add it again|此账号缺少登录凭据，请重新添加)$/, 'account_cloud.err.missing_refresh_token'],
-  [/^(?:Google OAuth credentials are not configured, so standby accounts cannot refresh tokens in the background \(optional credentials can be set in \.env\)|未配置 Google OAuth 凭据，备用账号无法后台刷新 Token（可在 \.env 中配置可选凭据）)$/, 'account_cloud.err.missing_oauth_client'],
+  [MISSING_OAUTH_CLIENT_PATTERN, 'account_cloud.err.missing_oauth_client'],
   [/^(?:Unable to refresh login credentials; please add this account again|登录凭据无法刷新，请重新添加此账号)$/, 'account_cloud.err.refresh_failed'],
   [/^(?:Sign-in service did not return valid credentials|登录服务未返回有效凭据)$/, 'account_cloud.err.no_access_token'],
   [/^(?:Unable to reach the sign-in service; check your network and try again|无法连接登录服务，请检查网络后重试)$/, 'account_cloud.err.network'],

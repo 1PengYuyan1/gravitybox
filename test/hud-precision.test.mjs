@@ -1910,4 +1910,204 @@ test('Orchestrator 吸收同名独立模型阶段及单物理模型跨角色合�
   assert.equal(singlePhysMerged.context.activeModelCompactionCount, 1);
 });
 
+test('Swarm 1 Working + 2 Standing by (swarm_wait / WAITING) + Needs you 仅计 1 个运行中子智能体，且 0 Working / 2 Concurrent / WAITING(9) 耗时均准确', async (t) => {
+  const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-hud-swarm-wait-'));
+  t.after(() => fs.rmSync(baseDir, { recursive: true, force: true }));
+  const convDir = path.join(baseDir, 'conversations');
+  fs.mkdirSync(convDir, { recursive: true });
+
+  const mainId = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+  const workingId = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
+  const standbyWaitId = 'cccccccc-3333-4333-8333-cccccccccccc';
+  const standbyToolId = 'dddddddd-4444-4444-8444-dddddddddddd';
+
+  const createConvDb = (id, parentId = null) => {
+    const db = new DatabaseSync(path.join(convDir, `${id}.db`));
+    t.after(() => {
+      try { db.close(); } catch {}
+    });
+    db.exec(`
+      PRAGMA journal_mode = WAL;
+      CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER NOT NULL, status INTEGER NOT NULL, metadata BLOB, render_info BLOB, step_payload BLOB);
+      CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER NOT NULL DEFAULT 0);
+      CREATE TABLE trajectory_meta (trajectory_id TEXT PRIMARY KEY, cascade_id TEXT, trajectory_type INTEGER);
+      CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB);
+    `);
+    db.prepare('INSERT INTO trajectory_meta VALUES (?, ?, 0)').run(id, id);
+    if (parentId) {
+      db.prepare('INSERT INTO trajectory_metadata_blob VALUES (?, ?)').run('main', parentMetadata(parentId, mainId));
+    }
+    return db;
+  };
+
+  const summariesDb = new DatabaseSync(path.join(baseDir, 'conversation_summaries.db'));
+  t.after(() => {
+    try { summariesDb.close(); } catch {}
+  });
+  summariesDb.exec(`
+    PRAGMA journal_mode = WAL;
+    CREATE TABLE conversation_parents (child_id TEXT PRIMARY KEY, parent_id TEXT NOT NULL);
+    CREATE TABLE conversation_summaries (id TEXT PRIMARY KEY, status TEXT, updated_at INTEGER);
+  `);
+  const insertParent = summariesDb.prepare('INSERT INTO conversation_parents (child_id, parent_id) VALUES (?, ?)');
+  const upsertSummary = summariesDb.prepare(
+    'INSERT INTO conversation_summaries (id, status, updated_at) VALUES (?, ?, ?) ON CONFLICT(id) DO UPDATE SET status=excluded.status, updated_at=excluded.updated_at'
+  );
+  for (const cid of [workingId, standbyWaitId, standbyToolId]) {
+    insertParent.run(cid, mainId);
+  }
+  upsertSummary.run(workingId, 'CASCADE_RUN_STATUS_RUNNING', 1000);
+  upsertSummary.run(standbyWaitId, 'CASCADE_RUN_STATUS_RUNNING', 1000);
+  upsertSummary.run(standbyToolId, 'CASCADE_RUN_STATUS_STANDING_BY', 1000);
+
+  const mainDb = createConvDb(mainId);
+  const workingDb = createConvDb(workingId, mainId);
+  const standbyWaitDb = createConvDb(standbyWaitId, mainId);
+  const standbyToolDb = createConvDb(standbyToolId, mainId);
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  mainDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (0, 14, 3, ?)').run(
+    Buffer.from(seconds(1, nowSec - 20))
+  );
+  // 主会话派发多个子智能体 + 最后停在 status=9 (Needs you)
+  invoke(mainDb, 1, [workingId, standbyWaitId, standbyToolId]);
+  mainDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (2, 21, 9, ?)').run(
+    Buffer.from([...seconds(1, nowSec - 10), ...message(4, string(2, 'ask_user_question'))])
+  );
+
+  // 先让 workingDb 和 standbyWaitDb 均处于 status=2 并发运行，验证真实 2 并发且预热 recentActiveChildUntilByDb
+  workingDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (0, 14, 3, ?)').run(
+    Buffer.from(seconds(1, nowSec - 15))
+  );
+  insertStep(workingDb, { idx: 1, status: 2, timing: false, value: usage({ outputTokens: 120 }) });
+
+  standbyWaitDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (0, 14, 3, ?)').run(
+    Buffer.from(seconds(1, nowSec - 15))
+  );
+  insertStep(standbyWaitDb, { idx: 1, status: 2, timing: false, value: usage({ outputTokens: 90 }) });
+
+  // standbyToolDb 尾部为 default_api:swarm_wait (status=3, 无 step_type=2)
+  standbyToolDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (0, 14, 3, ?)').run(
+    Buffer.from(seconds(1, nowSec - 15))
+  );
+  insertStep(standbyToolDb, { idx: 1, status: 3, value: usage({ outputTokens: 60 }) });
+  standbyToolDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (2, 21, 3, ?)').run(
+    Buffer.from([...seconds(1, nowSec - 5), ...message(4, string(2, 'default_api:swarm_wait'))])
+  );
+
+  const engine = new ConversationMetricsEngine({ conversationsDir: convDir });
+  const twoConcurrent = await engine.getConversationMetrics({
+    conversationId: mainId,
+    isStreaming: false,
+    isSubagentRunning: true,
+    runningSubagentCount: 1,
+  });
+  assert.equal(twoConcurrent.isSubagentRunning, true);
+  assert.equal(twoConcurrent.runningSubagentCount, 2, '2 个真实 status=2 并发子会话必须计为 2');
+
+  // 将 standbyWaitDb 转为 swarm_wait 挂起态 (status=2 且无 step_type=2)，即使刚刚还在 12s/15s 窗口内且兄弟 workingDb 仍在运行，也不得被拖成活跃
+  standbyWaitDb.prepare('UPDATE steps SET status = 3 WHERE idx = 1').run();
+  standbyWaitDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (2, 21, 2, ?)').run(
+    Buffer.from([...seconds(1, nowSec - 2), ...message(4, string(2, 'swarm_wait'))])
+  );
+  upsertSummary.run(standbyWaitId, 'CASCADE_RUN_STATUS_WAITING', nowSec);
+
+  const oneWorkingTwoStandby = await engine.getConversationMetrics({
+    conversationId: mainId,
+    isStreaming: false,
+    isSubagentRunning: true,
+    runningSubagentCount: 1,
+  });
+  assert.equal(oneWorkingTwoStandby.isSubagentRunning, true);
+  assert.equal(
+    oneWorkingTwoStandby.runningSubagentCount,
+    1,
+    '1 Working + 2 Standing by (swarm_wait 挂起且无 step_type=2) + Needs you 必须精确显示 1'
+  );
+
+  // 将最后一个 workingDb 也切为 WAITING(9)（模拟 0 Working + Standing by / Needs approval）
+  workingDb.prepare('UPDATE steps SET status = 3 WHERE idx = 1').run();
+  workingDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (2, 21, 9, ?)').run(
+    Buffer.from([...seconds(1, nowSec - 1), ...message(4, string(2, 'run_command'))])
+  );
+  upsertSummary.run(workingId, 'CASCADE_RUN_STATUS_WAITING', nowSec + 1);
+
+  const zeroWorking = await engine.getConversationMetrics({
+    conversationId: mainId,
+    isStreaming: false,
+    isSubagentRunning: false,
+    runningSubagentCount: 0,
+  });
+  assert.equal(zeroWorking.isSubagentRunning, false, '0 Working + 仅 Standing by / WAITING(9) 时 isSubagentRunning 必须为 false');
+  assert.equal(zeroWorking.runningSubagentCount, 0, '0 Working + 仅 Standing by / WAITING(9) 时 runningSubagentCount 必须为 0');
+
+  // 验证 buildConversationHudMetrics 排除 status=9 / swarm_wait 派发步计数，同时保持普通轮次耗时统计不受影响
+  const waitingDispatchOnly = buildConversationHudMetrics({
+    conversationId: 'conv-waiting-dispatch',
+    isStreaming: true,
+    allowDbActiveStepInference: true,
+    steps: [
+      { idx: 0, stepType: 14, status: 3, startTimeSeconds: nowSec - 12, endTimeSeconds: nowSec - 12 },
+      { idx: 1, stepType: 127, status: 9, toolCallName: 'invoke_subagent', isSubagentStep: true, startTimeSeconds: nowSec - 10 },
+      { idx: 2, stepType: 127, status: 2, toolCallName: 'swarm_wait', isSubagentStep: true, startTimeSeconds: nowSec - 6 },
+      { idx: 3, stepType: 21, status: 9, toolCallName: 'run_command', startTimeSeconds: nowSec - 4 },
+    ],
+  });
+  assert.equal(waitingDispatchOnly.runningSubagentCount, 0, 'WAITING(9) 派发步与 swarm_wait 不得计入 runningSubagentCount');
+  assert.equal(waitingDispatchOnly.isSubagentRunning, false);
+  assert.ok(waitingDispatchOnly.session.currentTurnDurationSeconds >= 10, 'WAITING(9) 仍参与普通轮次活跃耗时统计');
+
+  // P2-01 回归：子智能体同轮并发发出多个工具调用，其中靠后的工具进入 WAITING(9) 审批但前序工具仍处于 RUNNING(2) 时保持计为 1；前序完成后归 0
+  workingDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (3, 14, 3, ?)').run(
+    Buffer.from(seconds(1, nowSec + 2))
+  );
+  workingDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (4, 21, 2, ?)').run(
+    Buffer.from([...seconds(1, nowSec + 3), ...message(4, string(2, 'grep_search'))])
+  );
+  workingDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (5, 21, 9, ?)').run(
+    Buffer.from([...seconds(1, nowSec + 4), ...message(4, string(2, 'run_command'))])
+  );
+  const parallelRunPlusWait = await engine.getConversationMetrics({
+    conversationId: mainId,
+    isStreaming: false,
+    isSubagentRunning: false,
+    runningSubagentCount: 0,
+  });
+  assert.equal(parallelRunPlusWait.isSubagentRunning, true, '子智能体同轮前序并行工具仍在 RUNNING(2) 时不得因末步 WAITING(9) 提前判停');
+  assert.equal(parallelRunPlusWait.runningSubagentCount, 1);
+
+  workingDb.prepare('UPDATE steps SET status = 3 WHERE idx = 4').run();
+  const parallelSettledToWait = await engine.getConversationMetrics({
+    conversationId: mainId,
+    isStreaming: false,
+    isSubagentRunning: false,
+    runningSubagentCount: 0,
+  });
+  assert.equal(parallelSettledToWait.isSubagentRunning, false, '同轮并行工具完结且仅剩末步 WAITING(9) 后应立即归 0');
+  assert.equal(parallelSettledToWait.runningSubagentCount, 0);
+
+  // F-04 回归：同一轮内早先执行过已完结(status=3)的 swarm_wait 后被唤醒继续工作，在工具步间空隙（summary=RUNNING）不得被历史 swarm_wait 误杀
+  workingDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (6, 14, 3, ?)').run(
+    Buffer.from(seconds(1, nowSec + 5))
+  );
+  workingDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (7, 21, 3, ?)').run(
+    Buffer.from([...seconds(1, nowSec + 6), ...message(4, string(2, 'swarm_wait'))])
+  );
+  workingDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (8, 21, 3, ?)').run(
+    Buffer.from([...seconds(1, nowSec + 7), ...message(4, string(2, 'grep_search'))])
+  );
+  upsertSummary.run(workingId, 'CASCADE_RUN_STATUS_RUNNING', nowSec + 8);
+  const resumedAfterPriorSwarmWait = await engine.getConversationMetrics({
+    conversationId: mainId,
+    isStreaming: false,
+    isSubagentRunning: false,
+    runningSubagentCount: 0,
+  });
+  assert.equal(resumedAfterPriorSwarmWait.isSubagentRunning, true, '同轮历史已完结 swarm_wait 不得把已唤醒继续工作的 Worker 误判为已终结');
+  assert.equal(resumedAfterPriorSwarmWait.runningSubagentCount, 1);
+});
+
+
+
+
 

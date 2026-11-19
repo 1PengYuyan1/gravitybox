@@ -828,6 +828,162 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
       assert.equal(await text(cdp, '#terms-opt-body'), 'Customize your experience across the agent, plugins, and product from the settings and marketplace. We won\u2019t show you ads or let advertisers influence what Antigravity says.');
     } finally { cdp?.close(); if (target?.targetId) await browserCommand('Target.closeTarget', { targetId: target.targetId }).catch(error => { chromeErrors += '\nTarget cleanup: ' + error.message; }); }
   });
+  await check('1.1.2 补全：项目已存在多片段弹窗、创建项目重复提示行与含 SVG 图标的归档通知均可整句汉化并无损恢复', async () => {
+    let target, cdp;
+    try {
+      ({ target, cdp } = await openIsolatedPage('/'));
+      await cdp.evaluate(`(() => {
+        document.body.innerHTML = [
+          '<div role="dialog" aria-modal="true">',
+          '  <h2>Project already exists</h2>',
+          '  <div id="dup-single" class="text-foreground"></div>',
+          '  <div id="dup-multi" class="text-foreground"></div>',
+          '  <button>Back</button><button>Create New</button><button>Use Existing</button>',
+          '</div>',
+          '<div role="dialog" aria-modal="true">',
+          '  <h2>Create a Project</h2>',
+          '  <div id="create-dup" class="flex items-center gap-1 text-sm text-muted-foreground select-none"><svg width="13" height="13" aria-label="info"><circle cx="6" cy="6" r="5"></circle></svg><span id="create-dup-prefix">A</span><button id="create-dup-btn" type="button" onclick="window.__dupBtnClicks=(window.__dupBtnClicks||0)+1">project</button><span id="create-dup-suffix">with the same folder exists</span></div>',
+          '  <div id="create-dup-similar" class="flex items-center gap-1 text-sm text-muted-foreground select-none"><svg width="13" height="13" aria-label="info"><circle cx="6" cy="6" r="5"></circle></svg><span>A similar</span><button type="button">project</button><span>exists</span></div>',
+          '</div>',
+          '<div data-sonner-toast="true" role="status">',
+          '  <span id="toast-title">Conversation Archived</span>',
+          '  <p id="toast-archived">View archived in the sidebar (<svg id="toast-filter-svg" width="14" height="14" aria-label="filter"><path d="M1 2h12"></path></svg> menu).</p>',
+          '  <button>Undo</button>',
+          '</div>',
+          '<div data-testid="empty-state">',
+          '  <span id="empty-search">Search conversations with <svg width="14" height="14" aria-label="search"><circle cx="6" cy="6" r="4"></circle></svg> in the top left.</span>',
+          '  <span id="empty-archived">View archived in the sidebar <span class="whitespace-nowrap">(<svg width="14" height="14" aria-label="filter"><path d="M1 2h12"></path></svg> menu)</span>.</span>',
+          '</div>'
+        ].join('');
+        const single = document.querySelector('#dup-single');
+        const name1 = document.createElement('span');
+        name1.textContent = 'gravitybox1.1.1';
+        single.append(
+          document.createTextNode('Project '),
+          name1,
+          document.createTextNode(' already exists for this '),
+          document.createTextNode('folder'),
+          document.createTextNode('. Would you like to continue using it or make a new one?')
+        );
+        const multi = document.querySelector('#dup-multi');
+        const name2 = document.createElement('span');
+        name2.textContent = 'gravitybox-multi';
+        multi.append(
+          document.createTextNode('Project '),
+          name2,
+          document.createTextNode(' already exists for this '),
+          document.createTextNode('combination of folders'),
+          document.createTextNode('. Would you like to continue using it or make a new one?')
+        );
+      })()`);
+      const entries = JSON.parse(await readFile(join(root, 'dict/base.json'), 'utf8'));
+      const engine = await readFile(join(root, 'dist/engine.js'), 'utf8');
+      await cdp.evaluate('globalThis.__GRAVITYBOX_BOOT__=' + JSON.stringify({ origin, path: '/', dictionary: { schema: 1, version: 'v112-ui-fixes', entries } }) + ';' + engine);
+      await until(async () => (await text(cdp, '#dup-single')) === '此文件夹已存在项目 gravitybox1.1.1。您想继续使用它，还是新建一个？');
+      assert.equal(await text(cdp, '#dup-multi'), '此文件夹组合已存在项目 gravitybox-multi。您想继续使用它，还是新建一个？');
+      await until(async () => (await text(cdp, '#create-dup-prefix')) === '已存在使用相同文件夹的' && (await text(cdp, '#create-dup-btn')) === '项目');
+      assert.equal(await text(cdp, '#create-dup-suffix'), '');
+      await until(async () => (await text(cdp, '#create-dup-similar')) === '已存在类似的项目');
+      await cdp.evaluate('document.querySelector("#create-dup-btn").click()');
+      assert.equal(await cdp.evaluate('window.__dupBtnClicks'), 1);
+      await until(async () => (await text(cdp, '#toast-archived')) === '可在侧边栏（菜单）中查看已归档项。');
+      assert.equal(await cdp.evaluate('document.querySelector("#toast-filter-svg")?.tagName.toLowerCase()'), 'svg');
+      assert.equal(await cdp.evaluate('document.querySelector("#toast-filter-svg")?.getAttribute("aria-label")'), 'filter');
+      assert.equal(await text(cdp, '#empty-search'), '使用左上角的搜索对话。');
+      assert.equal(await text(cdp, '#empty-archived'), '可在侧边栏（菜单）中查看已归档项。');
+      /* P1-03：未命中词典的复合提示组保持完整英文（不把中间 <button>project</button> 孤立译成“项目”），并按整句模板采集；已翻译组变为未知句式时连带还原 <button> */
+      await cdp.evaluate(`document.querySelector('[role="dialog"] + [role="dialog"]').insertAdjacentHTML('beforeend', '<div id="create-dup-untranslated" class="flex items-center gap-1 text-sm"><svg width="13" height="13"><circle cx="6" cy="6" r="5"></circle></svg><span>A</span><button id="create-dup-untranslated-btn" type="button">project</button><span>is invalid</span></div>')`);
+      await cdp.evaluate('document.querySelector("#create-dup-untranslated").scrollIntoView({block:"center"})');
+      const compCollected = await until(async () => {
+        const list = await collectUntranslatedFull(cdp);
+        if (list.some(item => item.key === 'A {0} is invalid')) return list;
+      }, 8000, 'compositePromptGroup whole-sentence collection');
+      assert.equal(await text(cdp, '#create-dup-untranslated-btn'), 'project', '整句未命中时中间按钮不得被孤立翻译为“项目”');
+      assert.equal(compCollected.some(item => item.key === 'is invalid'), false, '复合提示组不得拆碎采集局部 span');
+      await cdp.evaluate('document.querySelector("#create-dup-suffix").firstChild.nodeValue = "has an invalid location"');
+      await until(async () => (await text(cdp, '#create-dup-prefix')) === 'A' && (await text(cdp, '#create-dup-btn')) === 'project');
+      assert.equal(await text(cdp, '#create-dup-suffix'), 'has an invalid location');
+      assert.equal(await cdp.evaluate('!!document.querySelector("#create-dup").dataset.gravityboxLoc'), false);
+      /* F-01 / F-05 回归：单侧 span+button 普通行不被 compositePromptGroup 吞掉；带前置 SVG 装饰图标的按钮正常汉化且不污染 collectUntranslated */
+      await cdp.evaluate(`document.body.insertAdjacentHTML('beforeend', [
+        '<div role="region">',
+        '  <div id="single-side-row" class="flex items-center justify-between"><svg width="13" height="13"><circle cx="6" cy="6" r="5"></circle></svg><span id="single-side-lbl">Theme</span><button id="single-side-btn" type="button">Reset</button></div>',
+        '  <button id="svg-btn-abbr" type="button"><svg width="13" height="13"><circle cx="6" cy="6" r="5"></circle></svg> Add MCP Server</button>',
+        '  <button id="svg-btn-new" type="button"><svg width="13" height="13"><circle cx="6" cy="6" r="5"></circle></svg> BrandNewSvgAction</button>',
+        '</div>'
+      ].join(''))`);
+      await until(async () => (await text(cdp, '#single-side-lbl')) === '主题' && (await text(cdp, '#single-side-btn')) === '重置');
+      await until(async () => (await text(cdp, '#svg-btn-abbr')).includes('添加 MCP 服务器'));
+      const svgCollected = await collectUntranslatedFull(cdp);
+      assert.equal(svgCollected.some(item => item.key.includes('{0} Add MCP Server')), false, '已翻译的带 SVG 图标按钮（含英文缩写）不得被误采为半翻译混合组');
+      assert.equal(svgCollected.some(item => item.key === 'BrandNewSvgAction'), true, '未翻译的带前置 SVG 图标按钮应按纯文本采集');
+      assert.equal(svgCollected.some(item => item.key === '{0} BrandNewSvgAction'), false, '前置装饰 SVG 不得污染按钮候选 key');
+      assert.equal(svgCollected.some(item => item.key === 'Theme {0}'), false, '单侧 span+button 普通行不得被采集为复合模板');
+      /* 动态变更回受支持的复数模板后再次原子成组汉化，并测试双语切换与卸载还原 */
+      await cdp.evaluate('document.querySelector("#create-dup-suffix").firstChild.nodeValue = "with the same folders exists"');
+      await until(async () => (await text(cdp, '#create-dup-prefix')) === '已存在使用相同文件夹的' && (await text(cdp, '#create-dup-btn')) === '项目' && (await text(cdp, '#create-dup-suffix')) === '');
+      await cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.toggleLanguage("en")');
+      assert.equal(await text(cdp, '#dup-single'), 'Project gravitybox1.1.1 already exists for this folder. Would you like to continue using it or make a new one?');
+      assert.equal(await text(cdp, '#create-dup-prefix'), 'A');
+      assert.equal(await text(cdp, '#create-dup-btn'), 'project');
+      assert.equal(await text(cdp, '#create-dup-suffix'), 'with the same folders exists');
+      assert.equal(await cdp.evaluate('!!document.querySelector("#create-dup").dataset.gravityboxLoc'), false);
+      assert.equal(await text(cdp, '#toast-archived'), 'View archived in the sidebar ( menu).');
+      await cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.toggleLanguage("zh")');
+      assert.equal(await text(cdp, '#toast-archived'), '可在侧边栏（菜单）中查看已归档项。');
+      await cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.dispose()');
+      assert.equal(await text(cdp, '#dup-single'), 'Project gravitybox1.1.1 already exists for this folder. Would you like to continue using it or make a new one?');
+      assert.equal(await text(cdp, '#create-dup-prefix'), 'A');
+      assert.equal(await text(cdp, '#toast-archived'), 'View archived in the sidebar ( menu).');
+    } finally { cdp?.close(); if (target?.targetId) await browserCommand('Target.closeTarget', { targetId: target.targetId }).catch(error => { chromeErrors += '\nTarget cleanup: ' + error.message; }); }
+  });
+  await check('2.33.0 新增动态模板规则（规划进度、Cookie/预览、扩展包、语音重试、对比度与异常路径提示）正确汉化与还原', async () => {
+    let target, cdp;
+    try {
+      ({ target, cdp } = await openIsolatedPage('/'));
+      const html = [
+        '<div role="region">',
+        '  <ol id="v233-plan" aria-label="Plan, 2 of 5 steps done"></ol>',
+        '  <span id="v233-step" data-testid="new-sidecar-summary">Step 2 of 4</span>',
+        '  <span id="v233-cookies">12 cookies</span>',
+        '  <button id="v233-del-cookie" aria-label="Delete cookies for example.com"></button>',
+        '  <button id="v233-add-bundle" aria-label="Add bundle StarterPack"></button>',
+        '  <button id="v233-adding-plugins" aria-label="Adding plugins from official-hub"></button>',
+        '  <span id="v233-retry-stt">Retrying transcription (attempt 2)\u2026</span>',
+        '  <div id="v233-preview-err">The preview did not respond on port 3000.</div>',
+        '  <p id="v233-looser">These plugins in StarterPack may have looser code review. Review their contents before adding the bundle.</p>',
+        '  <div role="tooltip" id="v233-contrast">Low contrast ratio (2.4:1). Text may be hard to read.</div>',
+        '  <button id="v233-filter" aria-label="Filter skills and rules: All"></button>',
+        '  <div role="alert" id="v233-file-err">Can\u2019t create this path \u2014 \u201creadme.md\u201d is a file, not a folder.</div>',
+        '  <span id="v233-ssh">You\'re signing in on devbox.example. Your sign-in stays on that machine.</span>',
+        '  <button id="v233-grants" aria-label="Permissions, 3 grants"></button>',
+        '  <div role="alert" id="v233-bad-folders">2 folders in this project could not be loaded because their locations are invalid.</div>',
+        '</div>'
+      ].join('');
+      await cdp.evaluate('document.body.innerHTML=' + JSON.stringify(html));
+      const entries = JSON.parse(await readFile(join(root, 'dict/base.json'), 'utf8'));
+      const engine = await readFile(join(root, 'dist/engine.js'), 'utf8');
+      await cdp.evaluate('globalThis.__GRAVITYBOX_BOOT__=' + JSON.stringify({ origin, path: '/', dictionary: { schema: 1, version: 'v233-templates', entries } }) + ';' + engine);
+      await until(async () => (await text(cdp, '#v233-step')) === '第 2 / 4 步');
+      assert.equal(await cdp.evaluate('document.querySelector("#v233-plan").getAttribute("aria-label")'), '规划进度：已完成 2 / 5 步');
+      assert.equal(await text(cdp, '#v233-cookies'), '12 个 Cookie');
+      assert.equal(await cdp.evaluate('document.querySelector("#v233-del-cookie").getAttribute("aria-label")'), '删除 example.com 的 Cookie');
+      assert.equal(await cdp.evaluate('document.querySelector("#v233-add-bundle").getAttribute("aria-label")'), '添加扩展包 StarterPack');
+      assert.equal(await cdp.evaluate('document.querySelector("#v233-adding-plugins").getAttribute("aria-label")'), '正在从 official-hub 添加插件');
+      assert.equal(await text(cdp, '#v233-retry-stt'), '正在重试语音转写（第 2 次尝试）…');
+      assert.equal(await text(cdp, '#v233-preview-err'), '端口 3000 上的预览未响应。');
+      assert.equal(await text(cdp, '#v233-looser'), 'StarterPack 中的这些插件可能代码审查较宽松。添加扩展包前请先检查其内容。');
+      assert.equal(await text(cdp, '#v233-contrast'), '对比度较低（2.4:1），文字可能不易辨认。');
+      assert.equal(await cdp.evaluate('document.querySelector("#v233-filter").getAttribute("aria-label")'), '筛选技能与规则：全部');
+      assert.equal(await text(cdp, '#v233-file-err'), '无法创建此路径 — “readme.md”是文件，而非文件夹。');
+      assert.equal(await text(cdp, '#v233-ssh'), '您正在 devbox.example 上登录。您的登录状态仅保留在该设备上。');
+      assert.equal(await cdp.evaluate('document.querySelector("#v233-grants").getAttribute("aria-label")'), '权限，3 项授权');
+      assert.equal(await text(cdp, '#v233-bad-folders'), '此项目中有 2 个文件夹因其位置无效而无法加载。');
+      await cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.dispose()');
+      assert.equal(await text(cdp, '#v233-step'), 'Step 2 of 4');
+      assert.equal(await cdp.evaluate('document.querySelector("#v233-plan").getAttribute("aria-label")'), 'Plan, 2 of 5 steps done');
+    } finally { cdp?.close(); if (target?.targetId) await browserCommand('Target.closeTarget', { targetId: target.targetId }).catch(error => { chromeErrors += '\nTarget cleanup: ' + error.message; }); }
+  });
   await check('设置首帧、同词典刷新、热更新和退出动画保持译文，不跨帧回写英文', async () => {
     let target,cdp;
     try {

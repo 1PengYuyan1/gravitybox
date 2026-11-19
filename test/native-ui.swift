@@ -192,6 +192,89 @@ import Cocoa
             return
         }
         // 非交互测试模式将窗口锚定在离屏坐标且不激活前台，避免测试期间在桌面闪现并切换页面
+        func findViewById(_ root: NSView, _ id: String) -> NSView? {
+            if root.identifier?.rawValue == id { return root }
+            for sub in root.subviews {
+                if let found = findViewById(sub, id) { return found }
+            }
+            return nil
+        }
+        func findFirst<T: NSView>(_ root: NSView, as type: T.Type) -> T? {
+            if let match = root as? T { return match }
+            for sub in root.subviews {
+                if let found = findFirst(sub, as: type) { return found }
+            }
+            return nil
+        }
+        func findEnclosingBox(_ view: NSView) -> NSBox? {
+            var cur: NSView? = view.superview
+            while let v = cur {
+                if let box = v as? NSBox { return box }
+                cur = v.superview
+            }
+            return nil
+        }
+        func verifyOverviewHeaderGeometry(_ ov: DashboardPage, context: String) {
+            guard let header = findViewById(ov.view, "account-identity-header"),
+                  let actions = findViewById(ov.view, "account-actions") as? NSStackView,
+                  let heroCard = findEnclosingBox(header) else {
+                check(false, "\(context): missing overview account-identity-header / heroCard")
+                return
+            }
+            let expectedActionsW = actions.arrangedSubviews.filter { !$0.isHidden }.reduce(CGFloat(0)) { $0 + $1.intrinsicContentSize.width }
+                + CGFloat(max(0, actions.arrangedSubviews.filter { !$0.isHidden }.count - 1)) * actions.spacing
+            check(abs(actions.frame.width - expectedActionsW) <= 1.0, "\(context): overview heroActions must hug button width (got \(actions.frame.width), expected \(expectedActionsW))")
+            let btnRect = heroCard.convert(ov.refreshQuotaButton.bounds, from: ov.refreshQuotaButton)
+            let expectedRight = heroCard.bounds.width - 14
+            check(abs(btnRect.maxX - expectedRight) <= 1.0, "\(context): refreshQuotaButton must align to heroCard trailing edge (maxX=\(btnRect.maxX), expected=\(expectedRight))")
+            if !ov.tierBadge.isHidden {
+                let nameRect = header.convert(ov.activeAccountLabel.bounds, from: ov.activeAccountLabel)
+                let tierRect = header.convert(ov.tierBadge.bounds, from: ov.tierBadge)
+                let gap = tierRect.minX - nameRect.maxX
+                check(gap >= 4 && gap <= 10, "\(context): tierBadge must sit beside activeAccountLabel instead of stretching right (gap=\(gap))")
+            }
+            if let nameFont = ov.activeAccountLabel.font, !ov.activeAccountLabel.stringValue.isEmpty {
+                let neededNameW = ceil((ov.activeAccountLabel.stringValue as NSString).size(withAttributes: [.font: nameFont]).width)
+                check(ov.activeAccountLabel.bounds.width >= neededNameW - 0.5, "\(context): activeAccountLabel truncated (\(ov.activeAccountLabel.bounds.width) < \(neededNameW) for '\(ov.activeAccountLabel.stringValue)')")
+            }
+            if !ov.activeEmailLabel.isHidden, let emailFont = ov.activeEmailLabel.font, !ov.activeEmailLabel.stringValue.isEmpty {
+                let neededEmailW = ceil((ov.activeEmailLabel.stringValue as NSString).size(withAttributes: [.font: emailFont]).width)
+                check(ov.activeEmailLabel.bounds.width >= neededEmailW - 0.5, "\(context): activeEmailLabel truncated (\(ov.activeEmailLabel.bounds.width) < \(neededEmailW) for '\(ov.activeEmailLabel.stringValue)')")
+            }
+        }
+        func verifyAccountsCardsGeometry(_ page: AccountsPage, context: String) {
+            for (idx, boxView) in page.cardsStack.arrangedSubviews.enumerated() {
+                guard let cardBox = boxView as? NSBox,
+                      let header = findViewById(cardBox, "account-identity-header"),
+                      let actions = findViewById(cardBox, "account-actions") as? NSStackView else {
+                    continue
+                }
+                let visibleActions = actions.arrangedSubviews.filter { !$0.isHidden }
+                check(!visibleActions.isEmpty, "\(context) card[\(idx)]: actionStack must have visible actions")
+                let expectedActionsW = visibleActions.reduce(CGFloat(0)) { $0 + $1.intrinsicContentSize.width }
+                    + CGFloat(max(0, visibleActions.count - 1)) * actions.spacing
+                check(abs(actions.frame.width - expectedActionsW) <= 1.0, "\(context) card[\(idx)]: actionStack must hug visible buttons without absorbing empty space (got \(actions.frame.width), expected \(expectedActionsW))")
+                if let lastBtn = visibleActions.last {
+                    let btnRect = cardBox.convert(lastBtn.bounds, from: lastBtn)
+                    let expectedRight = cardBox.bounds.width - 16
+                    check(abs(btnRect.maxX - expectedRight) <= 1.0, "\(context) card[\(idx)]: trailing action must align to cardBox trailing edge (maxX=\(btnRect.maxX), expected=\(expectedRight))")
+                }
+                if let badge = findFirst(header, as: TierBadge.self), !badge.isHidden {
+                    func allLabels(_ v: NSView) -> [NSTextField] { (v as? NSTextField).map { [$0] } ?? v.subviews.flatMap { allLabels($0) } }
+                    if let nameLbl = allLabels(header).first(where: { $0.font?.pointSize ?? 0 >= 14.5 }) {
+                        let nameRect = header.convert(nameLbl.bounds, from: nameLbl)
+                        let badgeRect = header.convert(badge.bounds, from: badge)
+                        let gap = badgeRect.minX - nameRect.maxX
+                        check(gap >= 4 && gap <= 10, "\(context) card[\(idx)]: tierPill must stay beside name label (gap=\(gap))")
+                        if let font = nameLbl.font, !nameLbl.stringValue.isEmpty {
+                            let neededW = ceil((nameLbl.stringValue as NSString).size(withAttributes: [.font: font]).width)
+                            check(nameLbl.bounds.width >= neededW - 0.5, "\(context) card[\(idx)]: account name truncated (\(nameLbl.bounds.width) < \(neededW))")
+                        }
+                    }
+                }
+            }
+        }
+
         window.setFrameOrigin(NSPoint(x: -24000, y: -24000))
         var captures:[String] = []
         for (theme, appearance) in [("light",NSAppearance.Name.aqua),("dark",NSAppearance.Name.darkAqua)] {
@@ -209,6 +292,12 @@ import Cocoa
                             let rect = document.convert(card.bounds, from:card)
                             check(rect.minY >= scroll.contentView.bounds.minY-1 && rect.maxY <= scroll.contentView.bounds.maxY+1, "Minimum dashboard clips a metric card")
                         }
+                    }
+                    if page == 0, let ov = assistant.overview {
+                        verifyOverviewHeaderGeometry(ov, context: "\(theme)-\(Int(size.width))x\(Int(size.height))")
+                    }
+                    if page == 1, let acc = assistant.accountsPage {
+                        verifyAccountsCardsGeometry(acc, context: "\(theme)-\(Int(size.width))x\(Int(size.height))-expanded")
                     }
                     if page == 2 {
                         let usage = assistant.usagePage!
@@ -278,16 +367,91 @@ import Cocoa
             check(policy.candidate.currentEditor()?.alignment == .center, "Candidate editor changed number alignment")
             try capture(policy.window.contentView!,output.appendingPathComponent("\(theme)-policy-candidate-focused.png"))
             policy.cancel(); pump()
+            check(LiveStatus().oauthClientConfigured == false, "LiveStatus default oauthClientConfigured must be false")
+            check(LiveStatus(["mode": "adaptive"]).oauthClientConfigured == false, "LiveStatus missing oauthClientConfigured must default to false")
+            check(LiveStatus(["oauthClientConfigured": true]).oauthClientConfigured == true, "LiveStatus explicit oauthClientConfigured=true must parse")
+
+            func findLabels(_ v: NSView) -> [NSTextField] { (v as? NSTextField).map { [$0] } ?? v.subviews.flatMap { findLabels($0) } }
+            func verifyLabelNotTruncated(_ label: NSTextField, context: String) {
+                check(label.lineBreakMode != .byTruncatingMiddle, "\(context) must not middle-truncate")
+                if let cell = label.cell {
+                    let needed = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: label.bounds.width, height: .greatestFiniteMagnitude))
+                    check(label.bounds.height >= floor(needed.height) - 1, "\(context) height truncated (\(label.bounds.height) < \(needed.height))")
+                }
+            }
+
+            // 1) 单卡确认模式（方案 A：彻底移除 Google 授权登录 UI 入口，仅保留「保存当前账号」导入，无论 .env 是否配置后台续期凭据）
+            let prevStatusForAdd = assistant.statusValue
+            assistant.statusValue = LiveStatus(fixtureStatus)
+            check(assistant.statusValue.oauthClientConfigured == false, "Fixture default status must treat oauthClientConfigured as false")
             let addSheet = AddAccountSheet(app: assistant, saved: {})
             addSheet.show(in: window, onDismiss: {})
             addSheet.window.appearance = NSAppearance(named: appearance)
             addSheet.window.contentView?.layoutSubtreeIfNeeded(); pump()
-            func findLabels(_ v: NSView) -> [NSTextField] { (v as? NSTextField).map { [$0] } ?? v.subviews.flatMap { findLabels($0) } }
-            let addLabels = findLabels(addSheet.window.contentView!)
-            check(addLabels.contains { $0.stringValue == "导入当前 Antigravity 登录账号" && $0.lineBreakMode != .byTruncatingMiddle && $0.bounds.width >= 150 }, "AddAccountSheet current-account description must not middle-truncate")
-            check(addLabels.contains { $0.stringValue == "通过浏览器授权，凭据仅存本机" && $0.lineBreakMode != .byTruncatingMiddle && $0.bounds.width >= 140 }, "AddAccountSheet OAuth description must not middle-truncate")
-            try capture(addSheet.window.contentView!, output.appendingPathComponent("\(theme)-add-account.png"))
+            let singleContent = addSheet.window.contentView!
+            check(!allTextValues(singleContent).contains { $0.contains("Google 授权登录") || $0.contains("Sign in with Google") }, "AddAccountSheet must not render removed Google OAuth button")
+            check(addSheet.currentButton.isDescendant(of: singleContent) && addSheet.currentButton.isEnabled, "Single-card AddAccountSheet must present enabled currentButton")
+            check(addSheet.currentButton.bezelColor == Design.blue && addSheet.currentButton.keyEquivalent == "\r", "Single-card currentButton must be primary blue Return button")
+            check(addSheet.window.initialFirstResponder === addSheet.currentButton && addSheet.window.firstResponder === addSheet.currentButton, "Single-card focus must land on currentButton")
+            let cancelRect = addSheet.cancelButton.convert(addSheet.cancelButton.bounds, to: singleContent)
+            let currentRect = addSheet.currentButton.convert(addSheet.currentButton.bounds, to: singleContent)
+            check(abs(cancelRect.midY - currentRect.midY) < 2 && cancelRect.maxX < currentRect.minX, "Single-card footer must place Cancel left of Save Current Account")
+            let singleZhHeight = singleContent.frame.height
+            check(singleZhHeight > 150 && singleZhHeight < 265, "Single-card AddAccountSheet height must be compact below 294pt (got \(singleZhHeight))")
+            let singleLabels = findLabels(singleContent)
+            check(singleLabels.contains { $0.stringValue == "当前 Antigravity 账号" }, "Single-card AddAccountSheet must show current account card title")
+            if let subLbl = singleLabels.first(where: { $0.stringValue == "将导入当前 Antigravity 已登录的账号；如需添加多个账号，请先在 Antigravity 中切换登录后再导入。" }) {
+                check(subLbl.bounds.width >= 240, "Single-card subtitle width unexpectedly narrow (\(subLbl.bounds.width))")
+                verifyLabelNotTruncated(subLbl, context: "Single-card zh subtitle")
+            } else {
+                check(false, "Single-card AddAccountSheet missing zh subtitle")
+            }
+            check(singleLabels.contains { $0.stringValue == "alex@example.invalid" }, "Single-card AddAccountSheet must show copyable current email")
+            check(!allTextValues(singleContent).contains { $0.localizedCaseInsensitiveContains("Insiders") }, "Single-card AddAccountSheet must not mention Insiders")
+            try capture(singleContent, output.appendingPathComponent("\(theme)-add-account.png"))
+
+            // 展开 feedback 与 busy 状态：高度紧贴内容
+            addSheet.status.stringValue = "正在读取当前账号…"
+            addSheet.busy(true); pump()
+            check(!addSheet.currentButton.isEnabled, "Busy single-card must disable currentButton")
+            let singleBusyHeight = singleContent.frame.height
+            check(singleBusyHeight > singleZhHeight + 8 && singleBusyHeight < 294, "Expanded feedback height must hug content without 294/338 bloat (got \(singleBusyHeight))")
+            addSheet.status.stringValue = ""
+            addSheet.busy(false); pump()
+            check(addSheet.currentButton.isEnabled, "Clearing busy single-card must re-enable currentButton")
+            check(abs(singleContent.frame.height - singleZhHeight) <= 1, "Collapsing feedback must restore compact single-card height")
+
+            // 中英文热切换：文案更新且高度自适应不截断
+            L10n.shared.setLanguage("en", notify: true); pump()
+            addSheet.window.contentView?.layoutSubtreeIfNeeded()
+            let singleEnLabels = findLabels(singleContent)
+            check(singleEnLabels.contains { $0.stringValue == "Current Antigravity Account" }, "English hot-switch must update single-card title")
+            check(addSheet.currentButton.title == "Save Current Account" && addSheet.cancelButton.title == "Cancel", "English hot-switch must update footer buttons")
+            if let enSub = singleEnLabels.first(where: { $0.stringValue == "Import the account currently signed in to Antigravity. To add more accounts, switch accounts in Antigravity first and import again." }) {
+                verifyLabelNotTruncated(enSub, context: "Single-card en subtitle")
+            } else {
+                check(false, "English hot-switch missing single-card subtitle")
+            }
+            check(singleContent.frame.height < 294, "Single-card English sheet height must remain compact below 294pt (got \(singleContent.frame.height))")
+            L10n.shared.setLanguage("zh-Hans", notify: true); pump()
             addSheet.dismiss(); pump()
+
+            // 2) 即使配置了 .env 后台续期凭据（oauthClientConfigured == true），AddAccountSheet 仍保持单卡，且 mergeStatusSnapshot 保留该状态字段
+            var oauthStatusRaw = fixtureStatus
+            oauthStatusRaw["oauthClientConfigured"] = true
+            let withOAuthStatus = LiveStatus(oauthStatusRaw)
+            let mergedWithoutOAuthField = assistant.mergeStatusSnapshot(["mode": "connected"], previous: withOAuthStatus)
+            check(mergedWithoutOAuthField.oauthClientConfigured == true, "mergeStatusSnapshot must preserve oauthClientConfigured when omitted from partial status payloads")
+            assistant.statusValue = withOAuthStatus
+            let oauthSheet = AddAccountSheet(app: assistant, saved: {})
+            oauthSheet.show(in: window, onDismiss: {})
+            oauthSheet.window.appearance = NSAppearance(named: appearance)
+            oauthSheet.window.contentView?.layoutSubtreeIfNeeded(); pump()
+            let oauthContent = oauthSheet.window.contentView!
+            check(oauthSheet.currentButton.isDescendant(of: oauthContent) && oauthSheet.currentButton.bezelColor == Design.blue && oauthSheet.currentButton.keyEquivalent == "\r", "AddAccountSheet must stay single-card primary currentButton even when background OAuth refresh credentials exist")
+            check(!allTextValues(oauthContent).contains { $0.contains("Google 授权登录") || $0.contains("Sign in with Google") }, "AddAccountSheet must never show removed Google OAuth button")
+            oauthSheet.dismiss(); pump()
+            assistant.statusValue = prevStatusForAdd
             let logSheet = UsageLogController(app:assistant,period:"today")
             logSheet.show(in:window,onDismiss:{})
             logSheet.sheet.appearance = NSAppearance(named:appearance); pump()
@@ -1043,6 +1207,7 @@ import Cocoa
         check(!accPage.toggleCollapseAllButton.isHidden && accPage.toggleCollapseAllButton.title == "收起配额", "AccountsPage header must show 收起配额 button when cards are expanded")
         let expandedFirstCardHeight = accPage.cardsStack.arrangedSubviews.first?.bounds.height ?? 0
         check(expandedFirstCardHeight > 180, "Expanded account card height must include full quota bars (>180pt)")
+        verifyAccountsCardsGeometry(accPage, context: "accounts-all-expanded")
 
         accPage.toggleCollapseAllAccounts(); pump()
         window.contentView?.layoutSubtreeIfNeeded(); pump()
@@ -1053,6 +1218,7 @@ import Cocoa
         check(collapsedFirstCardHeight > 40 && collapsedFirstCardHeight < expandedFirstCardHeight - 100, "Collapsed account card height must shrink by >100pt (got \(collapsedFirstCardHeight) vs \(expandedFirstCardHeight))")
         let collapsedTexts = allTextValues(accPage.cardsStack)
         check(collapsedTexts.contains { $0.contains("Gemini 91%") && $0.contains("Claude/GPT 0%") }, "Collapsed account card must display inline quota summary")
+        verifyAccountsCardsGeometry(accPage, context: "accounts-all-collapsed")
         for (theme, appearance) in [("light", NSAppearance.Name.aqua), ("dark", NSAppearance.Name.darkAqua)] {
             window.appearance = NSAppearance(named: appearance)
             window.contentView?.layoutSubtreeIfNeeded(); pump()
@@ -1066,6 +1232,7 @@ import Cocoa
         window.contentView?.layoutSubtreeIfNeeded(); pump()
         check(!accPage.collapsedAccountIds.contains("a") && accPage.collapsedAccountIds.contains("b"), "Per-card collapse button must expand account a while keeping b collapsed")
         check(accPage.toggleCollapseAllButton.title == "收起配额", "When any card is expanded, header button must offer 收起配额")
+        verifyAccountsCardsGeometry(accPage, context: "accounts-mixed-collapsed")
 
         // Collapse all again, then expand all
         accPage.toggleCollapseAllAccounts(); pump()
@@ -1078,7 +1245,7 @@ import Cocoa
         check(stableAccounts.autoSwitchToggle.isEnabled && stableAccounts.configButton.isEnabled, "All account switch controls must remain enabled for stable Antigravity")
         check(!allTextValues(stableAccounts.view).contains { $0.localizedCaseInsensitiveContains("Insiders") }, "Accounts UI must not mention Insiders")
         let stableAdd = AddAccountSheet(app: assistant) {}
-        check(stableAdd.currentButton.isEnabled, "Save current account must remain enabled for stable Antigravity")
+        check(stableAdd.currentButton.isEnabled, "Save current account must remain enabled")
         stableAdd.busy(false)
         check(stableAdd.currentButton.isEnabled, "Leaving busy state must keep save current account enabled")
         check(!allTextValues(stableAdd.window.contentView!).contains { $0.localizedCaseInsensitiveContains("Insiders") }, "AddAccountSheet UI must not mention Insiders")
@@ -2112,6 +2279,7 @@ import Cocoa
                 ], isStaleFallback: false)
                 window.contentView?.layoutSubtreeIfNeeded(); pump()
                 window.contentView?.layoutSubtreeIfNeeded()
+                verifyOverviewHeaderGeometry(assistant.overview!, context: "1024x710-\(slug)")
                 tierMetricHeights[slug] = assistant.overview!.tokenMetricCard?.bounds.height ?? 0
                 tierModelCounts[slug] = assistant.overview!.bentoRightStack.arrangedSubviews.count
                 tierBadges[slug] = assistant.overview!.rightBentoCountBadge.title
@@ -2206,6 +2374,229 @@ import Cocoa
             } else {
                 check(false, "Expected Ultra MenuExpandableAccountCardView")
             }
+        }
+
+        // Verify debug-port-missing status, menu panel & overview safe relaunch guidance UI, and safeRelaunchAntigravityForDebug flow
+        do {
+            let debugStatus = LiveStatus(["mode": "debug-port-missing"])
+            check(debugStatus.title == "未开启调试端口", "LiveStatus debug-port-missing title must be 未开启调试端口 (got \(debugStatus.title))")
+            check(debugStatus.color == .systemOrange, "LiveStatus debug-port-missing color must be .systemOrange")
+            check(debugStatus.enabled == false, "LiveStatus debug-port-missing enabled must be false")
+
+            let prevStatus = assistant.statusValue
+            let prevReachable = assistant.reachable
+            assistant.reachable = true
+            assistant.statusValue = LiveStatus(["mode": "connected", "windows": 1, "entries": 4300])
+
+            let dbgMenu = MenuPanelController(app: assistant)
+            let dbgPanelHost = NSWindow(contentRect: NSRect(x: 0, y: 0, width: MenuPanelController.panelWidth, height: MenuPanelController.defaultPanelHeight), styleMask: [.titled], backing: .buffered, defer: false)
+            dbgPanelHost.contentViewController = dbgMenu
+            dbgMenu.loadViewIfNeeded()
+            dbgMenu.syncFromAssistant(); pump()
+            check(dbgMenu.debugPortBannerBox.isHidden == true && dbgMenu.safeRelaunchBtn.isHidden == true, "MenuPanel must hide debugPortBannerBox and safeRelaunchBtn when connected")
+            check(dbgMenu.openAntigravityBtn.isHidden == false && dbgMenu.openAntigravityBtn.title == "打开 Antigravity", "MenuPanel openAntigravityBtn must remain visible and intact when connected")
+
+            let dbgOverview = DashboardPage(app: assistant)
+            dbgOverview.view.frame = NSRect(x: 0, y: 0, width: 920, height: 700)
+            dbgOverview.update(); pump()
+            check(dbgOverview.debugPortBannerBox.isHidden == true && dbgOverview.safeRelaunchButton.isHidden == true, "DashboardPage must hide debugPortBannerBox and safeRelaunchButton when connected")
+
+            assistant.statusValue = LiveStatus(["mode": "debug-port-missing", "running": true])
+            dbgMenu.syncFromAssistant(); pump()
+            dbgPanelHost.setContentSize(dbgMenu.preferredContentSize)
+            dbgPanelHost.contentView?.layoutSubtreeIfNeeded(); pump()
+            check(dbgMenu.debugPortBannerBox.isHidden == false && dbgMenu.safeRelaunchBtn.isHidden == false, "MenuPanel must display debugPortBannerBox and safeRelaunchBtn in debug-port-missing mode")
+            check(dbgMenu.safeRelaunchBtn.title == "安全重启 Antigravity 以连接", "MenuPanel safeRelaunchBtn title must match requirement")
+            check(dbgMenu.safeRelaunchBtn.toolTip == nil, "MenuPanel safeRelaunchBtn must not set tooltip")
+            check(dbgMenu.openAntigravityBtn.isHidden == false && dbgMenu.openAntigravityBtn.title == "打开 Antigravity", "MenuPanel openAntigravityBtn must remain unaffected in debug-port-missing mode")
+            let dbgMenuTexts = allTextValues(dbgMenu.debugPortBannerBox)
+            check(dbgMenuTexts.contains("未开启调试端口") && dbgMenuTexts.contains(where: { $0.contains("未开启调试端口") }), "MenuPanel debug banner must present clear cause copy")
+
+            dbgOverview.update(); pump()
+            dbgOverview.view.layoutSubtreeIfNeeded(); pump()
+            check(dbgOverview.debugPortBannerBox.isHidden == false && dbgOverview.safeRelaunchButton.isHidden == false, "DashboardPage must display debugPortBannerBox and safeRelaunchButton in debug-port-missing mode")
+            check(dbgOverview.safeRelaunchButton.title == "安全重启 Antigravity 以连接", "DashboardPage safeRelaunchButton title must match requirement")
+            check(dbgOverview.safeRelaunchButton.toolTip == nil, "DashboardPage safeRelaunchButton must not set tooltip")
+            let dbgOverviewTexts = allTextValues(dbgOverview.debugPortBannerBox)
+            check(dbgOverviewTexts.contains("未开启调试端口") && dbgOverviewTexts.contains(where: { $0.contains("未开启调试端口") }), "DashboardPage debug banner must present clear cause copy")
+
+            check(Assistant.remoteDebuggingArguments == ["--remote-debugging-port=0"], "Cold launch and relaunch must inject --remote-debugging-port=0")
+
+            // Test safeRelaunchAntigravityForDebug confirmation cancel path, graceful exit + relaunch path, and timeout path
+            var simulatedRunning = true
+            var terminateCalls = 0
+            var alertTitleCaptured = ""
+            var alertBodyCaptured = ""
+            var alertButtonsCaptured: [String] = []
+            let opensBeforeSafeCancel = assistant.openedApplications
+            assistant.setSafeRelaunchTestingHooks(SafeRelaunchTestingHooks(
+                confirm: { alert, reply in
+                    alertTitleCaptured = alert.messageText
+                    alertBodyCaptured = alert.informativeText
+                    alertButtonsCaptured = alert.buttons.map(\.title)
+                    reply(false)
+                },
+                isRunning: { simulatedRunning },
+                terminate: { terminateCalls += 1 },
+                timeoutSeconds: 0.4,
+                pollIntervalMilliseconds: 20
+            ))
+            dbgMenu.safeRelaunchBtn.performClick(nil); pump()
+            check(alertTitleCaptured.contains("安全重启") && alertBodyCaptured.contains("未保存"), "Safe relaunch confirmation must remind user to save unsaved work")
+            check(alertButtonsCaptured == ["安全重启并连接", "取消"], "Safe relaunch confirmation buttons must be 安全重启并连接 and 取消 (got \(alertButtonsCaptured))")
+            check(terminateCalls == 0 && assistant.openedApplications == opensBeforeSafeCancel, "Cancelling safe relaunch must not terminate or reopen Antigravity")
+
+            let opensBeforeSafeConfirm = assistant.openedApplications
+            assistant.setSafeRelaunchTestingHooks(SafeRelaunchTestingHooks(
+                confirm: { _, reply in reply(true) },
+                isRunning: { simulatedRunning },
+                terminate: {
+                    terminateCalls += 1
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(40)) {
+                        simulatedRunning = false
+                    }
+                },
+                timeoutSeconds: 2.0,
+                pollIntervalMilliseconds: 20
+            ))
+            dbgOverview.safeRelaunchButton.performClick(nil)
+            waitUntil(description: "safeRelaunchAntigravityForDebug graceful exit and relaunch") {
+                assistant.openedApplications == opensBeforeSafeConfirm + 1
+            }
+            check(terminateCalls == 1 && assistant.openedApplications == opensBeforeSafeConfirm + 1, "Confirmed safe relaunch must terminate gracefully and reopen Antigravity with --remote-debugging-port=0")
+
+            // Timeout path: Antigravity stays running past timeout, must report manual quit guidance and never reopen or force-kill
+            var stuckRunning = true
+            let opensBeforeTimeout = assistant.openedApplications
+            assistant.showMessage("", error: false)
+            assistant.setSafeRelaunchTestingHooks(SafeRelaunchTestingHooks(
+                confirm: { _, reply in reply(true) },
+                isRunning: { stuckRunning },
+                terminate: { terminateCalls += 1 },
+                timeoutSeconds: 0.2,
+                pollIntervalMilliseconds: 20
+            ))
+            assistant.safeRelaunchAntigravityForDebug()
+            waitUntil(description: "safeRelaunchAntigravityForDebug timeout guidance") {
+                assistant.lastOperationError?.contains("手动退出") == true
+            }
+            stuckRunning = false
+            check(assistant.openedApplications == opensBeforeTimeout, "Safe relaunch timeout must not reopen Antigravity while still running")
+            assistant.showMessage("", error: false)
+
+            // P1-02: Wait for lingering Antigravity helper/language_server subprocesses before relaunching, and retry transient LaunchServices open failures
+            var mainAppAlive = true
+            var helperSubprocessAlive = true
+            var subprocPollsWhileMainExited = 0
+            var launchAttemptsSeen: [Int] = []
+            let opensBeforeSubprocDrain = assistant.openedApplications
+            assistant.setSafeRelaunchTestingHooks(SafeRelaunchTestingHooks(
+                confirm: { _, reply in reply(true) },
+                isRunning: { mainAppAlive },
+                hasSubprocesses: {
+                    if !mainAppAlive && helperSubprocessAlive {
+                        subprocPollsWhileMainExited += 1
+                        if subprocPollsWhileMainExited >= 2 {
+                            helperSubprocessAlive = false
+                        }
+                    }
+                    return helperSubprocessAlive
+                },
+                terminate: {
+                    mainAppAlive = false
+                },
+                relaunchAttempt: { attempt, done in
+                    launchAttemptsSeen.append(attempt)
+                    // Simulate transient LaunchServices rejection on attempt 1 while old job finishes tearing down
+                    done(attempt >= 2)
+                },
+                timeoutSeconds: 2.0,
+                pollIntervalMilliseconds: 15,
+                relaunchRetryDelayMilliseconds: 15
+            ))
+            assistant.safeRelaunchAntigravityForDebug()
+            check(assistant.openedApplications == opensBeforeSubprocDrain, "Safe relaunch must wait for lingering subprocesses before reopening")
+            waitUntil(description: "safeRelaunchAntigravityForDebug subprocess drain and retry relaunch") {
+                assistant.openedApplications == opensBeforeSubprocDrain + 1
+            }
+            check(subprocPollsWhileMainExited >= 2, "Safe relaunch must poll subprocess liveness after main app exits (polls=\(subprocPollsWhileMainExited))")
+            check(launchAttemptsSeen == [1, 2], "Safe relaunch must retry transient launch failure before succeeding (attempts=\(launchAttemptsSeen))")
+
+            // F-03: Exhausted safe relaunch failure must use safe-relaunch error copy (never misleading "Account switched")
+            assistant.showMessage("", error: false)
+            var failedAttempts = 0
+            assistant.setSafeRelaunchTestingHooks(SafeRelaunchTestingHooks(
+                confirm: { _, reply in reply(true) },
+                isRunning: { false },
+                hasSubprocesses: { false },
+                terminate: {},
+                relaunchAttempt: { _, done in
+                    failedAttempts += 1
+                    done(false)
+                },
+                timeoutSeconds: 1.0,
+                pollIntervalMilliseconds: 10,
+                relaunchRetryDelayMilliseconds: 10
+            ))
+            assistant.safeRelaunchAntigravityForDebug()
+            waitUntil(description: "safeRelaunchAntigravityForDebug exhausted failure message") {
+                assistant.lastOperationError?.contains("未能自动重新打开 Antigravity") == true
+            }
+            check(failedAttempts == 3, "Safe relaunch must try 3 times before reporting failure (got \(failedAttempts))")
+            check(!(assistant.lastOperationError?.contains("账号已切换") ?? false), "Safe relaunch failure must not claim account was switched: \(assistant.lastOperationError ?? "")")
+            assistant.showMessage("", error: false)
+            assistant.setSafeRelaunchTestingHooks(nil)
+
+            // P2-03: Switching global language while in debug-port-missing keeps debug-port-missing synchronously when HUD is enabled (no banner flash), and transitions to paused only when both translation and HUD are disabled
+            let dbgLangHost = Assistant(state: state.appendingPathComponent("dbg-lang-host"))
+            dbgLangHost.configuration = try ConfigurationStore(state: dbgLangHost.state)
+            dbgLangHost.bridge = BackendBridge(resources: state, state: dbgLangHost.state)
+            dbgLangHost.reachable = true
+            var dbgHudOn = true
+            var dbgCurrentLang = "zh-Hans"
+            dbgLangHost.bridge.fixtureReply = { payload in
+                let cmd = payload["command"] as? String ?? ""
+                if cmd == "language_set" {
+                    dbgCurrentLang = payload["language"] as? String ?? "zh-Hans"
+                }
+                if cmd == "language_set" || cmd == "status" {
+                    let resolved = dbgCurrentLang == "en" ? "en" : "zh-Hans"
+                    let nextMode = (resolved == "en" && !dbgHudOn) ? "paused" : "debug-port-missing"
+                    return ["ok": true, "status": ["mode": nextMode, "running": true, "hudEnabled": dbgHudOn, "configuredLanguage": dbgCurrentLang, "locale": resolved, "translationEnabled": resolved != "en"], "tasks": [], "taskRevision": 0]
+                }
+                return ["ok": true]
+            }
+            dbgLangHost.configuration.value.hudEnabled = true
+            dbgLangHost.statusValue = LiveStatus(["mode": "debug-port-missing", "running": true, "hudEnabled": true, "configuredLanguage": "zh-Hans", "locale": "zh-Hans", "translationEnabled": true])
+            dbgLangHost.setGlobalLanguage("en")
+            check(dbgLangHost.statusValue.mode == "debug-port-missing", "P2-03: setGlobalLanguage(en) with HUD enabled must preserve debug-port-missing synchronously without flashing paused")
+            pump()
+            check(dbgLangHost.statusValue.mode == "debug-port-missing", "P2-03: debug-port-missing must remain steady after language_set reply when HUD is enabled")
+
+            dbgHudOn = false
+            dbgLangHost.configuration.value.hudEnabled = false
+            dbgLangHost.statusValue = LiveStatus(["mode": "debug-port-missing", "running": true, "hudEnabled": false, "configuredLanguage": "zh-Hans", "locale": "zh-Hans", "translationEnabled": true])
+            dbgLangHost.setGlobalLanguage("en")
+            check(dbgLangHost.statusValue.mode == "paused", "P2-03: setGlobalLanguage(en) with HUD disabled must transition to paused")
+            pump()
+            _ = L10n.shared.setLanguage("zh-Hans", notify: true); pump()
+
+            // Connection restored -> banners hide
+            assistant.statusValue = LiveStatus(["mode": "connected", "windows": 1, "entries": 4300])
+            dbgMenu.syncFromAssistant(); pump()
+            dbgOverview.update(); pump()
+            check(dbgMenu.debugPortBannerBox.isHidden == true && dbgMenu.safeRelaunchBtn.isHidden == true, "MenuPanel safe relaunch banner must hide once connected")
+            check(dbgOverview.debugPortBannerBox.isHidden == true && dbgOverview.safeRelaunchButton.isHidden == true, "DashboardPage safe relaunch banner must hide once connected")
+
+            // English locale check for debug-port-missing
+            _ = L10n.shared.setLanguage("en", notify: false)
+            let enDebugStatus = LiveStatus(["mode": "debug-port-missing"])
+            check(enDebugStatus.title == "Debug Port Not Enabled", "English LiveStatus debug-port-missing title mismatch (got \(enDebugStatus.title))")
+            _ = L10n.shared.setLanguage("zh-Hans", notify: false)
+
+            assistant.statusValue = prevStatus
+            assistant.reachable = prevReachable
+            dbgPanelHost.orderOut(nil)
         }
 
         let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]

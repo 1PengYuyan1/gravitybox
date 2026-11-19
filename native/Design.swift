@@ -637,11 +637,17 @@ func identityHeader(identity: NSView, actions: NSView) -> NSView {
     identity.leadingAnchor.constraint(equalTo: container.leadingAnchor).isActive = true
     if let stack = actions as? NSStackView {
         stack.detachesHiddenViews = true
+        stack.setHuggingPriority(.required, for: .horizontal)
+        stack.setContentCompressionResistancePriority(.required, for: .horizontal)
         for sub in stack.arrangedSubviews {
             sub.setContentHuggingPriority(.required, for: .horizontal)
             sub.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
     }
+    if let idStack = identity as? NSStackView {
+        idStack.setHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+    }
+    identity.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
     actions.setContentHuggingPriority(.required, for: .horizontal)
     actions.setContentCompressionResistancePriority(.required, for: .horizontal)
     return container

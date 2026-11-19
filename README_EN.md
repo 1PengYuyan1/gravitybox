@@ -49,14 +49,14 @@
 
 If you use Google **Antigravity** daily on macOS, you've probably hit a few blind spots: hitting rate limits without knowing whether your **5-hour rolling window** or **weekly cap** ran out, having zero visibility into live token burn or context compaction, juggling multiple Google accounts manually, or watching disk caches balloon over time.
 
-**GravityBox** (latest `GravityBox v1.1.1`) is a lightweight, native macOS companion built to solve all of these **without modifying a single byte of `/Applications/Antigravity.app`**:
+**GravityBox** (latest `GravityBox v1.1.2`) is a lightweight, native macOS companion built to solve all of these **without modifying a single byte of `/Applications/Antigravity.app`**:
 
 | Everyday Pain Point | What GravityBox Does for You |
 | :--- | :--- |
 | **No live feedback on speed, token burn, cache savings, or context usage** | **In-IDE Telemetry HUD**: Mounts a sleek 3-capsule bar right below every chat input showing turns, speed, tokens, cache hit rate, and context fill—expanding upward on hover or click. |
 | **Confusing rate limits (mixing up 5-hour rolling windows vs. weekly caps)** | **True Dual-Window Quotas**: Separates **5-hour** and **Weekly** bars for Gemini, Claude/GPT, and standalone pools (like `Gemini 4 Argon`), with exact reset countdowns. |
 | **Tedious sign-out/sign-in loops across multiple accounts** | **Safe Multi-Account Manager**: Saves multiple accounts, recommends the best standby account when quota runs low, and switches atomically after Antigravity quits—with automatic rollback if anything fails. |
-| **Static language patches break official code signatures on every update** | **Zero-Patch Bilingual Adaptation**: Dynamically switches both GravityBox and Antigravity UI between **English** and **简体中文** (`2.23.0` ~ `2.32.2`) at runtime while leaving code, chats, and terminal output untouched. |
+| **Static language patches break official code signatures on every update** | **Zero-Patch Bilingual Adaptation**: Dynamically switches both GravityBox and Antigravity UI between **English** and **简体中文** (`2.23.0` ~ `2.33.0`) at runtime while leaving code, chats, and terminal output untouched. |
 | **Gigabytes of accumulated cache with fear of deleting chat history** | **Reversible Storage Trim**: Locks your credentials and conversations behind a strict allowlist, moves selected caches to **macOS Trash**, and lets you restore with one click. |
 
 ---
@@ -199,8 +199,7 @@ Hover over (or click to pin) any capsule to open its detailed breakdown card:
 
 ### 3. Accounts (`Accounts`) — Multi-Account Pool & Smart Switch
 - **Add Account…**:
-  - **Save Current Account** *(zero setup)*: One-click import of the account currently signed into Antigravity.
-  - **Sign in with Google…**: Browser OAuth flow to add standby accounts (requires optional custom OAuth credentials; see Installation section).
+  - **Save Current Account** *(zero setup)*: One-click import of the account currently signed in to Antigravity. To add and switch between multiple accounts, simply switch accounts in Antigravity first and import each one—no extra setup required.
 - **Collapse / Expand Quotas**: Condenses multi-account cards into compact single-line summary pills (e.g., `Gemini 91%`).
 - **Smart Switch (Toggle + `Configure…` button)**:
   Evaluates saved accounts and highlights a **`Recommended`** standby candidate when your current account runs low (**never force-kills Antigravity; switching always requires your confirmation**). Clicking **`Configure…`** exposes 4 rules:
@@ -334,7 +333,7 @@ Divides local disk usage into **Runtime Cache (Blue)**, **Background Logs (Orang
 ### System Requirements
 - **OS**: macOS 14 (Sonoma) or macOS 15+ (Sequoia)
 - **Architecture**: Apple Silicon (`arm64` — all Apple M-series chips)
-- **Target App**: Official release `/Applications/Antigravity.app` (verified across `2.23.0` ~ `2.32.2`; *Insiders channel is neither supported nor modified*)
+- **Target App**: Official release `/Applications/Antigravity.app` (verified across `2.23.0` ~ `2.33.0`; *Insiders channel is neither supported nor modified*)
 - **Runtime**: **Zero dependencies** — self-contained Node 22 binary embedded inside the app bundle
 
 ### First-Time Installation
@@ -358,9 +357,9 @@ Divides local disk usage into **Runtime Cache (Blue)**, **Background Logs (Orang
 - **In-App Updates**: Background update checks remain off by default; check manually or opt in anytime from the **About** tab.
 
 <details>
-<summary>Optional: Custom Google OAuth credentials</summary>
+<summary>Optional: Background token refresh credentials for standby accounts</summary>
 
-Importing the active account ("Save Current Account"), local quota inspection, the Telemetry HUD, SQLite cost tracking, and runtime localization require **no OAuth setup**. To enable browser OAuth sign-in or background token refreshes for standby accounts, place your own OAuth client credentials in `~/Library/Application Support/GravityBox/.env` (works for packaged `.app` builds launched from Finder) or set them in your shell environment when running from source:
+Adding and switching between multiple accounts ("Save Current Account"), local quota inspection, the Telemetry HUD, SQLite cost tracking, and runtime localization require **no OAuth setup** (just switch accounts in Antigravity first and import again). Only if you want expired tokens on standby accounts to **silently refresh quotas in the background** do you need to place compatible OAuth client credentials in `~/Library/Application Support/GravityBox/.env` (works for packaged `.app` builds launched from Finder) or set them in your shell environment when running from source:
 
 ```bash
 GRAVITYBOX_GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
@@ -421,7 +420,7 @@ gravitybox/
 ├── native/          # Swift 6 / AppKit Main Console, Menu Bar Panel, L10n runtime, and App Updater
 ├── src/             # TypeScript core engine (IPC, bilingual i18n, 4-phase switching, quota fusion, SQLite ledger, HUD state)
 ├── runtime/         # CDP-injected runtime scripts (localization engine, DOM guards, and bilingual Telemetry HUD)
-├── dict/ & ui-strings/ # Versioned bilingual dictionaries, frozen maps, and official UI string snapshots (2.23.0 ~ 2.32.2)
+├── dict/ & ui-strings/ # Versioned bilingual dictionaries, frozen maps, and official UI string snapshots (2.23.0 ~ 2.33.0)
 ├── assets/          # App icons, bilingual packs (i18n/), Retina screenshots, dated pricing feed, and model catalog
 ├── test/            # Unit, integration, bilingual foundation/native tests, headless Chromium, and Swift UI suites
 └── tools/           # Release integrity, privacy, doc consistency gates, screenshot generator, and macOS DMG packager

@@ -165,6 +165,7 @@
   const activeNodes = new Set();
   const observed = new Set();
   const inlineGroups = new WeakMap();
+  const inlineGroupInlineElements = new WeakMap();
   const inlineGroupContainers = new Set();
   /* J04 conservative correction: templates whose translation cannot be laid out losslessly keep the
      complete English sentence and are reported (one whole-sentence candidate + layoutWarning). */
@@ -842,6 +843,11 @@
 
     // 7. 过滤项与全局安装路径
     {
+      key: "Filter skills and rules: {filter}",
+      pattern: /^Filter\s+skills\s+and\s+rules:\s*(.+)$/i,
+      replace: (_, filter) => `筛选技能与规则：${nestedLabel(filter)}`
+    },
+    {
       key: "Filter {category}: All", pattern: /^Filter\s+(.+):\s+All$/i,
       replace: (_, cat) => `筛选 ${entryFor(cat) || cat}：全部`
     },
@@ -1044,6 +1050,46 @@
       key: "Scan the code to open this device in Remote Control, or {0}.",
       pattern: /^Scan the code to open this device in Remote Control,\s*or \{(\d+)\}\.?$/i,
       replace: (_, idx) => `扫描二维码以在远程控制中打开此设备，或 {${idx}}。`
+    },
+    {
+      key: "Project {0} already exists for this folder. Would you like to continue using it or make a new one?",
+      pattern: /^Project\s+\{(\d+)\}\s+already\s+exists\s+for\s+this\s+folder\.\s*Would\s+you\s+like\s+to\s+continue\s+using\s+it\s+or\s+make\s+a\s+new\s+one\??$/i,
+      replace: (_, idx) => `此文件夹已存在项目 {${idx}}。您想继续使用它，还是新建一个？`
+    },
+    {
+      key: "Project {0} already exists for this combination of folders. Would you like to continue using it or make a new one?",
+      pattern: /^Project\s+\{(\d+)\}\s+already\s+exists\s+for\s+this\s+combination\s+of\s+folders\.\s*Would\s+you\s+like\s+to\s+continue\s+using\s+it\s+or\s+make\s+a\s+new\s+one\??$/i,
+      replace: (_, idx) => `此文件夹组合已存在项目 {${idx}}。您想继续使用它，还是新建一个？`
+    },
+    {
+      key: "A {0} with the same folder exists",
+      pattern: /^A\s+\{(\d+)\}\s+with\s+the\s+same\s+folders?\s+exists\.?$/i,
+      replace: (_, idx) => `已存在使用相同文件夹的{${idx}}`
+    },
+    {
+      key: "A similar {0} exists",
+      pattern: /^A\s+similar\s+\{(\d+)\}\s+exists\.?$/i,
+      replace: (_, idx) => `已存在类似的{${idx}}`
+    },
+    {
+      key: "View archived in the sidebar ({0} menu).",
+      pattern: /^View\s+archived\s+in\s+the\s+sidebar\s+\(\{(\d+)\}\s+menu\)\.?$/i,
+      replace: (_, idx) => `可在侧边栏（{${idx}}菜单）中查看已归档项。`
+    },
+    {
+      key: "({0} menu)",
+      pattern: /^\(\{(\d+)\}\s+menu\)$/i,
+      replace: (_, idx) => `（{${idx}}菜单）`
+    },
+    {
+      key: "View archived in the sidebar {0}.",
+      pattern: /^View\s+archived\s+in\s+the\s+sidebar\s+\{(\d+)\}\.?$/i,
+      replace: (_, idx) => `可在侧边栏{${idx}}中查看已归档项。`
+    },
+    {
+      key: "Search conversations with {0} in the top left.",
+      pattern: /^Search\s+conversations\s+with\s+\{(\d+)\}\s+in\s+the\s+top\s+left\.?$/i,
+      replace: (_, idx) => `使用左上角的{${idx}}搜索对话。`
     },
     // 12. 补充多版本 UI 动态计数、状态后缀、工具调用、Git 与配额模板 (2.23.0 - 2.28.0)
     {
@@ -1813,6 +1859,77 @@
       key: "Show {host} in the list again",
       pattern: /^Show\s+(.+?)\s+in\s+the\s+list\s+again$/i,
       replace: (_, h) => `在列表中重新显示 ${h}`
+    },
+    // 13. 2.33.0 新增动态模板规则
+    {
+      key: "Plan, {done} of {total} steps done",
+      pattern: /^Plan,\s*(\d+)\s+of\s+(\d+)\s+steps?\s+done$/i,
+      replace: (_, done, total) => `规划进度：已完成 ${done} / ${total} 步`
+    },
+    {
+      key: "Step {current} of {total}",
+      pattern: /^Step\s+(\d+)\s+of\s+(\d+)$/i,
+      replace: (_, current, total) => `第 ${current} / ${total} 步`
+    },
+    {
+      key: "{count} cookies",
+      pattern: /^(\d+)\s+cookies?$/i,
+      replace: (_, n) => `${n} 个 Cookie`
+    },
+    {
+      key: "Delete cookies for {site}",
+      pattern: /^Delete\s+cookies\s+for\s+(.+)$/i,
+      replace: (_, site) => `删除 ${site} 的 Cookie`
+    },
+    {
+      key: "Add bundle {name}",
+      pattern: /^Add\s+bundle\s+(.+)$/i,
+      replace: (_, name) => `添加扩展包 ${name}`
+    },
+    {
+      key: "Adding plugins from {source}",
+      pattern: /^Adding\s+plugins\s+from\s+(.+)$/i,
+      replace: (_, source) => `正在从 ${source} 添加插件`
+    },
+    {
+      key: "Retrying transcription (attempt {attempt})…",
+      pattern: /^Retrying\s+transcription\s*\(attempt\s+(\d+)\)(?:\u2026|\.\.\.)?$/i,
+      replace: (_, n) => `正在重试语音转写（第 ${n} 次尝试）…`
+    },
+    {
+      key: "The preview did not respond on port {port}.",
+      pattern: /^The\s+preview\s+did\s+not\s+respond\s+on\s+port\s+(\d+)\.?$/i,
+      replace: (_, port) => `端口 ${port} 上的预览未响应。`
+    },
+    {
+      key: "These plugins in {source} may have looser code review. Review their contents before adding the bundle.",
+      pattern: /^Th(is|ese)\s+plugins?\s+in\s+(.+?)\s+may\s+have\s+looser\s+code\s+review\.\s*Review\s+(?:its|their)\s+contents\s+before\s+adding\s+the\s+bundle\.?$/i,
+      replace: (_, kind, source) => `${source} 中的${kind.toLowerCase() === 'is' ? '此' : '这些'}插件可能代码审查较宽松。添加扩展包前请先检查其内容。`
+    },
+    {
+      key: "Low contrast ratio ({ratio}:1). Text may be hard to read.",
+      pattern: /^Low\s+contrast\s+ratio\s*\(([\d.]+:1)\)\.\s*Text\s+may\s+be\s+hard\s+to\s+read\.?$/i,
+      replace: (_, ratio) => `对比度较低（${ratio}），文字可能不易辨认。`
+    },
+    {
+      key: "Can’t create this path — “{path}” is a file, not a folder.",
+      pattern: /^Can['’]t\s+create\s+this\s+path\s+[—-]\s+[“"](.+?)[”"]\s+is\s+a\s+file,\s*not\s+a\s+folder\.?$/i,
+      replace: (_, p) => `无法创建此路径 — “${p}”是文件，而非文件夹。`
+    },
+    {
+      key: "You're signing in on {host}. Your sign-in stays on that machine.",
+      pattern: /^You['’]re\s+signing\s+in\s+on\s+(.+?)\.\s*Your\s+sign-in\s+stays\s+on\s+that\s+machine\.?$/i,
+      replace: (_, host) => `您正在 ${host} 上登录。您的登录状态仅保留在该设备上。`
+    },
+    {
+      key: "{label}, {count} grants",
+      pattern: /^(.+?),\s*(\d+)\s+grants?$/i,
+      replace: (_, label, n) => `${nestedLabel(label)}，${n} 项授权`
+    },
+    {
+      key: "{count} folders in this project could not be loaded because their locations are invalid.",
+      pattern: /^(\d+)\s+folders?\s+in\s+this\s+project\s+could\s+not\s+be\s+loaded\s+because\s+(?:its|their)\s+locations?\s+(?:is|are)\s+invalid\.?$/i,
+      replace: (_, n) => `此项目中有 ${n} 个文件夹因其位置无效而无法加载。`
     }
   ];
 
@@ -1930,9 +2047,17 @@
     }
     if (old?.group) {
       if (current !== old.last && current !== old.original) {
-        invalidateInlineGroup(old.group);
-        if (node.parentElement && tryTranslateInlineGroup(node.parentElement, scan)) return;
+        const group = old.group;
+        invalidateInlineGroup(group);
+        if (group && tryTranslateInlineGroup(group, scan)) return;
+        if (node.parentElement && node.parentElement !== group && tryTranslateInlineGroup(node.parentElement, scan)) return;
       } else return;
+    }
+    if (!attr) {
+      const outerComposite = node.parentElement?.parentElement;
+      if (outerComposite && !inlineGroups.has(outerComposite) && compositePromptGroup(outerComposite, scan)) {
+        if (tryTranslateInlineGroup(outerComposite, scan)) return;
+      }
     }
     const retained = nodeSlots.get(node)?.get(attr);
     const original = retained && current === retained.last ? retained.original : current;
@@ -1986,7 +2111,9 @@
     if (attribute==='aria-label' && normalize(original)==='Customizations views') return true;
     return Boolean(element.closest(UI));
   }
-  const INLINE_TAGS = new Set(['CODE', 'STRONG', 'EM', 'A', 'KBD', 'B', 'I', 'SPAN', 'MARK', 'SMALL']);
+  const INLINE_TAGS = new Set(['CODE', 'STRONG', 'EM', 'A', 'KBD', 'B', 'I', 'SPAN', 'MARK', 'SMALL', 'SVG']);
+  function isInlineTag(el) { return Boolean(el && INLINE_TAGS.has((el.tagName || '').toUpperCase())); }
+  function isIconElement(el) { return Boolean(el && (el.tagName || '').toUpperCase() === 'SVG'); }
 
   function isInlineGroupContainer(el, scan = 0) {
     if (!el || el.nodeType !== Node.ELEMENT_NODE) return false;
@@ -1996,37 +2123,64 @@
     let hasText = false;
     let hasInline = false;
     let allText = true;
+    let allInlineIcons = true;
+    let hasTextBeforeInline = false;
+    let hasTextAfterInline = false;
     for (let i = 0; i < children.length; i++) {
       const c = children[i];
       if (c.nodeType === Node.TEXT_NODE) {
-        if (normalize(c.nodeValue || '')) hasText = true;
+        if (normalize(c.nodeValue || '')) {
+          hasText = true;
+          if (!hasInline) hasTextBeforeInline = true;
+          else hasTextAfterInline = true;
+        }
       } else if (c.nodeType === Node.ELEMENT_NODE) {
         allText = false;
-        if (!INLINE_TAGS.has(c.tagName)) return false;
+        if (!isInlineTag(c)) return false;
         if (c.querySelector('div, p, ul, ol, li, table, form, section, article')) return false;
+        if (!isIconElement(c)) allInlineIcons = false;
         hasInline = true;
       } else {
         return false;
       }
     }
+    if (hasInline && allInlineIcons && !(hasTextBeforeInline && hasTextAfterInline)) return false;
     return (hasText && hasInline) || (allText && children.length >= 2 && hasText);
   }
 
   function invalidateInlineGroup(el) {
     const nodes = inlineGroups.get(el);
+    const inlineEls = inlineGroupInlineElements.get(el);
     inlineGroupContainers.delete(el);
+    inlineGroupInlineElements.delete(el);
     clearInlineGroupUnsupported(el);
-    if (!nodes) return;
-    inlineGroups.delete(el);
-    for (const node of nodes) {
-      const slots = nodeSlots.get(node);
-      const slot = slots?.get('');
-      if (slot?.group !== el) continue;
-      if (getValue(node, '') === slot.last) setValue(node, '', slot.original);
-      slots.delete('');
-      if (!slots.size) activeNodes.delete(node);
+    if (nodes) {
+      inlineGroups.delete(el);
+      for (const node of nodes) {
+        const slots = nodeSlots.get(node);
+        const slot = slots?.get('');
+        if (slot?.group !== el) continue;
+        if (getValue(node, '') === slot.last) setValue(node, '', slot.original);
+        slots.delete('');
+        if (!slots.size) activeNodes.delete(node);
+      }
     }
-    syncElementLocFlag(el);
+    if (inlineEls) {
+      for (const inlineEl of inlineEls) {
+        const walker = document.createTreeWalker(inlineEl, NodeFilter.SHOW_TEXT);
+        while (walker.nextNode()) {
+          const tNode = walker.currentNode;
+          const tSlots = nodeSlots.get(tNode);
+          const tSlot = tSlots?.get('');
+          if (!tSlot || tSlot.group) continue;
+          if (getValue(tNode, '') === tSlot.last) setValue(tNode, '', tSlot.original);
+          tSlots.delete('');
+          if (!tSlots.size) activeNodes.delete(tNode);
+        }
+        syncElementLocFlag(inlineEl);
+      }
+    }
+    if (nodes || inlineEls) syncElementLocFlag(el);
   }
 
   /* J04 (conservative): the template is the element's direct children rendered as text runs plus
@@ -2085,9 +2239,11 @@
     const targetVal = languageMode === 'en' ? finalOriginal : zhVal;
     if (node.nodeValue !== targetVal) setValue(node, '', targetVal);
   }
-  function applyGroupSegments(el, segments, slotsMap, inlineElements, groupKeys, norm, zh, queue = waiting) {
+  function applyGroupSegments(el, segments, slotsMap, inlineElements, groupKeys, norm, zh, queue = waiting, trackInlineElements = false) {
     clearInlineGroupUnsupported(el);
     inlineGroups.set(el, [...slotsMap.values()].flat().map(item => item.node));
+    if (trackInlineElements) inlineGroupInlineElements.set(el, [...inlineElements]);
+    else inlineGroupInlineElements.delete(el);
     inlineGroupContainers.add(el);
     for (let s = 0; s <= inlineElements.length; s++) {
       const items = slotsMap.get(s) || [];
@@ -2102,11 +2258,69 @@
   function inlineGroupFor(node, scan) {
     const parent = node.parentElement;
     if (!parent) return null;
-    if (INLINE_TAGS.has(parent.tagName)) {
+    if (isInlineTag(parent) || parent.tagName === 'BUTTON') {
       const outer = parent.parentElement;
-      if (outer && isInlineGroupContainer(outer, scan)) return outer;
+      if (outer && (isInlineGroupContainer(outer, scan) || compositePromptGroup(outer, scan))) return outer;
     }
-    return isInlineGroupContainer(parent, scan) ? parent : null;
+    return (isInlineGroupContainer(parent, scan) || compositePromptGroup(parent, scan)) ? parent : null;
+  }
+  function compositePromptGroup(el, scan = 0) {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return null;
+    if (!eligible(el, scan) || blocked(el, scan)) return null;
+    const children = el.childNodes;
+    if (children.length < 2 || children.length > 10) return null;
+    let rawTemplate = '';
+    let displayedTemplate = '';
+    const inlineElements = [];
+    const slotsMap = new Map();
+    let currentSlot = 0;
+    let seenSemantic = false;
+    for (let i = 0; i < children.length; i++) {
+      const c = children[i];
+      if (c.nodeType === Node.TEXT_NODE) {
+        if (normalize(c.nodeValue || '')) return null;
+        continue;
+      }
+      if (c.nodeType !== Node.ELEMENT_NODE) return null;
+      if (!seenSemantic && isIconElement(c)) continue;
+      if (c.tagName === 'SPAN' && c.childElementCount === 0 && c.childNodes.length === 1 && c.firstChild.nodeType === Node.TEXT_NODE) {
+        seenSemantic = true;
+        const textNode = c.firstChild;
+        const curText = textNode.nodeValue || '';
+        const origText = nodeSlots.get(textNode)?.get('')?.original ?? curText;
+        if (!normalize(origText)) return null;
+        if (rawTemplate && !/\s$/.test(rawTemplate) && !/^\s/.test(origText)) rawTemplate += ' ';
+        rawTemplate += origText;
+        if (displayedTemplate && !/\s$/.test(displayedTemplate) && curText && !/^\s/.test(curText)) displayedTemplate += ' ';
+        displayedTemplate += curText;
+        if (!slotsMap.has(currentSlot)) slotsMap.set(currentSlot, []);
+        slotsMap.get(currentSlot).push({ node: textNode, original: origText });
+        continue;
+      }
+      if ((c.tagName === 'BUTTON' || c.tagName === 'A') && c.childElementCount === 0 && !blocked(c, scan)) {
+        seenSemantic = true;
+        const idx = inlineElements.length;
+        if (idx > 0) return null;
+        inlineElements.push(c);
+        if (rawTemplate && !/\s$/.test(rawTemplate)) rawTemplate += ' ';
+        rawTemplate += `{${idx}}`;
+        if (displayedTemplate && !/\s$/.test(displayedTemplate)) displayedTemplate += ' ';
+        displayedTemplate += `{${idx}}`;
+        currentSlot = idx + 1;
+        continue;
+      }
+      return null;
+    }
+    if (!inlineElements.length || !(slotsMap.get(0)?.length) || !(slotsMap.get(1)?.length)) return null;
+    return { rawTemplate, displayedTemplate, inlineElements, slotsMap };
+  }
+  function validateInlineSegments(norm, zh, slotsMap) {
+    const normPlaceholders = placeholderTokens(norm), zhPlaceholders = placeholderTokens(zh);
+    if (!samePlaceholderSet(zhPlaceholders, normPlaceholders)) return null;
+    if (zhPlaceholders.join() !== normPlaceholders.join()) return null;
+    const segments = zh.split(/\{\d+\}/);
+    if (segments.some((part, index) => part && (slotsMap.get(index)?.length ?? 0) === 0)) return null;
+    return segments;
   }
   function markInlineGroupUnsupported(el, reason) {
     unsupportedInlineGroupReasons.set(el, reason || INLINE_LAYOUT_WARNING);
@@ -2117,14 +2331,41 @@
     unsupportedInlineGroupReasons.delete(el);
     unsupportedInlineGroupSet.delete(el);
   }
-  function tryTranslateInlineGroup(el, scan = 0, queue = waiting) {
-    if (conservative && !inSystemSettings(el, scan) && !el.closest('[data-testid*="empty"],[data-testid*="sidecar"],[data-testid*="modal"],[data-testid*="card"],[role="region"]')) return false;
-    if (!isInlineGroupContainer(el, scan)) { clearInlineGroupUnsupported(el); return false; }
+  function invalidateRecordedGroupIfStale(el) {
     const recorded = inlineGroups.get(el);
     if (recorded?.some(node => {
       const slot = nodeSlots.get(node)?.get('');
       return !slot || slot.group !== el || slot.groupParent !== node.parentElement || (getValue(node, '') !== slot.last && getValue(node, '') !== slot.original);
     })) invalidateInlineGroup(el);
+  }
+  function tryTranslateInlineGroup(el, scan = 0, queue = waiting) {
+    if (conservative && !inSystemSettings(el, scan) && !el.closest('[data-testid*="empty"],[data-testid*="sidecar"],[data-testid*="modal"],[data-testid*="card"],[role="region"]')) return false;
+    const standard = isInlineGroupContainer(el, scan);
+    if (!standard) {
+      const composite = compositePromptGroup(el, scan);
+      if (!composite) {
+        if (inlineGroups.has(el)) invalidateInlineGroup(el);
+        clearInlineGroupUnsupported(el);
+        return false;
+      }
+      invalidateRecordedGroupIfStale(el);
+      const norm = normalize(composite.rawTemplate);
+      if (!norm) return false;
+      const zh = translation(norm, el);
+      const groupKeys = [...lastMatchedKeys];
+      if (zh === norm || !/[\u3400-\u9fff]/.test(zh)) {
+        if (inlineGroups.has(el)) invalidateInlineGroup(el);
+        clearInlineGroupUnsupported(el);
+        return true;
+      }
+      const segments = validateInlineSegments(norm, zh, composite.slotsMap);
+      if (!segments) {
+        if (inlineGroups.has(el)) invalidateInlineGroup(el);
+        return markInlineGroupUnsupported(el);
+      }
+      return applyGroupSegments(el, segments, composite.slotsMap, composite.inlineElements, groupKeys, norm, zh, queue, true);
+    }
+    invalidateRecordedGroupIfStale(el);
     const { rawTemplate, inlineElements, slotsMap } = groupTemplate(el);
     const norm = normalize(rawTemplate);
     if (!norm) return false;
@@ -2142,15 +2383,12 @@
       syncElementLocFlag(el);
       return true;
     }
-    const normPlaceholders = placeholderTokens(norm), zhPlaceholders = placeholderTokens(zh);
     /* Conservative J04 correction: never rearrange React-owned inline nodes and never move inline
        text into a plain-text run. Only a same-order translation whose non-empty runs all own an
        existing text slot is applied in place; everything else keeps the complete English sentence
        (no fragment half-translation, links/buttons untouched) and is marked unsupported/review. */
-    if (!samePlaceholderSet(zhPlaceholders, normPlaceholders)) return markInlineGroupUnsupported(el);
-    if (zhPlaceholders.join() !== normPlaceholders.join()) return markInlineGroupUnsupported(el);
-    const segments = zh.split(/\{\d+\}/);
-    if (segments.some((part, index) => part && (slotsMap.get(index)?.length ?? 0) === 0)) return markInlineGroupUnsupported(el);
+    const segments = validateInlineSegments(norm, zh, slotsMap);
+    if (!segments) return markInlineGroupUnsupported(el);
     return applyGroupSegments(el, segments, slotsMap, inlineElements, groupKeys, norm, zh, queue);
   }
 
@@ -2409,6 +2647,7 @@
           const targetVal = languageMode === 'en' ? slot.original : slot.last;
           setValue(node, attr, targetVal);
           syncElementLocFlag(attr ? node : node.parentElement);
+          if (slot.group) syncElementLocFlag(slot.group);
         }
       }
       try{globalThis.__gravityboxLanguageChanged?.(languageMode);}catch{}
@@ -2459,13 +2698,15 @@
           if(group){
             if(!handledGroups.has(group)){
               handledGroups.add(group);
-              const displayed=groupDisplayedTemplate(group);
+              const comp=!isInlineGroupContainer(group,scan)?compositePromptGroup(group,scan):null;
+              const displayed=comp?comp.displayedTemplate:groupDisplayedTemplate(group);
+              const rawTpl=comp?comp.rawTemplate:groupTemplate(group).rawTemplate;
               const hasChinese=/[\u3400-\u9fff]/.test(displayed), hasEnglish=/[a-zA-Z]{2,}/.test(displayed);
               /* Fully translated groups are not candidates. A mixed group (some fragments already
                  translated individually by the dictionary) is offered as its whole English template
                  so one re-translation can replace the fragment mix. */
               const layoutWarning=unsupportedInlineGroupReasons.get(group);
-              if(hasChinese&&hasEnglish)add(groupTemplate(group).rawTemplate,group,inferKind(group),undefined,true,layoutWarning);
+              if(hasChinese&&hasEnglish)add(rawTpl,group,inferKind(group),undefined,true,layoutWarning);
               else if(!hasChinese)add(displayed,group,inferKind(group),undefined,true,layoutWarning);
             }
             continue;

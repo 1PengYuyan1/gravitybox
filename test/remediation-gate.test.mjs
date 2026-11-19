@@ -335,7 +335,8 @@ test('Release-Audit-P1: 大账本模型归一化搜索、starter 套餐映射、
  const {UsageStatsManager}=await import('../dist/usage.js');
  const {UsageLedger}=await import('../dist/usage-ledger.js');
  const {AccountsManager}=await import('../dist/accounts.js');
- const {buildAccountQuotaOverview}=await import('../dist/account-quota.js');
+ const {buildAccountQuotaOverview,localizeStoredQuotaError,cleanAndLocalizeRefreshError,accountCredentialReadiness}=await import('../dist/account-quota.js');
+ const {bt,getActiveLocale,setActiveLocale}=await import('../dist/i18n.js');
  const {normalizeSubscriptionTier}=await import('../dist/ipc-projections.js');
  const {DEFAULT_API_PRICES,priceStatus}=await import('../dist/pricing.js');
  const {assertAllowedPricingFeedUrl}=await import('../dist/usage-pricing.js');
@@ -389,13 +390,35 @@ test('Release-Audit-P1: 大账本模型归一化搜索、starter 套餐映射、
  await assert.rejects(uMgr.getUsageEvents('all','',0,10,sumB.snapshot_id,false,false,'acc-a'),/范围不匹配/);
  assert.equal(priceStatus(DEFAULT_API_PRICES['gemini-4-carbon-trial'],Date.parse('2027-01-01T00:00:00Z')),'expired');
 
- // 4) 未配置可选 Google OAuth 环境变量时给出明确提示而非误报凭据失效
+ // 4) 未配置可选 Google OAuth 环境变量时给出明确提示而非误报凭据失效，且兼容新旧落盘错误文案归一化
  const prevCid=process.env.GRAVITYBOX_GOOGLE_CLIENT_ID,prevSec=process.env.GRAVITYBOX_GOOGLE_CLIENT_SECRET;
+ const prevLocale=getActiveLocale();
  delete process.env.GRAVITYBOX_GOOGLE_CLIENT_ID;delete process.env.GRAVITYBOX_GOOGLE_CLIENT_SECRET;
  try{
   const accMgr=new AccountsManager(join(dir,'oauth-state'));
   await assert.rejects(accMgr.addAccountWithRefreshToken('1//valid-token'),/未配置 Google OAuth 凭据/);
+
+  const missingOAuthVariants=[
+   'Google OAuth credentials are not configured, so standby accounts cannot refresh tokens in the background (optional credentials can be set in .env)',
+   '未配置 Google OAuth 凭据，备用账号无法后台刷新 Token（可在 .env 中配置可选凭据）',
+   'Credentials expired without background auto-refresh; switch to this account or re-save the current account to refresh quota',
+   '登录凭据已过期（未配置后台自动续期），请切换至此账号或重新「保存当前账号」刷新配额',
+  ];
+  for(const locale of ['zh-Hans','en']){
+   setActiveLocale(locale);
+   const expected=bt('account_cloud.err.missing_oauth_client');
+   for(const variant of missingOAuthVariants){
+    assert.equal(localizeStoredQuotaError(variant),expected);
+    assert.equal(cleanAndLocalizeRefreshError(variant),expected);
+    assert.equal(accountCredentialReadiness({
+     id:'oauth-missing-test',email:'oauth-missing@example.invalid',
+     token:{access_token:'expired-access',refresh_token:'1//valid',expires_in:3600,expiry_timestamp:nowSec-600,token_type:'Bearer',is_gcp_tos:false},
+     quota_refresh_error:variant,
+    },nowSec).state,'needs_refresh');
+   }
+  }
  }finally{
+  setActiveLocale(prevLocale);
   if(prevCid!==undefined)process.env.GRAVITYBOX_GOOGLE_CLIENT_ID=prevCid;
   if(prevSec!==undefined)process.env.GRAVITYBOX_GOOGLE_CLIENT_SECRET=prevSec;
  }
@@ -563,3 +586,136 @@ test('Release-1.1.1-Final-Audit: P0→P1→P2 全量审计修复项端到端回�
  assert.equal(mSub2.session.subagentCount,2,'2.5s 窗口内新增第 2 个子代理库必须被即刻嗅探纳入');
  assert.equal(mSub2.tokens.estimatedCostUsd,8.0);
 });
+
+test('Release-1.1.2-Audit: dist/engine.js 复合提示组整句原子保护/回退/采集与内联 SVG 紧凑中文排版',async()=>{
+ const {runInNewContext}=await import('node:vm');
+ const entries=JSON.parse(await readFile(new URL('../dict/base.json',import.meta.url),'utf8'));
+ const engineSrc=await readFile(new URL('../dist/engine.js',import.meta.url),'utf8');
+ const activeObservers=new Set();
+ const pendingRecords=[];
+ const timers=[];
+ class TNode{
+  constructor(v,doc){this.nodeType=3;this._v=String(v);this.parentElement=null;this.ownerDocument=doc;this.isConnected=true;}
+  get nodeValue(){return this._v;}
+  set nodeValue(v){const old=this._v;const next=String(v);if(old===next)return;this._v=next;pendingRecords.push({type:'characterData',target:this,oldValue:old});}
+  get textContent(){return this._v;}
+  set textContent(v){this.nodeValue=v;}
+  get nextSibling(){if(!this.parentElement)return null;const i=this.parentElement.childNodes.indexOf(this);return this.parentElement.childNodes[i+1]||null;}
+  getRootNode(){return this.ownerDocument;}
+ }
+ class ENode{
+  constructor(tag,attrs={},doc=null){
+   this.nodeType=1;this.tagName=tag.toUpperCase();this.attrs=new Map(Object.entries(attrs));this.childNodes=[];this.parentElement=null;
+   this.ownerDocument=doc;this.isConnected=true;this.dataset={};this.style={};this.className=attrs.class||'';this.shadowRoot=null;
+   this.classList={contains:()=>false,add(){},remove(){}};
+  }
+  append(...kids){for(const k of kids){k.parentElement=this;k.ownerDocument=this.ownerDocument;this.childNodes.push(k);}return this;}
+  get firstChild(){return this.childNodes[0]||null;}
+  get nextSibling(){if(!this.parentElement)return null;const i=this.parentElement.childNodes.indexOf(this);return this.parentElement.childNodes[i+1]||null;}
+  get childElementCount(){return this.childNodes.filter(c=>c.nodeType===1).length;}
+  get textContent(){return this.childNodes.map(c=>c.textContent).join('');}
+  getAttribute(k){return this.attrs.has(k)?this.attrs.get(k):null;}
+  setAttribute(k,v){this.attrs.set(k,String(v));}
+  hasAttribute(k){return this.attrs.has(k);}
+  getRootNode(){return this.ownerDocument;}
+  getClientRects(){return[{width:120,height:20}];}
+  getBoundingClientRect(){return{top:10,left:10,bottom:30,right:130,width:120,height:20};}
+  matchesOne(part){
+   const s=part.trim();if(!s)return false;
+   if(s==='[data-gravitybox-ui]')return this.hasAttribute('data-gravitybox-ui');
+   if(s==='[role="dialog"]')return this.getAttribute('role')==='dialog';
+   if(s==='button')return this.tagName==='BUTTON';
+   if(s==='svg')return this.tagName==='SVG';
+   if(s==='p')return this.tagName==='P';
+   if(s==='span')return this.tagName==='SPAN';
+   if(s==='div')return this.tagName==='DIV';
+   const attrEq=s.match(/^\[([\w-]+)="([^"]+)"\]$/);
+   if(attrEq)return this.getAttribute(attrEq[1])===attrEq[2];
+   return false;
+  }
+  matches(sel){return String(sel).split(',').some(p=>this.matchesOne(p));}
+  closest(sel){let cur=this;while(cur&&cur.nodeType===1){if(cur.matches(sel))return cur;cur=cur.parentElement;}return null;}
+  querySelectorAll(sel){const out=[];const walk=n=>{for(const c of n.childNodes||[]){if(c.nodeType===1){if(c.matches(sel))out.push(c);walk(c);}}};walk(this);return out;}
+  querySelector(sel){return this.querySelectorAll(sel)[0]||null;}
+ }
+ const doc=new ENode('document');doc.nodeType=9;doc.ownerDocument=doc;
+ const body=new ENode('body',{},doc);doc.body=body;doc.documentElement=body;doc.append(body);
+ doc.getElementById=()=>null;doc.addEventListener=()=>{};doc.removeEventListener=()=>{};
+ doc.createElement=t=>new ENode(t,{},doc);
+ doc.createTreeWalker=(root)=>{
+  const texts=[];const collect=n=>{for(const c of n.childNodes||[]){if(c.nodeType===3)texts.push(c);else if(c.nodeType===1)collect(c);}};
+  collect(root);let idx=-1;
+  return{get currentNode(){return idx<0?root:texts[idx];},nextNode(){if(idx+1<texts.length){idx++;return texts[idx];}return null;}};
+ };
+ const uiRoot=new ENode('div',{'data-gravitybox-ui':'1',role:'dialog'},doc);
+ // P2-02 fixtures
+ const toastArchived=new ENode('p',{},doc).append(new TNode('View archived in the sidebar (',doc),new ENode('svg',{},doc),new TNode(' menu).',doc));
+ const emptySearch=new ENode('span',{},doc).append(new TNode('Search conversations with ',doc),new ENode('svg',{},doc),new TNode(' in the top left.',doc));
+ const emptyArchivedInner=new ENode('span',{},doc).append(new TNode('(',doc),new ENode('svg',{},doc),new TNode(' menu)',doc));
+ const emptyArchived=new ENode('span',{},doc).append(new TNode('View archived in the sidebar ',doc),emptyArchivedInner,new TNode('.',doc));
+ // P1-03 fixtures
+ const dupPrefix=new ENode('span',{},doc).append(new TNode('A',doc));
+ const dupBtn=new ENode('button',{},doc).append(new TNode('project',doc));
+ const dupSuffix=new ENode('span',{},doc).append(new TNode('with the same folder exists',doc));
+ const createDup=new ENode('div',{},doc).append(new ENode('svg',{},doc),dupPrefix,dupBtn,dupSuffix);
+ const untranBtn=new ENode('button',{},doc).append(new TNode('project',doc));
+ const createUntran=new ENode('div',{},doc).append(new ENode('svg',{},doc),new ENode('span',{},doc).append(new TNode('A',doc)),untranBtn,new ENode('span',{},doc).append(new TNode('is invalid',doc)));
+ uiRoot.append(toastArchived,emptySearch,emptyArchived,createDup,createUntran);
+ body.append(uiRoot);
+ const flushTimers=()=>{
+  let guard=0;
+  while((pendingRecords.length||timers.length)&&guard++<50){
+   if(pendingRecords.length){
+    const batch=pendingRecords.splice(0,pendingRecords.length);
+    for(const obs of [...activeObservers])obs.cb(batch);
+   }
+   while(timers.length){const fn=timers.shift();fn();}
+  }
+ };
+ const loc={origin:'http://localhost',pathname:'/fixture',search:'',hash:'',href:'http://localhost/fixture'};
+ const sandbox={
+  window:{location:loc,innerWidth:1280,innerHeight:800,addEventListener(){},removeEventListener(){},getComputedStyle:()=>({visibility:'visible',pointerEvents:'auto'})},
+  location:loc,innerWidth:1280,innerHeight:800,getComputedStyle:()=>({visibility:'visible',pointerEvents:'auto'}),
+  document:doc,performance,URL,WeakRef,WeakMap,Map,Set,
+  Node:{ELEMENT_NODE:1,TEXT_NODE:3,DOCUMENT_NODE:9,DOCUMENT_FRAGMENT_NODE:11,DOCUMENT_POSITION_FOLLOWING:4},
+  NodeFilter:{SHOW_TEXT:4},CSS:{escape:s=>String(s)},
+  MutationObserver:class{constructor(cb){this.cb=cb;}observe(){activeObservers.add(this);}disconnect(){activeObservers.delete(this);}},
+  setTimeout:(fn)=>{timers.push(fn);return timers.length;},clearTimeout(){},setInterval:()=>1,clearInterval(){},requestAnimationFrame:fn=>fn(),
+  __GRAVITYBOX_BOOT__:{origin:'http://localhost',path:'/fixture',dictionary:{schema:1,version:'v112-audit',entries}},
+ };
+ sandbox.globalThis=sandbox;
+ runInNewContext(engineSrc,sandbox,{filename:'dist-engine-p103-p202.js'});
+ flushTimers();
+
+ // P2-02 断言：内联 SVG 占位符无多余半角空格
+ assert.equal(toastArchived.textContent,'可在侧边栏（菜单）中查看已归档项。');
+ assert.equal(emptySearch.textContent,'使用左上角的搜索对话。');
+ assert.equal(emptyArchived.textContent,'可在侧边栏（菜单）中查看已归档项。');
+
+ // P1-03 断言 1：已支持复合组成组翻译，未支持复合组保留完整英文（不孤立把 project 译为“项目”）并整句采集
+ assert.equal(dupPrefix.textContent,'已存在使用相同文件夹的');
+ assert.equal(dupBtn.textContent,'项目');
+ assert.equal(dupSuffix.textContent,'');
+ assert.equal(untranBtn.textContent,'project','未命中词典的 compositePromptGroup 不得将中间按钮孤立汉化为“项目”');
+ assert.equal(createUntran.textContent,'Aprojectis invalid');
+ const collected=sandbox.__GRAVITYBOX_ENGINE_V1__.collectUntranslated({fullScan:true});
+ assert.equal(collected.some(item=>item.key==='A {0} is invalid'),true,'collectUntranslated 应按整句模板采集 A {0} is invalid');
+ assert.equal(collected.some(item=>item.key==='is invalid'),false,'collectUntranslated 不得将复合组拆成局部碎片');
+
+ // P1-03 断言 2：已翻译复合组动态变更为未知句式时，连带还原中间 <button> 回英文原文
+ dupSuffix.firstChild.nodeValue='has an invalid location';
+ flushTimers();
+ assert.equal(dupPrefix.textContent,'A');
+ assert.equal(dupBtn.textContent,'project','复合组失效回退时必须同步还原中间按钮为 project');
+ assert.equal(dupSuffix.textContent,'has an invalid location');
+ assert.equal(Boolean(createDup.dataset.gravityboxLoc),false);
+
+ // P1-03 断言 3：动态恢复为受支持句式后再次原子汉化
+ dupSuffix.firstChild.nodeValue='with the same folders exists';
+ flushTimers();
+ assert.equal(dupPrefix.textContent,'已存在使用相同文件夹的');
+ assert.equal(dupBtn.textContent,'项目');
+ assert.equal(dupSuffix.textContent,'');
+ sandbox.__GRAVITYBOX_ENGINE_V1__.dispose();
+});
+

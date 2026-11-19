@@ -64,6 +64,10 @@ final class DashboardPage: NSObject {
     let view: NSView
 
     // Hero 账号与 5 桶配额
+    let debugPortTitleLabel = text(L10n.t("status.debug_port_missing", fallback: "未开启调试端口"), size: 12.5, weight: .semibold, color: .labelColor)
+    let debugPortBodyLabel = text(L10n.t("debug_port_missing.banner_body", fallback: "检测到 Antigravity 已运行但未开启调试端口，汉化与对话状态栏暂不可连接。请先保存工作后再安全重启。"), size: 11.5, color: Design.secondary, wrap: true)
+    let safeRelaunchButton = button(L10n.t("assistant.safe_relaunch_btn", fallback: "安全重启 Antigravity 以连接"), target: nil, action: #selector(safeRelaunchAntigravityPressed))
+    let debugPortBannerBox: NSBox
     let activeAccountLabel = text(L10n.t("overview.loading_account"), size: 16, weight: .semibold)
     // B02: status/freshness warnings and the mailbox are two separate lines so a warning can
     // never be overwritten by the raw email (and so the badge always matches the visible copy).
@@ -113,22 +117,52 @@ final class DashboardPage: NSObject {
         self.app = app
         refreshQuotaButton = QuotaRefreshButton(target: nil, action: #selector(refreshActiveQuota))
         refreshQuotaButton.controlSize = .small
+
+        let debugIcon = symbol("exclamationmark.triangle.fill", size: 16, color: accessibleWarningColor())
+        debugPortTitleLabel.lineBreakMode = .byTruncatingTail
+        debugPortBodyLabel.maximumNumberOfLines = 0
+        debugPortBodyLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let debugCopyCol = vertical([debugPortTitleLabel, debugPortBodyLabel], spacing: 2)
+        debugCopyCol.alignment = .leading
+        debugCopyCol.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        safeRelaunchButton.controlSize = .small
+        safeRelaunchButton.bezelColor = .controlAccentColor
+        safeRelaunchButton.setContentHuggingPriority(.required, for: .horizontal)
+        safeRelaunchButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        safeRelaunchButton.toolTip = nil
+        let debugRow = horizontal([debugIcon, debugCopyCol, flexibleSpace(), safeRelaunchButton], spacing: 10)
+        debugRow.alignment = .centerY
+        let debugBanner = group([debugRow], inset: 12)
+        debugBanner.cornerRadius = 10
+        debugBanner.borderWidth = 1
+        debugBanner.borderColor = Design.dynamicAlpha(accessibleWarningColor(), 0.35)
+        debugBanner.fillColor = Design.dynamicAlpha(accessibleWarningColor(), 0.08, 0.12)
+        debugBanner.isHidden = true
+        debugPortBannerBox = debugBanner
+
         let stack = pageStack(title: L10n.t("overview.title"))
         stack.spacing = Design.Spacing.standard
         activeAccountLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         activeAccountLabel.lineBreakMode = .byTruncatingTail
+        activeAccountLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         activeAccountLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         accountStatusLabel.maximumNumberOfLines = 2
         accountStatusLabel.lineBreakMode = .byTruncatingTail
+        accountStatusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         accountStatusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         accountStatusLabel.isHidden = true
         enableTextCopy(activeEmailLabel, title: L10n.t("common.copy_full_email"))
         activeEmailLabel.font = .systemFont(ofSize: 11.5, weight: .regular)
         activeEmailLabel.maximumNumberOfLines = 1
         activeEmailLabel.lineBreakMode = .byTruncatingMiddle
+        activeEmailLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         activeEmailLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let titleRow = horizontal([activeAccountLabel, tierBadge], spacing: 6)
+        let titleSpacer = flexibleSpace()
+        titleSpacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let titleRow = horizontal([activeAccountLabel, tierBadge, titleSpacer], spacing: 6)
         titleRow.alignment = .centerY
+        titleRow.detachesHiddenViews = true
+        tierBadge.setContentHuggingPriority(.required, for: .horizontal)
         tierBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
         currentAccountPill.isHidden = true
         let identity = vertical([titleRow, activeEmailLabel, accountStatusLabel], spacing: 4)
@@ -186,6 +220,7 @@ final class DashboardPage: NSObject {
         heroCard.cornerRadius = Design.Radius.card
         heroCard.borderWidth = 0.5
         heroCard.borderColor = Design.border
+        stack.addArrangedSubview(debugPortBannerBox)
         stack.addArrangedSubview(heroCard)
         usageMetric.allowsDefaultTighteningForTruncation = true
         let token = compactMetric(L10n.t("overview.metric.today_tokens"), value: todayTokensMetric, detail: todayTokensDetail, kind: .tokens)
@@ -300,6 +335,8 @@ final class DashboardPage: NSObject {
             self?.syncBentoModelLimit(forBentoHeight: height)
         }
         refreshQuotaButton.target = self
+        safeRelaunchButton.target = self
+        safeRelaunchButton.setAccessibilityLabel(L10n.t("assistant.safe_relaunch_btn", fallback: "安全重启 Antigravity 以连接"))
         if let boot = app.cachedDashboardBootstrapSummary {
             lastSuccessfulSummary = boot
             renderSummary(boot, isStaleFallback: false)
@@ -355,7 +392,8 @@ final class DashboardPage: NSObject {
         let heroH: CGFloat = 81.0 + coreH + standH + stampH + statusH
         let kpiH: CGFloat = min(148.0, max(103.0, viewportH * 0.21))
         let qualityH: CGFloat = usageQualityLabel.isHidden ? 0 : 26.0
-        return viewportH - 44.0 - qualityH - heroH - kpiH
+        let debugBannerH: CGFloat = debugPortBannerBox.isHidden ? 0 : (max(56.0, debugPortBannerBox.bounds.height) + 12.0)
+        return viewportH - 44.0 - debugBannerH - qualityH - heroH - kpiH
     }
 
     private func syncBentoModelLimitForViewport(_ viewportH: CGFloat? = nil) {
@@ -652,6 +690,26 @@ final class DashboardPage: NSObject {
         }
     }
 
+    @objc func safeRelaunchAntigravityPressed() {
+        app.safeRelaunchAntigravityForDebug()
+    }
+
+    func syncDebugPortBanner() {
+        let showBanner = app.statusValue.mode == "debug-port-missing"
+        let visibilityChanged = debugPortBannerBox.isHidden != !showBanner
+        debugPortTitleLabel.stringValue = L10n.t("status.debug_port_missing", fallback: "未开启调试端口")
+        debugPortBodyLabel.stringValue = L10n.t("debug_port_missing.banner_body", fallback: "检测到 Antigravity 已运行但未开启调试端口，汉化与对话状态栏暂不可连接。请先保存工作后再安全重启。")
+        let btnTitle = L10n.t("assistant.safe_relaunch_btn", fallback: "安全重启 Antigravity 以连接")
+        safeRelaunchButton.title = btnTitle
+        safeRelaunchButton.setAccessibilityLabel(btnTitle)
+        safeRelaunchButton.toolTip = nil
+        debugPortBannerBox.isHidden = !showBanner
+        safeRelaunchButton.isHidden = !showBanner
+        if visibilityChanged {
+            syncBentoModelLimitForViewport()
+        }
+    }
+
     @objc func refreshActiveQuota() {
         let activeId = ((lastSuccessfulSummary?["accounts"] as? [String: Any])?["currentAccountId"] as? String)
             ?? (app.resolvedActiveAccount()?["id"] as? String)
@@ -669,6 +727,7 @@ final class DashboardPage: NSObject {
 
     func update(force: Bool = false) {
         if force { bentoFingerprint = "" }
+        syncDebugPortBanner()
         updateReadinessMatrix()
         let status = app.statusValue
         guard app.reachable else {

@@ -69,6 +69,12 @@ final class MenuPanelController: NSViewController {
     private var accountCardsById: [String: MenuExpandableAccountCardView] = [:]
     private var renderedAccountIds: [String] = []
 
+    // Debug-Port-Missing Guidance Banner
+    let debugPortTitleLabel = text(L10n.t("status.debug_port_missing", fallback: "未开启调试端口"), size: 12, weight: .semibold, color: .labelColor)
+    let debugPortBodyLabel = text(L10n.t("debug_port_missing.banner_body", fallback: "检测到 Antigravity 已运行但未开启调试端口，汉化与对话状态栏暂不可连接。请先保存工作后再安全重启。"), size: 11, color: Design.secondary, wrap: true)
+    let safeRelaunchBtn = button(L10n.t("assistant.safe_relaunch_btn", fallback: "安全重启 Antigravity 以连接"), target: nil, action: #selector(safeRelaunchAntigravityFromBanner))
+    let debugPortBannerBox: NSBox
+
     // Bottom Bar
     let openAntigravityBtn = button(L10n.t("sidebar.open_antigravity", fallback: "打开 Antigravity"), target: nil, action: #selector(openAntigravityFromFooter))
     let openMainBtn = button(L10n.t("menu_panel.footer.open_main", fallback: "打开主界面 ↗"), target: nil, action: #selector(openMainFromFooter))
@@ -129,6 +135,24 @@ final class MenuPanelController: NSViewController {
         self.costTile = MenuMetricTileView(key: "cost", title: L10n.t("menu_panel.tile.cost", fallback: "API 费用估算"))
         self.cacheTile = MenuMetricTileView(key: "cache", title: L10n.t("menu_panel.tile.cache", fallback: "缓存命中率"))
 
+        let warnIcon = symbol("exclamationmark.triangle.fill", size: 13, color: accessibleWarningColor())
+        let debugHeader = horizontal([warnIcon, debugPortTitleLabel, flexibleSpace()], spacing: 6)
+        debugHeader.alignment = .centerY
+        let debugBtnRow = horizontal([safeRelaunchBtn, flexibleSpace()], spacing: 6)
+        debugBtnRow.alignment = .centerY
+        let debugContent = vertical([debugHeader, debugPortBodyLabel, debugBtnRow], spacing: 6)
+        debugContent.detachesHiddenViews = true
+        fillWidth(debugHeader, in: debugContent)
+        fillWidth(debugPortBodyLabel, in: debugContent)
+        fillWidth(debugBtnRow, in: debugContent)
+        let bannerBox = group([debugContent], inset: 10)
+        bannerBox.cornerRadius = Design.Radius.popover
+        bannerBox.borderWidth = 1
+        bannerBox.borderColor = Design.dynamicAlpha(accessibleWarningColor(), 0.35)
+        bannerBox.fillColor = Design.dynamicAlpha(accessibleWarningColor(), 0.09, 0.14)
+        bannerBox.isHidden = true
+        self.debugPortBannerBox = bannerBox
+
         super.init(nibName: nil, bundle: nil)
 
         headerRefreshButton.target = self
@@ -147,6 +171,11 @@ final class MenuPanelController: NSViewController {
         toggleModelsButton.controlSize = .small
         quotaEmptyButton.target = self
         quotaEmptyButton.controlSize = .small
+        safeRelaunchBtn.target = self
+        safeRelaunchBtn.controlSize = .small
+        safeRelaunchBtn.bezelColor = .controlAccentColor
+        safeRelaunchBtn.toolTip = nil
+        safeRelaunchBtn.setAccessibilityLabel(L10n.t("assistant.safe_relaunch_btn", fallback: "安全重启 Antigravity 以连接"))
         openAntigravityBtn.title = L10n.t("sidebar.open_antigravity", fallback: "打开 Antigravity")
         openAntigravityBtn.target = self
         openAntigravityBtn.controlSize = .small
@@ -263,11 +292,11 @@ final class MenuPanelController: NSViewController {
         documentContainer.translatesAutoresizingMaskIntoConstraints = false
         contentScroll.documentView = documentContainer
 
-        let contentStack = vertical([usageRoot, quotaRoot, accountsRoot], spacing: 0)
+        let contentStack = vertical([debugPortBannerBox, usageRoot, quotaRoot, accountsRoot], spacing: 8)
         contentStack.detachesHiddenViews = true
         documentContainer.addSubview(contentStack)
         contentStack.translatesAutoresizingMaskIntoConstraints = false
-        for pageView in [usageRoot, quotaRoot, accountsRoot] {
+        for pageView in [debugPortBannerBox, usageRoot, quotaRoot, accountsRoot] {
             fillWidth(pageView, in: contentStack)
         }
         NSLayoutConstraint.activate([
@@ -314,6 +343,7 @@ final class MenuPanelController: NSViewController {
             footerHost.bottomAnchor.constraint(equalTo: rootSurface.bottomAnchor)
         ])
         self.view = rootSurface
+        syncDebugPortBanner()
         applyActiveTabVisibility()
     }
 
@@ -641,6 +671,23 @@ final class MenuPanelController: NSViewController {
         app.openAntigravity()
     }
 
+    @objc private func safeRelaunchAntigravityFromBanner() {
+        app.closeMenuPopover()
+        app.safeRelaunchAntigravityForDebug()
+    }
+
+    func syncDebugPortBanner() {
+        let showBanner = app.statusValue.mode == "debug-port-missing"
+        debugPortTitleLabel.stringValue = L10n.t("status.debug_port_missing", fallback: "未开启调试端口")
+        debugPortBodyLabel.stringValue = L10n.t("debug_port_missing.banner_body", fallback: "检测到 Antigravity 已运行但未开启调试端口，汉化与对话状态栏暂不可连接。请先保存工作后再安全重启。")
+        let btnTitle = L10n.t("assistant.safe_relaunch_btn", fallback: "安全重启 Antigravity 以连接")
+        safeRelaunchBtn.title = btnTitle
+        safeRelaunchBtn.setAccessibilityLabel(btnTitle)
+        safeRelaunchBtn.toolTip = nil
+        debugPortBannerBox.isHidden = !showBanner
+        safeRelaunchBtn.isHidden = !showBanner
+    }
+
     @objc private func openMainFromFooter() {
         app.openMainWindowFromMenuPanel(tab: selectedTab, usagePeriod: selectedPeriod)
     }
@@ -671,6 +718,7 @@ final class MenuPanelController: NSViewController {
     func syncFromAssistant() {
         guard isViewLoaded else { return }
         performWithoutAnimation {
+            syncDebugPortBanner()
             syncHeaderRefreshState()
             switch selectedTab {
             case 0:
@@ -1303,7 +1351,7 @@ final class MenuPanelController: NSViewController {
             }.joined(separator: "|")
             tabFingerprint = "a:\(accountsCardsStack.arrangedSubviews.count):\(app.reachable):\(cardsSummary)"
         }
-        let measureFingerprint = "\(selectedTab):\(L10n.shared.currentLocale):\(Int(screenMax)):\(tabFingerprint)"
+        let measureFingerprint = "\(selectedTab):\(L10n.shared.currentLocale):\(Int(screenMax)):\(debugPortBannerBox.isHidden):\(tabFingerprint)"
         if !force && measureFingerprint == lastMeasuredContentFingerprint {
             let sizeInSync: Bool
             if let popover = app.menuPopover {
@@ -1320,10 +1368,16 @@ final class MenuPanelController: NSViewController {
         let contentWidth = Self.panelWidth - 28
         documentContainer.frame.size.width = Self.panelWidth
         let activeRoot: NSView = selectedTab == 0 ? usageRoot : (selectedTab == 1 ? quotaRoot : accountsRoot)
+        if !debugPortBannerBox.isHidden {
+            debugPortBodyLabel.preferredMaxLayoutWidth = max(1, contentWidth - 20)
+            debugPortBannerBox.frame.size.width = contentWidth
+            debugPortBannerBox.layoutSubtreeIfNeeded()
+        }
         activeRoot.frame.size.width = contentWidth
         activeRoot.layoutSubtreeIfNeeded()
         documentContainer.layoutSubtreeIfNeeded()
-        let contentHeight = ceil(activeRoot.fittingSize.height) + 20 // 10pt top + 10pt bottom inset
+        let bannerHeight: CGFloat = debugPortBannerBox.isHidden ? 0 : (ceil(debugPortBannerBox.fittingSize.height) + 8)
+        let contentHeight = ceil(activeRoot.fittingSize.height) + bannerHeight + 20 // 10pt top + 10pt bottom inset
         let chromeHeight: CGFloat = 86 + 42 // header (86pt) + footer (42pt)
         let rawTotal = chromeHeight + contentHeight
         let targetHeight = min(max(300, rawTotal), min(686, screenMax))

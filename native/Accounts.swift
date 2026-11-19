@@ -48,7 +48,6 @@ final class AccountsPage: NSObject {
         let actionsButton: NSButton
         let collapseButton: NSButton
         let actionStack: NSStackView
-        var actionStackWidthConstraint: NSLayoutConstraint?
         let cardDivider: NSView
         let coreQuotaStack: NSStackView
         let standaloneQuotaStack: NSStackView
@@ -71,7 +70,6 @@ final class AccountsPage: NSObject {
             actionsButton: NSButton,
             collapseButton: NSButton,
             actionStack: NSStackView,
-            actionStackWidthConstraint: NSLayoutConstraint?,
             cardDivider: NSView,
             coreQuotaStack: NSStackView,
             standaloneQuotaStack: NSStackView,
@@ -93,7 +91,6 @@ final class AccountsPage: NSObject {
             self.actionsButton = actionsButton
             self.collapseButton = collapseButton
             self.actionStack = actionStack
-            self.actionStackWidthConstraint = actionStackWidthConstraint
             self.cardDivider = cardDivider
             self.coreQuotaStack = coreQuotaStack
             self.standaloneQuotaStack = standaloneQuotaStack
@@ -370,15 +367,22 @@ final class AccountsPage: NSObject {
         let displayName = AccountIdentity.displayName(name: name, email: email)
         let titleLbl = text(displayName, size: 15, weight: .semibold, color: .labelColor)
         titleLbl.lineBreakMode = .byTruncatingTail
+        titleLbl.setContentHuggingPriority(.defaultLow, for: .horizontal)
         titleLbl.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(240), for: .horizontal)
 
         let tierPill = tierBadge(tier, scale: .regular)
+        tierPill.setContentHuggingPriority(.required, for: .horizontal)
+        tierPill.setContentCompressionResistancePriority(.required, for: .horizontal)
         tierPill.isHidden = tier.isEmpty
 
         let statusBadge = pillBadge("", color: Design.blue)
+        statusBadge.setContentHuggingPriority(.required, for: .horizontal)
+        statusBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
         statusBadge.isHidden = true
 
-        let statusBadges: [NSView] = [titleLbl, tierPill, statusBadge]
+        let titleSpacer = flexibleSpace()
+        titleSpacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let statusBadges: [NSView] = [titleLbl, tierPill, statusBadge, titleSpacer]
         let titleRow = horizontal(statusBadges, spacing: 6)
         titleRow.alignment = .centerY
         titleRow.detachesHiddenViews = true
@@ -446,9 +450,10 @@ final class AccountsPage: NSObject {
         let actionStack = horizontal(actionViews, spacing: 4)
         actionStack.alignment = .centerY
         actionStack.detachesHiddenViews = true
+        actionStack.setHuggingPriority(.required, for: .horizontal)
+        actionStack.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         let headerRow = identityHeader(identity: nameAndEmail, actions: actionStack)
-        let widthConstraint = actionStack.constraints.first { $0.firstAttribute == .width && $0.secondItem == nil }
 
         let coreQuotaStack = NSStackView()
         coreQuotaStack.orientation = .vertical
@@ -501,7 +506,6 @@ final class AccountsPage: NSObject {
             actionsButton: actionsButton,
             collapseButton: collapseButton,
             actionStack: actionStack,
-            actionStackWidthConstraint: widthConstraint,
             cardDivider: cardDivider,
             coreQuotaStack: coreQuotaStack,
             standaloneQuotaStack: standaloneQuotaStack,
@@ -558,9 +562,6 @@ final class AccountsPage: NSObject {
         if card.singleRefreshBtn.isHidden != !isSingleRefreshing {
             card.singleRefreshBtn.isHidden = !isSingleRefreshing
         }
-        let visibleActions = card.actionStack.arrangedSubviews.filter { !$0.isHidden }
-        let width = visibleActions.reduce(CGFloat(0)) { $0 + max(0, $1.intrinsicContentSize.width) } + CGFloat(max(0, visibleActions.count - 1)) * card.actionStack.spacing
-        card.actionStackWidthConstraint?.constant = width
 
         card.singleRefreshBtn.identifier = NSUserInterfaceItemIdentifier(id)
         card.singleRefreshBtn.setAccessibilityLabel(L10n.t("accounts.a11y.refresh_quota", ["account": accountTitle]))
@@ -759,11 +760,6 @@ final class AccountsPage: NSObject {
             let isSingleRefreshing = app.refreshingAccountIds.contains(id)
             if control.isHidden != !isSingleRefreshing {
                 control.isHidden = !isSingleRefreshing
-                if let card = cardViewsById[id] {
-                    let visibleActions = card.actionStack.arrangedSubviews.filter { !$0.isHidden }
-                    let width = visibleActions.reduce(CGFloat(0)) { $0 + max(0, $1.intrinsicContentSize.width) } + CGFloat(max(0, visibleActions.count - 1)) * card.actionStack.spacing
-                    card.actionStackWidthConstraint?.constant = width
-                }
             }
             control.setRefreshState(busy: app.quotaRefreshing || isSingleRefreshing, available: available, error: error)
             control.toolTip = nil

@@ -2,6 +2,7 @@ import type { ApiPricing } from './pricing.js';
 import { stripModelProviderPrefix } from './model-identity.js';
 import { getEffectiveModelPriceAlias } from './model-catalog.js';
 import type { LedgerEvent } from './usage-ledger.js';
+import { USAGE_PROJECTION_VERSION } from './protobuf-projection.js';
 import { bt } from './i18n.js';
 
 export interface TokenUsageTotals {
@@ -217,9 +218,22 @@ export interface FileCacheEntry {
   events: GenerationEvent[];
   generationsScanned: number;
   skippedLargeRecords: number;
+  projectionVersion?: number;
   hasError?: boolean;
   error?: string;
   lastSuccessAt?: number;
+}
+
+export function isFileCacheEntryReusable(
+  entry: Pick<FileCacheEntry, 'hasError' | 'skippedLargeRecords' | 'size' | 'projectionVersion'> | undefined | null
+): boolean {
+  if (!entry || entry.hasError) return false;
+  if (entry.projectionVersion !== USAGE_PROJECTION_VERSION) {
+    if (entry.projectionVersion !== undefined) return false;
+    if ((entry.skippedLargeRecords ?? 0) > 0) return false;
+    if (entry.size > 16 * 1024 * 1024) return false;
+  }
+  return true;
 }
 
 export function ledgerEventsEqual(a: LedgerEvent, b: LedgerEvent): boolean {
