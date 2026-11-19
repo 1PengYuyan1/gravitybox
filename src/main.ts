@@ -979,8 +979,15 @@ async function run() {
           }
           if (command === 'quota_refresh') {
             const acc = await accountsManager.refreshQuota(parsed.id);
-            const overview = accountsManager.getAccountQuotaOverview(acc);
-            const projected = projectAccountForIpcNormalized(acc, { overview });
+            const refreshNowMs = Date.now();
+            const overview = accountsManager.getAccountQuotaOverview(acc, { nowMs: refreshNowMs });
+            const projected = projectAccountForIpcNormalized(acc, {
+              overview,
+              nowMs: refreshNowMs,
+              includeOverviewFields: true,
+              formatResetTime,
+              revisionWithReadiness: true,
+            });
             const partial = acc.quota?.refresh_state?.complete === false || !!projected?.quota_refresh_error;
             reply({ ok: true, partial, message: partial ? bt('main.quota.read_partial') : bt('main.quota.read_ok'),
               quota: acc.quota ? (projected?.quota ?? null) : acc.quota, account: projected, subscription_tier: normalizeSubscriptionTier(projected?.subscription_tier) });

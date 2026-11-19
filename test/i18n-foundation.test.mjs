@@ -373,6 +373,7 @@ test('P1-13 & P1-14 & P2-19: app/backend 命名空间禁绝占位符冲突重名
   const allowedSharedKeys = new Set([
     'quota.countdown.soon',
     'status.connected',
+    'status.debug_port_missing',
     'status.legacy_blocked',
     'status.paused',
     'status.stopped',

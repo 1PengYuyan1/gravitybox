@@ -2,6 +2,7 @@
   "schema": 1,
   "names": {
     "gemini-3.5-flash": "Gemini 3.5 Flash",
+    "gemini-3.5-flash-lite": "Gemini 3.5 Flash Lite",
     "gemini-3.6-flash": "Gemini 3.6 Flash",
     "gemini-3.1-pro": "Gemini 3.1 Pro",
     "gemini-3.8-flash": "Gemini 3.8 Flash",
@@ -11,11 +12,13 @@
     "gemini-3.7-flash": "Gemini 3.7 Flash",
     "gemini-3.9-flash": "Gemini 3.9 Flash",
     "gemini-2.5-flash": "Gemini 2.5 Flash",
+    "gemini-2.5-flash-lite": "Gemini 2.5 Flash Lite",
     "gemini-2.5-pro": "Gemini 2.5 Pro",
     "gemini-3.8-pro": "Gemini 3.8 Pro",
     "gemini-4-argon": "Gemini 4 Argon",
     "gemini-4-argon-trial": "gemini-4-argon-trial",
     "gemini-4-hydrogen": "Gemini 4 Hydrogen",
+    "gemini-4-neon": "Gemini 4 Neon",
     "gemini-4-carbon": "Gemini 4 Carbon",
     "gemini-4-carbon-trial": "gemini-4-carbon-trial",
     "claude-3-7-sonnet": "Claude 3.7 Sonnet",
@@ -562,6 +565,21 @@
         "verification": "confirmed"
       }
     },
+    "gemini-3.5-flash-lite": {
+      "model": "gemini-3.5-flash-lite",
+      "input": 0.3,
+      "output": 2.5,
+      "cached": 0.03,
+      "provenance": {
+        "sourceUrl": "https://cloud.google.com/model-garden/pricing?hl=en",
+        "platform": "Google Cloud 标准 Global API",
+        "conditions": "Google Cloud 标准文本参考价（Gemini 3.5 Flash-Lite 历史基准）",
+        "checkedAt": "2026-11-18",
+        "validFrom": null,
+        "validUntil": null,
+        "verification": "historical"
+      }
+    },
     "gemini-3-flash": {
       "model": "gemini-3-flash",
       "input": 0.5,
@@ -640,6 +658,21 @@
           }
         }
       ]
+    },
+    "gemini-2.5-flash-lite": {
+      "model": "gemini-2.5-flash-lite",
+      "input": 0.1,
+      "output": 0.4,
+      "cached": 0.01,
+      "provenance": {
+        "sourceUrl": "https://cloud.google.com/model-garden/pricing?hl=en",
+        "platform": "Google Cloud 标准 Global API",
+        "conditions": "Google Cloud 标准文本参考价（Gemini 2.5 Flash-Lite 历史基准）",
+        "checkedAt": "2026-11-18",
+        "validFrom": null,
+        "validUntil": null,
+        "verification": "historical"
+      }
     },
     "gemini-2.5-pro": {
       "model": "gemini-2.5-pro",
@@ -755,6 +788,57 @@
             "platform": "Google Cloud 标准 Global API",
             "conditions": "Google Cloud 官方 Gemini 4 Hydrogen 标准 Global API 文本基准（<=200k Tokens；含缓存写入 $1.875）",
             "checkedAt": "2026-11-13",
+            "verification": "confirmed"
+          }
+        }
+      ]
+    },
+    "gemini-4-neon": {
+      "model": "gemini-4-neon",
+      "input": 3.0,
+      "output": 15.0,
+      "cached": 0.15,
+      "cacheWrite": 0,
+      "provenance": {
+        "sourceUrl": "https://cloud.google.com/model-garden/pricing?hl=en",
+        "platform": "Google Cloud 标准 Global API",
+        "conditions": "Google Cloud 官方 Gemini 4 Neon 标准 Global API 文本基准（<=200k Tokens；缓存写入 $3.75 自 2027-01-12 起生效）",
+        "checkedAt": "2026-11-19",
+        "validFrom": null,
+        "validUntil": "2027-01-11T23:59:59Z",
+        "verification": "confirmed"
+      },
+      "intervals": [
+        {
+          "model": "gemini-4-neon",
+          "validFrom": null,
+          "validUntil": "2027-01-11T23:59:59Z",
+          "input": 3.0,
+          "output": 15.0,
+          "cached": 0.15,
+          "cacheWrite": 0,
+          "provenance": {
+            "sourceUrl": "https://cloud.google.com/model-garden/pricing?hl=en",
+            "platform": "Google Cloud 标准 Global API",
+            "conditions": "Google Cloud 官方 Gemini 4 Neon 标准 Global API 文本基准（<=200k Tokens；缓存写入 $3.75 自 2027-01-12 起生效）",
+            "checkedAt": "2026-11-19",
+            "validUntil": "2027-01-11T23:59:59Z",
+            "verification": "confirmed"
+          }
+        },
+        {
+          "model": "gemini-4-neon",
+          "validFrom": "2027-01-12T00:00:00Z",
+          "validUntil": null,
+          "input": 3.0,
+          "output": 15.0,
+          "cached": 0.15,
+          "cacheWrite": 3.75,
+          "provenance": {
+            "sourceUrl": "https://cloud.google.com/model-garden/pricing?hl=en",
+            "platform": "Google Cloud 标准 Global API",
+            "conditions": "Google Cloud 官方 Gemini 4 Neon 标准 Global API 文本基准（<=200k Tokens；含缓存写入 $3.75）",
+            "checkedAt": "2026-11-19",
             "verification": "confirmed"
           }
         }
@@ -1083,11 +1167,14 @@
   "aliases": {
     "gemini-pro-orchestrator-g1-pro": "gemini-4-argon",
     "gemini-pro-orchestrator-argon": "gemini-4-argon",
+    "gemini-pro-orchestrator-neon": "gemini-4-neon",
     "gemini-pro-orchestrator": "gemini-4-argon",
     "orchestrator (argon)": "gemini-4-argon",
     "Orchestrator (Argon)": "gemini-4-argon",
     "orchestrator (carbon)": "gemini-4-carbon",
     "Orchestrator (Carbon)": "gemini-4-carbon",
+    "orchestrator (neon)": "gemini-4-neon",
+    "Orchestrator (Neon)": "gemini-4-neon",
     "gemini-flash-worker-agy": "gemini-3.8-flash",
     "gemini-flash-worker": "gemini-3.8-flash",
     "Gemini Flash": "gemini-3.8-flash",
@@ -1098,6 +1185,12 @@
     "gemini-4-hydrogen-tiered-high": "gemini-4-hydrogen",
     "gemini-4-hydrogen-tiered-xhigh": "gemini-4-hydrogen",
     "gemini-4-hydrogen-tiered-extra-high": "gemini-4-hydrogen",
+    "gemini-4-neon-tiered": "gemini-4-neon",
+    "gemini-4-neon-tiered-low": "gemini-4-neon",
+    "gemini-4-neon-tiered-medium": "gemini-4-neon",
+    "gemini-4-neon-tiered-high": "gemini-4-neon",
+    "gemini-4-neon-tiered-xhigh": "gemini-4-neon",
+    "gemini-4-neon-tiered-extra-high": "gemini-4-neon",
     "MODEL_PLACEHOLDER_M667": "gemini-4-carbon",
     "MODEL_PLACEHOLDER_M668": "gemini-4-argon",
     "MODEL_PLACEHOLDER_M669": "gemini-3.8-flash",
@@ -1106,6 +1199,7 @@
   "activeModels": [
     "gemini-4-carbon",
     "gemini-4-argon",
+    "gemini-4-neon",
     "gemini-4-hydrogen",
     "gemini-3.8-flash",
     "claude-opus-5-5",
@@ -1121,6 +1215,7 @@
     "gemini-4-argon",
     "gemini-4-carbon",
     "gemini-4-hydrogen",
+    "gemini-4-neon",
     "claude-opus-5-5",
     "claude-sonnet-5-5",
     "claude-opus-4-6",
@@ -1130,8 +1225,10 @@
     "claude-3-5-haiku",
     "gpt-4o",
     "gpt-4o-mini",
-    "gpt-oss-120b"
+    "gpt-oss-120b",
+    "gemini-2.5-flash-lite",
+    "gemini-3.5-flash-lite"
   ],
-  "pricingVersion": "2026-11-17",
-  "pricingUpdatedAt": "2026-11-17T00:00:00Z"
+  "pricingVersion": "2026-11-19",
+  "pricingUpdatedAt": "2026-11-19T00:00:00Z"
 }

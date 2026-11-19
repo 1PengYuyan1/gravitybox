@@ -370,6 +370,7 @@ final class MetricCardBox: NSBox {
     weak var titleField: NSTextField?
     weak var valueField: NSTextField?
     weak var detailField: NSTextField?
+    weak var statusBadge: PillBadge?
     weak var chevronView: NSImageView?
     private var hoverTracking: NSTrackingArea?
     private let hoverMotion = DesignMotion()
@@ -410,20 +411,39 @@ final class MetricCardBox: NSBox {
     override func mouseEntered(with event: NSEvent) { hovered = true }
     override func mouseExited(with event: NSEvent) { hovered = false }
 
+    func setStatusBadge(_ title: String?, tint: NSColor = accessibleWarningColor()) {
+        guard let badge = statusBadge else { return }
+        let clean = (title ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        badge.isHidden = clean.isEmpty
+        if !clean.isEmpty {
+            if badge.title != clean { badge.title = clean }
+            badge.tint = tint
+        }
+        refreshAccessibility()
+    }
+
+    private func accessibilityHeadingText() -> String {
+        guard let badge = statusBadge, !badge.isHidden else { return metricTitle }
+        let badgeText = badge.title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return badgeText.isEmpty ? metricTitle : "\(metricTitle) · \(badgeText)"
+    }
+
     func refreshAccessibility() {
         let val = valueField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
         let det = detailField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+        let heading = accessibilityHeadingText()
         let sep = L10n.shared.isEnglish ? ", " : "，"
-        let label = val.isEmpty ? metricTitle : "\(metricTitle)\(sep)\(val)"
+        let label = val.isEmpty ? heading : "\(heading)\(sep)\(val)"
         setAccessibilityLabel(label)
         setAccessibilityValue(det.isEmpty ? val : "\(val) · \(det)")
     }
 
     override func accessibilityLabel() -> String? {
         let val = valueField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-        if !metricTitle.isEmpty {
+        let heading = accessibilityHeadingText()
+        if !heading.isEmpty {
             let sep = L10n.shared.isEnglish ? ", " : "，"
-            return val.isEmpty ? metricTitle : "\(metricTitle)\(sep)\(val)"
+            return val.isEmpty ? heading : "\(heading)\(sep)\(val)"
         }
         return super.accessibilityLabel()
     }
@@ -564,20 +584,28 @@ func compactMetric(_ title: String, value: NSTextField, detail: NSTextField, act
     badgeBox.setAccessibilityElement(false)
 
     let heading = text(title, size: 12, weight: .medium, color: Design.secondary)
+    heading.lineBreakMode = .byTruncatingTail
+    heading.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
     let headingGroup = horizontal([badgeBox, heading], spacing: 6)
     headingGroup.alignment = .centerY
+    let statusBadge = pillBadge("", color: accessibleWarningColor())
+    statusBadge.label.font = .systemFont(ofSize: 9.5, weight: .semibold)
+    statusBadge.isHidden = true
+    statusBadge.setContentHuggingPriority(.required, for: .horizontal)
+    statusBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
+
     var chevron: NSImageView?
-    let topRow: NSView
+    var headerItems: [NSView] = [headingGroup, flexibleSpace(), statusBadge]
     if target != nil && onClick != nil {
         let icon = symbol("chevron.right", size: 10, color: Design.secondary.withAlphaComponent(0.55))
         icon.symbolConfiguration = NSImage.SymbolConfiguration(pointSize: 9.5, weight: .semibold)
         chevron = icon
-        let headerRow = horizontal([headingGroup, flexibleSpace(), icon], spacing: 4)
-        headerRow.alignment = .centerY
-        topRow = headerRow
-    } else {
-        topRow = headingGroup
+        headerItems.append(icon)
     }
+    let headerRow = horizontal(headerItems, spacing: 4)
+    headerRow.alignment = .centerY
+    headerRow.detachesHiddenViews = true
+    let topRow: NSView = headerRow
     let rows: [NSView] = [topRow, value, detail] + (action.map { [$0] } ?? [])
     let content = vertical(rows, spacing: 6)
     for row in rows { fillWidth(row, in: content) }
@@ -586,6 +614,7 @@ func compactMetric(_ title: String, value: NSTextField, detail: NSTextField, act
     card.titleField = heading
     card.valueField = value
     card.detailField = detail
+    card.statusBadge = statusBadge
     card.chevronView = chevron
     card.boxType = .custom
     card.borderWidth = 0.5
@@ -637,11 +666,17 @@ func identityHeader(identity: NSView, actions: NSView) -> NSView {
     identity.leadingAnchor.constraint(equalTo: container.leadingAnchor).isActive = true
     if let stack = actions as? NSStackView {
         stack.detachesHiddenViews = true
+        stack.setHuggingPriority(.required, for: .horizontal)
+        stack.setContentCompressionResistancePriority(.required, for: .horizontal)
         for sub in stack.arrangedSubviews {
             sub.setContentHuggingPriority(.required, for: .horizontal)
             sub.setContentCompressionResistancePriority(.required, for: .horizontal)
         }
     }
+    if let idStack = identity as? NSStackView {
+        idStack.setHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+    }
+    identity.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
     actions.setContentHuggingPriority(.required, for: .horizontal)
     actions.setContentCompressionResistancePriority(.required, for: .horizontal)
     return container

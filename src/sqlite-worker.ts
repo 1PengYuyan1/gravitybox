@@ -7,6 +7,7 @@ import {
   projectProtobuf,
   GENERATION_PROJECTION,
   STEP_PROJECTION,
+  USAGE_PROTO_LIMITS,
   HUD_STEP_METADATA_PROJECTION,
   HUD_STEP_METADATA_MINIMAL_PROJECTION,
   HUD_STEP_RENDER_INFO_PROJECTION,
@@ -624,7 +625,7 @@ export interface SummariesLookupResult {
 }
 
 const NON_RUNNING_SUMMARY_STATUS_RE =
-  /^(?:CASCADE_RUN_STATUS_)?(?:IDLE|UNSPECIFIED|DONE|COMPLETED|CLEARED|ERROR|CANCELL?ED|KILLED)$/i;
+  /^(?:CASCADE_RUN_STATUS_)?(?:IDLE|UNSPECIFIED|DONE|COMPLETED|CLEARED|ERROR|CANCELL?ED|KILLED|WAITING|PAUSED|BLOCKED|STANDING[_ -]?BY)$/i;
 const RUNNING_SUMMARY_STATUS_RE =
   /^(?:CASCADE_RUN_STATUS_)?(?:RUNNING|IN_PROGRESS|ACTIVE)$/i;
 
@@ -927,7 +928,8 @@ function executeUsageScan(req: UsageWorkerScanRequest): { result: UsageWorkerSca
           size,
           (offset, length) =>
             ((chunkStmt!.get(offset + 1, length, idx) as { chunk?: Uint8Array } | undefined)?.chunk) ?? new Uint8Array(0),
-          GENERATION_PROJECTION
+          GENERATION_PROJECTION,
+          USAGE_PROTO_LIMITS
         );
         const detached = detachBuf(projected.data);
         if (!detached || !hasInlineGenerationTimestamp(detached)) {
@@ -983,7 +985,8 @@ function executeUsageScan(req: UsageWorkerScanRequest): { result: UsageWorkerSca
                 size,
                 (offset, length) =>
                   ((stepChunkStmt!.get(offset + 1, length, idx) as { chunk?: Uint8Array } | undefined)?.chunk) ?? new Uint8Array(0),
-                STEP_PROJECTION
+                STEP_PROJECTION,
+                USAGE_PROTO_LIMITS
               );
               stepRows.push({ idx, size, data_blob: detachBuf(projected.data), projected: true });
             } catch {
@@ -1098,7 +1101,7 @@ parentPort?.on('message', (request: { id: string; locale?: string; open?: string
       const sizes=database.prepare(`SELECT length(${column}) AS size FROM ${table} WHERE idx=?`).all(idx);
       if(sizes.length!==1)throw Error(bt('sqlite.err.projection_index_missing'));
       const statement=database.prepare(`SELECT substr(${column},?,?) AS chunk FROM ${table} WHERE idx=?`);
-      const projected=projectProtobuf(Number(sizes[0]!.size),(offset,length)=>statement.get(offset+1,length,idx)!.chunk as Uint8Array,table==='gen_metadata'?GENERATION_PROJECTION:STEP_PROJECTION);
+      const projected=projectProtobuf(Number(sizes[0]!.size),(offset,length)=>statement.get(offset+1,length,idx)!.chunk as Uint8Array,table==='gen_metadata'?GENERATION_PROJECTION:STEP_PROJECTION,USAGE_PROTO_LIMITS);
       // Small Buffers may share Node's non-transferable slab. Give IPC its own ArrayBuffer.
       rows=[{idx,size:sizes[0]!.size,data_blob:Uint8Array.from(projected.data),projected:true,projectionBytesRead:projected.bytesRead}];
       } finally { database.exec('ROLLBACK;'); }

@@ -49,14 +49,14 @@
 
 If you use Google **Antigravity** daily on macOS, you've probably hit a few blind spots: hitting rate limits without knowing whether your **5-hour rolling window** or **weekly cap** ran out, having zero visibility into live token burn or context compaction, juggling multiple Google accounts manually, or watching disk caches balloon over time.
 
-**GravityBox** (latest `GravityBox v1.1.1`) is a lightweight, native macOS companion built to solve all of these **without modifying a single byte of `/Applications/Antigravity.app`**:
+**GravityBox** (latest `GravityBox v1.1.2`) is a lightweight, native macOS companion built to solve all of these **without modifying a single byte of `/Applications/Antigravity.app`**:
 
 | Everyday Pain Point | What GravityBox Does for You |
 | :--- | :--- |
 | **No live feedback on speed, token burn, cache savings, or context usage** | **In-IDE Telemetry HUD**: Mounts a sleek 3-capsule bar right below every chat input showing turns, speed, tokens, cache hit rate, and context fill—expanding upward on hover or click. |
 | **Confusing rate limits (mixing up 5-hour rolling windows vs. weekly caps)** | **True Dual-Window Quotas**: Separates **5-hour** and **Weekly** bars for Gemini, Claude/GPT, and standalone pools (like `Gemini 4 Argon`), with exact reset countdowns. |
 | **Tedious sign-out/sign-in loops across multiple accounts** | **Safe Multi-Account Manager**: Saves multiple accounts, recommends the best standby account when quota runs low, and switches atomically after Antigravity quits—with automatic rollback if anything fails. |
-| **Static language patches break official code signatures on every update** | **Zero-Patch Bilingual Adaptation**: Dynamically switches both GravityBox and Antigravity UI between **English** and **简体中文** (`2.23.0` ~ `2.32.2`) at runtime while leaving code, chats, and terminal output untouched. |
+| **Static language patches break official code signatures on every update** | **Zero-Patch Bilingual Adaptation**: Dynamically switches both GravityBox and Antigravity UI between **English** and **简体中文** (`2.23.0` ~ `2.33.0`) at runtime while leaving code, chats, and terminal output untouched. |
 | **Gigabytes of accumulated cache with fear of deleting chat history** | **Reversible Storage Trim**: Locks your credentials and conversations behind a strict allowlist, moves selected caches to **macOS Trash**, and lets you restore with one click. |
 
 ---
@@ -64,7 +64,7 @@ If you use Google **Antigravity** daily on macOS, you've probably hit a few blin
 ## 🚀 3-Minute Quick Start
 
 1. **Download & Install**: Grab the latest `GravityBox-<version>-arm64.dmg` from [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) (self-contained runtime included—**no Node.js or external dependencies needed**), drag **GravityBox.app** into **Applications**, and run the one-line Gatekeeper command in [First-Time Installation](#first-time-installation) below.
-2. **Launch & Auto-Connect**: Open **GravityBox** and official **Antigravity**. GravityBox automatically connects to Antigravity windows—attaching the live Telemetry HUD right below your chat composer and applying your chosen display language.
+2. **Launch & Auto-Connect**: Open **GravityBox** and launch official **Antigravity** via GravityBox (or externally). GravityBox automatically connects to Antigravity windows—attaching the live Telemetry HUD right below your chat composer and applying your chosen display language. Starting with Antigravity `2.33.0`, if Antigravity was launched externally without a remote debugging port, GravityBox surfaces a **Debug Port Not Enabled** banner to guide a safe relaunch without force-killing your workspace.
 3. **Three Everyday Touchpoints**:
    - **While coding → Glance below the chat box**: Watch the live HUD capsules; hover for quick inspection or **click any capsule to pin its upward card** (press `Esc` or click outside to close).
    - **Quick checks → Click the Menu Bar icon**: Check `Usage · Quota · Accounts` anytime without leaving fullscreen, or use the top-right `···` menu to toggle HUD or switch languages.
@@ -183,7 +183,7 @@ Hover over (or click to pin) any capsule to open its detailed breakdown card:
 | **Antigravity Enhancement** | **Display Language** | `Follow System` (default)<br>`简体中文`<br>`English` | **Unified language selector**: Controls both GravityBox's own UI language and whether Antigravity's UI is dynamically localized into Simplified Chinese. Selecting `English` keeps both GravityBox and Antigravity in clean English immediately—no restart needed. |
 | **Antigravity Enhancement** | **Conversation HUD** | Toggle (default `On`) | Shows or hides the 3-capsule Telemetry HUD below Antigravity's chat box. **Independent of language**—you can keep Antigravity in English while enjoying the English HUD. |
 | **Quota & Pricing** | **Quota Refresh Interval** | `Manual Refresh` (default)<br>`Every 5 / 10 / 15 / 30 / 60 min` | How often GravityBox polls remaining quotas for saved accounts in the background. Leave on `Manual Refresh` for single-account use, or `10–15 min` when rotating accounts. |
-| **Quota & Pricing** | **Auto-Update Pricing Feed** | `Check Now` button + Toggle (default `Off`) | Syncs the public model pricing feed every 24 hours from GitHub / jsDelivr so newly launched models get accurate cost estimates without waiting for an app update.<br>Click **Check Now** to open the **Pricing Feed** sheet—inspect per-model input, cache read/write, and output rates with official source links, and automatically heal historical unpriced entries. |
+| **Quota & Pricing** | **Auto-Update Pricing Feed** | `Check Now` button + Toggle (default `Off`) | Syncs the public model pricing feed every 24 hours from GitHub / jsDelivr so newly launched models get accurate cost estimates without waiting for an app update.<br>Click **Check Now** to open the **Pricing Feed** sheet—inspect per-model input, cache read/write, and output rates with official source links, view newly launched unpriced models grouped cleanly by model family, and automatically heal historical unpriced entries. |
 | **System & Storage** | **Launch at Login** | Toggle (default `Off`) | Starts GravityBox quietly in the macOS menu bar whenever you log in. |
 | **System & Storage** | **Sync with Antigravity** | Toggle (default `Off`) | Automatically launches GravityBox when Antigravity opens and quits when Antigravity closes. |
 | **System & Storage** | **Storage & Maintenance** | Status badge + `Manage Storage…` | Displays reclaimable cache size (`Reclaimable XX MB` or `Healthy`) and opens the safe cleanup sheet (see Section 5 below). |
@@ -192,15 +192,14 @@ Hover over (or click to pin) any capsule to open its detailed breakdown card:
 
 ### 2. Overview (`Overview`) — Daily Snapshot at a Glance
 - **Active Account Quota Card**: Displays your active account, plan badge (`PRO` / `ULTRA` / `FREE`), and separate **5-Hour** vs. **Weekly** remaining bars with reset countdowns for Gemini, Claude/GPT, and standalone high-tier pools (such as `Gemini 4 Argon`). Missing or unauthorized pools are labeled honestly—never padded with fake `100%` bars.
-- **Today's 3 Metric Cards**: Shows **Today's Token Usage**, **Today's Estimated Cost**, and **Today's Requests**, each paired with your all-time cumulative total.
+- **Today's 3 Metric Cards**: Shows **Today's Token Usage**, **Today's Estimated Cost** (with a decoupled **`Partial`** badge when unpriced models exist, keeping the dollar figure clean), and **Today's Requests**, each paired with your all-time cumulative total.
 - **24-Hour Distribution & Active Models**: Hourly consumption bar chart (`00:00–23:00`) on the left, and top active models with request share and estimated cost on the right.
 
 ---
 
 ### 3. Accounts (`Accounts`) — Multi-Account Pool & Smart Switch
 - **Add Account…**:
-  - **Save Current Account** *(zero setup)*: One-click import of the account currently signed into Antigravity.
-  - **Sign in with Google…**: Browser OAuth flow to add standby accounts (requires optional custom OAuth credentials; see Installation section).
+  - **Save Current Account** *(zero setup)*: One-click import of the account currently signed in to Antigravity. To add and switch between multiple accounts, simply switch accounts in Antigravity first and import each one—no extra setup required.
 - **Collapse / Expand Quotas**: Condenses multi-account cards into compact single-line summary pills (e.g., `Gemini 91%`).
 - **Smart Switch (Toggle + `Configure…` button)**:
   Evaluates saved accounts and highlights a **`Recommended`** standby candidate when your current account runs low (**never force-kills Antigravity; switching always requires your confirmation**). Clicking **`Configure…`** exposes 4 rules:
@@ -334,7 +333,7 @@ Divides local disk usage into **Runtime Cache (Blue)**, **Background Logs (Orang
 ### System Requirements
 - **OS**: macOS 14 (Sonoma) or macOS 15+ (Sequoia)
 - **Architecture**: Apple Silicon (`arm64` — all Apple M-series chips)
-- **Target App**: Official release `/Applications/Antigravity.app` (verified across `2.23.0` ~ `2.32.2`; *Insiders channel is neither supported nor modified*)
+- **Target App**: Official release `/Applications/Antigravity.app` (verified across `2.23.0` ~ `2.33.0`; *Insiders channel is neither supported nor modified*)
 - **Runtime**: **Zero dependencies** — self-contained Node 22 binary embedded inside the app bundle
 
 ### First-Time Installation
@@ -358,9 +357,9 @@ Divides local disk usage into **Runtime Cache (Blue)**, **Background Logs (Orang
 - **In-App Updates**: Background update checks remain off by default; check manually or opt in anytime from the **About** tab.
 
 <details>
-<summary>Optional: Custom Google OAuth credentials</summary>
+<summary>Optional: Background token refresh credentials for standby accounts</summary>
 
-Importing the active account ("Save Current Account"), local quota inspection, the Telemetry HUD, SQLite cost tracking, and runtime localization require **no OAuth setup**. To enable browser OAuth sign-in or background token refreshes for standby accounts, place your own OAuth client credentials in `~/Library/Application Support/GravityBox/.env` (works for packaged `.app` builds launched from Finder) or set them in your shell environment when running from source:
+Adding and switching between multiple accounts ("Save Current Account"), local quota inspection, the Telemetry HUD, SQLite cost tracking, and runtime localization require **no OAuth setup** (just switch accounts in Antigravity first and import again). Only if you want expired tokens on standby accounts to **silently refresh quotas in the background** do you need to place compatible OAuth client credentials in `~/Library/Application Support/GravityBox/.env` (works for packaged `.app` builds launched from Finder) or set them in your shell environment when running from source:
 
 ```bash
 GRAVITYBOX_GOOGLE_CLIENT_ID="your-client-id.apps.googleusercontent.com"
@@ -421,7 +420,7 @@ gravitybox/
 ├── native/          # Swift 6 / AppKit Main Console, Menu Bar Panel, L10n runtime, and App Updater
 ├── src/             # TypeScript core engine (IPC, bilingual i18n, 4-phase switching, quota fusion, SQLite ledger, HUD state)
 ├── runtime/         # CDP-injected runtime scripts (localization engine, DOM guards, and bilingual Telemetry HUD)
-├── dict/ & ui-strings/ # Versioned bilingual dictionaries, frozen maps, and official UI string snapshots (2.23.0 ~ 2.32.2)
+├── dict/ & ui-strings/ # Versioned bilingual dictionaries, frozen maps, and official UI string snapshots (2.23.0 ~ 2.33.0)
 ├── assets/          # App icons, bilingual packs (i18n/), Retina screenshots, dated pricing feed, and model catalog
 ├── test/            # Unit, integration, bilingual foundation/native tests, headless Chromium, and Swift UI suites
 └── tools/           # Release integrity, privacy, doc consistency gates, screenshot generator, and macOS DMG packager

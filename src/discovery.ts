@@ -205,6 +205,24 @@ export async function discover(appPath: string, profile: string): Promise<Endpoi
   return discoverSingle(appPath, profile);
 }
 
+/** Read-only check whether the stable desktop application main process is currently running. */
+export async function isApplicationRunning(appPath: string): Promise<boolean> {
+  if (!appPath) return false;
+  let target: ReturnType<typeof targetForApp>;
+  try {
+    target = targetForApp(appPath);
+  } catch {
+    return false;
+  }
+  const expectedExecutable = join(appPath, 'Contents', 'MacOS', target.executable);
+  try {
+    const { stdout } = await execute('/bin/ps', ['-ax', '-ww', '-o', 'comm='], 2000);
+    return stdout.split('\n').some(line => line.trim() === expectedExecutable);
+  } catch {
+    return false;
+  }
+}
+
 export function allowedTarget(target: { type: string; url: string }, fixtureOrigin?: string): boolean {
   if (target.type !== 'page') return false;
   try {

@@ -26,7 +26,7 @@ struct LiveStatus {
     var activeSubscriptionTier = "FREE"
     var accountsRevision = ""
     var liveAccountEmail = ""
-    var oauthClientConfigured = true
+    var oauthClientConfigured = false
 
     init(_ raw: [String: Any] = [:]) {
         working = (raw["healing"] as? Bool == true) || (raw["runningTasks"] as? Int ?? 0) > 0
@@ -53,15 +53,15 @@ struct LiveStatus {
         activeSubscriptionTier = raw["activeSubscriptionTier"] as? String ?? "FREE"
         accountsRevision = (raw["accountsRevision"] as? String) ?? "\(raw["accountsRevision"] ?? "")"
         liveAccountEmail = raw["liveAccountEmail"] as? String ?? ""
-        oauthClientConfigured = raw["oauthClientConfigured"] as? Bool ?? true
+        oauthClientConfigured = raw["oauthClientConfigured"] as? Bool ?? false
         if let errors = raw["errors"] as? [String], !errors.isEmpty {
             connectionError = errors.joined(separator: L10n.shared.isEnglish ? "; " : "；")
         }
     }
 
     var enabled: Bool {
-        // error 表示汉化实际未生效：开关显示为“关”，用户一键开启即发送 resume 触发重连重试。
-        if mode == "paused" || mode == "unsupported" || mode == "legacy-blocked" || mode == "stopped" || mode == "error" {
+        // error / debug-port-missing 表示汉化实际未生效：开关显示为“关”。
+        if mode == "paused" || mode == "unsupported" || mode == "legacy-blocked" || mode == "stopped" || mode == "error" || mode == "debug-port-missing" {
             return false
         }
         if let translationEnabled {
@@ -83,6 +83,7 @@ struct LiveStatus {
             return L10n.t("status.paused", fallback: "汉化已暂停")
         case "unsupported": return L10n.t("status.unsupported", fallback: "等待版本适配")
         case "legacy-blocked": return L10n.t("status.legacy_blocked", fallback: "检测到旧版汉化")
+        case "debug-port-missing": return L10n.t("status.debug_port_missing", fallback: "未开启调试端口")
         case "error": return L10n.t("status.error", fallback: "连接需要处理")
         case "stopped": return L10n.t("status.stopped", fallback: "服务已停止")
         case "waiting-window": return L10n.t("status.waiting_window", fallback: "等待可连接窗口")
@@ -102,7 +103,7 @@ struct LiveStatus {
                 return .systemBlue
             }
             return .secondaryLabelColor
-        case "adaptive", "unsupported", "legacy-blocked": return .systemOrange
+        case "adaptive", "unsupported", "legacy-blocked", "debug-port-missing": return .systemOrange
         case "error": return .systemRed
         default: return .secondaryLabelColor
         }

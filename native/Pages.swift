@@ -64,6 +64,10 @@ final class DashboardPage: NSObject {
     let view: NSView
 
     // Hero 账号与 5 桶配额
+    let debugPortTitleLabel = text(L10n.t("status.debug_port_missing", fallback: "未开启调试端口"), size: 12.5, weight: .semibold, color: .labelColor)
+    let debugPortBodyLabel = text(L10n.t("debug_port_missing.banner_body", fallback: "检测到 Antigravity 已运行但未开启调试端口，汉化与对话状态栏暂不可连接。请先保存工作后再安全重启。"), size: 11.5, color: Design.secondary, wrap: true)
+    let safeRelaunchButton = button(L10n.t("assistant.safe_relaunch_btn", fallback: "安全重启 Antigravity 以连接"), target: nil, action: #selector(safeRelaunchAntigravityPressed))
+    let debugPortBannerBox: NSBox
     let activeAccountLabel = text(L10n.t("overview.loading_account"), size: 16, weight: .semibold)
     // B02: status/freshness warnings and the mailbox are two separate lines so a warning can
     // never be overwritten by the raw email (and so the badge always matches the visible copy).
@@ -113,22 +117,52 @@ final class DashboardPage: NSObject {
         self.app = app
         refreshQuotaButton = QuotaRefreshButton(target: nil, action: #selector(refreshActiveQuota))
         refreshQuotaButton.controlSize = .small
+
+        let debugIcon = symbol("exclamationmark.triangle.fill", size: 16, color: accessibleWarningColor())
+        debugPortTitleLabel.lineBreakMode = .byTruncatingTail
+        debugPortBodyLabel.maximumNumberOfLines = 0
+        debugPortBodyLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        let debugCopyCol = vertical([debugPortTitleLabel, debugPortBodyLabel], spacing: 2)
+        debugCopyCol.alignment = .leading
+        debugCopyCol.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        safeRelaunchButton.controlSize = .small
+        safeRelaunchButton.bezelColor = .controlAccentColor
+        safeRelaunchButton.setContentHuggingPriority(.required, for: .horizontal)
+        safeRelaunchButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+        safeRelaunchButton.toolTip = nil
+        let debugRow = horizontal([debugIcon, debugCopyCol, flexibleSpace(), safeRelaunchButton], spacing: 10)
+        debugRow.alignment = .centerY
+        let debugBanner = group([debugRow], inset: 12)
+        debugBanner.cornerRadius = 10
+        debugBanner.borderWidth = 1
+        debugBanner.borderColor = Design.dynamicAlpha(accessibleWarningColor(), 0.35)
+        debugBanner.fillColor = Design.dynamicAlpha(accessibleWarningColor(), 0.08, 0.12)
+        debugBanner.isHidden = true
+        debugPortBannerBox = debugBanner
+
         let stack = pageStack(title: L10n.t("overview.title"))
         stack.spacing = Design.Spacing.standard
         activeAccountLabel.font = .systemFont(ofSize: 15, weight: .semibold)
         activeAccountLabel.lineBreakMode = .byTruncatingTail
+        activeAccountLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         activeAccountLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         accountStatusLabel.maximumNumberOfLines = 2
         accountStatusLabel.lineBreakMode = .byTruncatingTail
+        accountStatusLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         accountStatusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         accountStatusLabel.isHidden = true
         enableTextCopy(activeEmailLabel, title: L10n.t("common.copy_full_email"))
         activeEmailLabel.font = .systemFont(ofSize: 11.5, weight: .regular)
         activeEmailLabel.maximumNumberOfLines = 1
         activeEmailLabel.lineBreakMode = .byTruncatingMiddle
+        activeEmailLabel.setContentHuggingPriority(.defaultLow, for: .horizontal)
         activeEmailLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        let titleRow = horizontal([activeAccountLabel, tierBadge], spacing: 6)
+        let titleSpacer = flexibleSpace()
+        titleSpacer.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        let titleRow = horizontal([activeAccountLabel, tierBadge, titleSpacer], spacing: 6)
         titleRow.alignment = .centerY
+        titleRow.detachesHiddenViews = true
+        tierBadge.setContentHuggingPriority(.required, for: .horizontal)
         tierBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
         currentAccountPill.isHidden = true
         let identity = vertical([titleRow, activeEmailLabel, accountStatusLabel], spacing: 4)
@@ -186,6 +220,7 @@ final class DashboardPage: NSObject {
         heroCard.cornerRadius = Design.Radius.card
         heroCard.borderWidth = 0.5
         heroCard.borderColor = Design.border
+        stack.addArrangedSubview(debugPortBannerBox)
         stack.addArrangedSubview(heroCard)
         usageMetric.allowsDefaultTighteningForTruncation = true
         let token = compactMetric(L10n.t("overview.metric.today_tokens"), value: todayTokensMetric, detail: todayTokensDetail, kind: .tokens)
@@ -300,6 +335,8 @@ final class DashboardPage: NSObject {
             self?.syncBentoModelLimit(forBentoHeight: height)
         }
         refreshQuotaButton.target = self
+        safeRelaunchButton.target = self
+        safeRelaunchButton.setAccessibilityLabel(L10n.t("assistant.safe_relaunch_btn", fallback: "安全重启 Antigravity 以连接"))
         if let boot = app.cachedDashboardBootstrapSummary {
             lastSuccessfulSummary = boot
             renderSummary(boot, isStaleFallback: false)
@@ -355,7 +392,8 @@ final class DashboardPage: NSObject {
         let heroH: CGFloat = 81.0 + coreH + standH + stampH + statusH
         let kpiH: CGFloat = min(148.0, max(103.0, viewportH * 0.21))
         let qualityH: CGFloat = usageQualityLabel.isHidden ? 0 : 26.0
-        return viewportH - 44.0 - qualityH - heroH - kpiH
+        let debugBannerH: CGFloat = debugPortBannerBox.isHidden ? 0 : (max(56.0, debugPortBannerBox.bounds.height) + 12.0)
+        return viewportH - 44.0 - debugBannerH - qualityH - heroH - kpiH
     }
 
     private func syncBentoModelLimitForViewport(_ viewportH: CGFloat? = nil) {
@@ -397,8 +435,9 @@ final class DashboardPage: NSObject {
         }
 
         let pill = pillBadge(badgeText, color: badgeTint)
+        pill.label.font = .systemFont(ofSize: 9.5, weight: .semibold)
         pill.isHidden = badgeText.isEmpty
-        pill.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        pill.setContentCompressionResistancePriority(.required, for: .horizontal)
         pill.setContentHuggingPriority(.required, for: .horizontal)
 
         let rightLabel = text(trailingText, size: 11, weight: .semibold, color: trailingTint)
@@ -410,6 +449,7 @@ final class DashboardPage: NSObject {
 
         let topRow = horizontal([nameLabel, pill, flexibleSpace(), rightLabel], spacing: 6)
         topRow.alignment = .centerY
+        topRow.detachesHiddenViews = true
 
         let subLabel = metricDetail(subtitle)
 
@@ -577,12 +617,34 @@ final class DashboardPage: NSObject {
                 }
                 let sharePct = Int(round(shareRatio * 100))
                 let shareNote = sharePct > 0 ? L10n.t("overview.bento.share_pct", ["pct": sharePct]) : ""
-                let costNote = mUsd > 0 ? " · \(InterfaceText.formatUsd(mUsd))" : ""
+                let isPriced = (item["priced"] as? Bool) ?? true
+                let isPartialModel = (item["partiallyPriced"] as? Bool) ?? false
+                let isUnpricedModel = !isPriced && !isPartialModel && mTokens > 0
+                let badgeText: String
+                let badgeTint: NSColor
+                if isUnpricedModel {
+                    badgeText = L10n.t("overview.model.unpriced_badge")
+                    badgeTint = accessibleWarningColor()
+                } else if isPartialModel {
+                    badgeText = L10n.t("overview.model.partial_badge")
+                    badgeTint = accessibleWarningColor()
+                } else {
+                    badgeText = ""
+                    badgeTint = Design.blue
+                }
+                let costNote: String
+                if isPartialModel && mUsd > 0 {
+                    costNote = L10n.t("overview.bento.cost_partial", ["cost": InterfaceText.formatUsd(mUsd)])
+                } else if !isUnpricedModel && mUsd > 0 {
+                    costNote = " · \(InterfaceText.formatUsd(mUsd))"
+                } else {
+                    costNote = ""
+                }
                 let row = Self.makeBentoSubRow(
                     title: displayModel,
                     copyModelId: rawModelId,
-                    badgeText: "",
-                    badgeTint: Design.blue,
+                    badgeText: badgeText,
+                    badgeTint: badgeTint,
                     subtitle: L10n.t("overview.bento.model_sub_multi", ["reqs": InterfaceText.formatInteger(mReqs), "share": shareNote, "cost": costNote]),
                     trailingText: L10n.t("overview.bento.tokens_trailing", ["tokens": InterfaceText.formatCompactTokens(mTokens)]),
                     trailingTint: .labelColor,
@@ -600,12 +662,34 @@ final class DashboardPage: NSObject {
             let mTokens = intVal(topModel, "totalTokens", fallback: intVal(topModel, "total_tokens"))
             let mReqs = intVal(topModel, "requestCount", fallback: intVal(topModel, "request_count"))
             let mUsd = doubleVal(topModel, "estimatedUsd", fallback: doubleVal(topModel, "estimated_usd"))
-            let costNote = mUsd > 0 ? " · \(InterfaceText.formatUsd(mUsd))" : ""
+            let isPriced = (topModel["priced"] as? Bool) ?? true
+            let isPartialModel = (topModel["partiallyPriced"] as? Bool) ?? false
+            let isUnpricedModel = !isPriced && !isPartialModel && mTokens > 0
+            let badgeText: String
+            let badgeTint: NSColor
+            if isUnpricedModel {
+                badgeText = L10n.t("overview.model.unpriced_badge")
+                badgeTint = accessibleWarningColor()
+            } else if isPartialModel {
+                badgeText = L10n.t("overview.model.partial_badge")
+                badgeTint = accessibleWarningColor()
+            } else {
+                badgeText = ""
+                badgeTint = Design.blue
+            }
+            let costNote: String
+            if isPartialModel && mUsd > 0 {
+                costNote = L10n.t("overview.bento.cost_partial", ["cost": InterfaceText.formatUsd(mUsd)])
+            } else if !isUnpricedModel && mUsd > 0 {
+                costNote = " · \(InterfaceText.formatUsd(mUsd))"
+            } else {
+                costNote = ""
+            }
             let row1 = Self.makeBentoSubRow(
                 title: displayModel,
                 copyModelId: rawModelId,
-                badgeText: "",
-                badgeTint: Design.blue,
+                badgeText: badgeText,
+                badgeTint: badgeTint,
                 subtitle: L10n.t("overview.bento.model_sub_single", ["reqs": InterfaceText.formatInteger(mReqs), "cost": costNote]),
                 trailingText: L10n.t("overview.bento.tokens_trailing", ["tokens": InterfaceText.formatCompactTokens(mTokens)]),
                 trailingTint: .labelColor,
@@ -652,6 +736,26 @@ final class DashboardPage: NSObject {
         }
     }
 
+    @objc func safeRelaunchAntigravityPressed() {
+        app.safeRelaunchAntigravityForDebug()
+    }
+
+    func syncDebugPortBanner() {
+        let showBanner = app.statusValue.mode == "debug-port-missing"
+        let visibilityChanged = debugPortBannerBox.isHidden != !showBanner
+        debugPortTitleLabel.stringValue = L10n.t("status.debug_port_missing", fallback: "未开启调试端口")
+        debugPortBodyLabel.stringValue = L10n.t("debug_port_missing.banner_body", fallback: "检测到 Antigravity 已运行但未开启调试端口，汉化与对话状态栏暂不可连接。请先保存工作后再安全重启。")
+        let btnTitle = L10n.t("assistant.safe_relaunch_btn", fallback: "安全重启 Antigravity 以连接")
+        safeRelaunchButton.title = btnTitle
+        safeRelaunchButton.setAccessibilityLabel(btnTitle)
+        safeRelaunchButton.toolTip = nil
+        debugPortBannerBox.isHidden = !showBanner
+        safeRelaunchButton.isHidden = !showBanner
+        if visibilityChanged {
+            syncBentoModelLimitForViewport()
+        }
+    }
+
     @objc func refreshActiveQuota() {
         let activeId = ((lastSuccessfulSummary?["accounts"] as? [String: Any])?["currentAccountId"] as? String)
             ?? (app.resolvedActiveAccount()?["id"] as? String)
@@ -669,6 +773,7 @@ final class DashboardPage: NSObject {
 
     func update(force: Bool = false) {
         if force { bentoFingerprint = "" }
+        syncDebugPortBanner()
         updateReadinessMatrix()
         let status = app.statusValue
         guard app.reachable else {
@@ -975,6 +1080,7 @@ final class DashboardPage: NSObject {
         self.todayTokensDetail.textColor = accessibleWarningColor()
         self.todayTokensDetail.toolTip = nil
         self.usageMetric.stringValue = "—"
+        self.costMetricCard?.setStatusBadge(nil)
         self.usageDetail.stringValue = retryDetail
         self.usageDetail.textColor = accessibleWarningColor()
         self.usageDetail.toolTip = nil
@@ -1166,8 +1272,27 @@ final class DashboardPage: NSObject {
 
             let todayUnpriced = intVal(usg, "todayUnpricedModels")
             let todayPriced = intVal(usg, "todayPricedModels")
-            self.usageMetric.stringValue = todayUnpriced > 0 && todayPriced == 0 && todayUsd == 0 ? L10n.t("menu_panel.usage.unpriced") : (todayUnpriced > 0 ? L10n.t("overview.metric.today_partial_cost") : "") + InterfaceText.formatUsd(todayUsd)
-            self.usageDetail.stringValue = unpriced > 0 && intVal(usg, "pricedModels") == 0 ? L10n.t("overview.metric.total_unpriced") : L10n.t("overview.metric.total_cost", ["cost": InterfaceText.formatUsd(allUsd)])
+            let allPriced = intVal(usg, "pricedModels")
+            let isAllTodayUnpriced = todayUnpriced > 0 && todayPriced == 0 && todayUsd == 0
+            let isPartialToday = todayUnpriced > 0 && !isAllTodayUnpriced
+            self.usageMetric.stringValue = isAllTodayUnpriced
+                ? L10n.t("menu_panel.usage.unpriced")
+                : InterfaceText.formatUsd(todayUsd)
+            self.costMetricCard?.setStatusBadge(
+                isPartialToday ? L10n.t("overview.cost.partial_badge") : nil,
+                tint: accessibleWarningColor()
+            )
+            let totalCostSummary: String
+            if unpriced > 0 && allPriced == 0 && allUsd == 0 {
+                totalCostSummary = L10n.t("overview.metric.total_unpriced")
+            } else if unpriced > 0 {
+                totalCostSummary = L10n.t("overview.metric.total_partial_cost", ["cost": InterfaceText.formatUsd(allUsd)])
+            } else {
+                totalCostSummary = L10n.t("overview.metric.total_cost", ["cost": InterfaceText.formatUsd(allUsd)])
+            }
+            self.usageDetail.stringValue = todayUnpriced > 0
+                ? L10n.t("overview.metric.today_unpriced_with_total", ["count": todayUnpriced, "total": totalCostSummary])
+                : totalCostSummary
             self.usageDetail.toolTip = nil
             self.costMetricCard?.titleField?.stringValue = L10n.t("overview.metric.today_cost")
 

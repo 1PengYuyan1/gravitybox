@@ -5,11 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   applyVerifiedPriceUpdate,
+  buildAutoStagedAliases,
   bumpCatalogVersion,
   detectBlockedOrEmptyPage,
   evaluateModelConsensus,
+  evaluateNewModelStagingCandidate,
   extractCleanPricingText,
   extractPricesWithGemini,
+  normalizeUpstreamModelKey,
   parseLiteLlmRates,
   parseOpenRouterRates,
   runAutoUpdatePricing,
@@ -174,6 +177,27 @@ test('共识门禁：双源一致放行 green，分歧/孤证/越界波动/未�
     nowMs,
   });
   assert.equal(scheduledExpected.status, 'unchanged');
+
+  // gemini-4-neon 同样按 2027-01-12 cacheWrite=$3.75 未来区间排期，不应误报黄灯
+  const neonScheduledEntry = {
+    model: 'gemini-4-neon',
+    input: 3.0,
+    output: 15.0,
+    cached: 0.15,
+    cacheWrite: 0,
+    intervals: [
+      { model: 'gemini-4-neon', validFrom: null, validUntil: '2027-01-11T23:59:59Z', input: 3.0, output: 15.0, cached: 0.15, cacheWrite: 0 },
+      { model: 'gemini-4-neon', validFrom: '2027-01-12T00:00:00Z', validUntil: null, input: 3.0, output: 15.0, cached: 0.15, cacheWrite: 3.75 },
+    ],
+  };
+  const neonScheduledExpected = evaluateModelConsensus({
+    key: 'gemini-4-neon',
+    localEntry: neonScheduledEntry,
+    official: { officialModelName: 'Gemini 4 Neon', inputPer1M: 3.0, outputPer1M: 15.0, cachedPer1M: 0.15, cacheWritePer1M: 3.75, confidence: 'high', evidenceQuote: '...' },
+    litellm: { input: 3.0, output: 15.0, cached: 0.15 },
+    nowMs: Date.parse('2026-11-19T02:00:00Z'),
+  });
+  assert.equal(neonScheduledExpected.status, 'unchanged');
 });
 
 test('安全增量写入：不篡改历史区间、保持英文 provenance 无中文残留并正确递增 -rN 版本号', () => {
@@ -420,5 +444,431 @@ test('上游抓取异常与确定性 4xx 防护：HTTP 404 不重试，上游阻
   assert.equal(report.decision, 'fetch_failed');
   assert.equal(report.pageAlerts.length >= 2, true);
   assert.match(report.summaryMarkdown, /Upstream Fetch Alerts/);
+});
+
+test('normalizeUpstreamModelKey 规范化官网空格/星号/括号展示名并保留 :free 通道后缀', () => {
+  assert.equal(normalizeUpstreamModelKey('Gemini 4 Neon'), 'gemini-4-neon');
+  assert.equal(normalizeUpstreamModelKey('Gemini 4 Carbon*'), 'gemini-4-carbon');
+  assert.equal(normalizeUpstreamModelKey('Gemini 4 Carbon (Starting December 1, 2026)'), 'gemini-4-carbon');
+  assert.equal(normalizeUpstreamModelKey('Claude Opus 5.5'), 'claude-opus-5.5');
+  assert.equal(normalizeUpstreamModelKey('gemini/gemini_4_neon@default'), 'gemini-4-neon');
+  assert.equal(normalizeUpstreamModelKey('openai/gpt-4o:free'), 'gpt-4o:free');
+});
+
+test('新模型雷达回归：带空格与星号的官网新模型不再漏检，支持去重与三方查价关联，并排除已入库与 Cyber Permissive', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'gb-auto-pricing-radar-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+
+  const catalogPath = join(dir, 'model-catalog.json');
+  const feedPath = join(dir, 'pricing-feed.json');
+  const reportPath = join(dir, 'report.json');
+
+  const fixtureCatalog = {
+    schema: 1,
+    names: {
+      'gemini-4-carbon': 'Gemini 4 Carbon',
+      'claude-opus-5-5': 'Claude Opus 5.5',
+    },
+    prices: {
+      'gemini-4-carbon': {
+        model: 'gemini-4-carbon',
+        input: 2.0,
+        output: 10.0,
+        cached: 0.1,
+        provenance: {
+          sourceUrl: 'https://cloud.google.com/model-garden/pricing?hl=en',
+          platform: 'Google Cloud 标准 Global API',
+          conditions: 'Google Cloud 官方推广期标准 Global API 文本基准（优惠截至2026-11-30）',
+          checkedAt: '2026-11-19',
+          validUntil: '2026-11-30T23:59:59Z',
+          verification: 'confirmed',
+        },
+        intervals: [
+          { model: 'gemini-4-carbon', validFrom: null, validUntil: '2026-11-30T23:59:59Z', input: 2.0, output: 10.0, cached: 0.1 },
+          { model: 'gemini-4-carbon', validFrom: '2026-12-01T00:00:00Z', validUntil: null, input: 4.0, output: 20.0, cached: 0.2 },
+        ],
+      },
+      'claude-opus-5-5': {
+        model: 'claude-opus-5-5',
+        input: 4.0,
+        output: 20.0,
+        cached: 0.2,
+        cacheWrite: 5.0,
+        provenance: {
+          sourceUrl: 'https://platform.claude.com/docs/en/about-claude/pricing',
+          platform: 'Anthropic 标准 API',
+          conditions: 'Anthropic 官方 Claude Opus 5.5 标准文本基准',
+          checkedAt: '2026-11-19',
+          validFrom: null,
+          validUntil: null,
+          verification: 'confirmed',
+        },
+      },
+    },
+    activeModels: ['gemini-4-carbon', 'claude-opus-5-5'],
+    feedModels: ['gemini-4-carbon', 'claude-opus-5-5'],
+    pricingVersion: '2026-11-19',
+    pricingUpdatedAt: '2026-11-19T00:00:00Z',
+  };
+  await writeFile(catalogPath, JSON.stringify(fixtureCatalog, null, 2) + '\n', 'utf8');
+
+  const mockFetch = async (url, init) => {
+    const target = String(url);
+    if (target.includes('cloud.google.com')) {
+      return new Response(
+        '<html><body><h1>Gemini Model Garden Standard Global API Pricing</h1>' +
+          '<p>Standard pay-as-you-go text token pricing on Google Cloud per 1 million tokens in USD for global endpoints.</p>' +
+          '<table><tr><td>Gemini 4 Carbon*</td><td>$2.00</td><td>$10.00</td></tr>' +
+          '<tr><td>Gemini 4 Carbon Cyber Permissive</td><td>$4.00</td><td>$20.00</td></tr>' +
+          '<tr><td>Gemini 5 Nova</td><td>$3.50</td><td>$17.50</td></tr></table>' +
+          '<p>* Promotional pricing provided through 50% credits back through November 30, 2026 on eligible global endpoints.</p></body></html>',
+        { status: 200 }
+      );
+    }
+    if (target.includes('platform.claude.com')) {
+      return new Response(
+        '<html><body><h1>Anthropic Claude API Pricing (MTok)</h1>' +
+          '<p>Standard API pricing per million tokens (MTok) in USD for Claude models on global endpoints.</p>' +
+          '<table><tr><td>Claude Opus 5.5</td><td>$4.00 / MTok</td><td>$20.00 / MTok</td></tr>' +
+          '<tr><td>Claude Sonnet 6.0</td><td>$2.50 / MTok</td><td>$12.50 / MTok</td></tr></table>' +
+          '<p>All prices are in USD per 1M input, output, cache read, and cache write tokens for standard API endpoints.</p></body></html>',
+        { status: 200 }
+      );
+    }
+    if (target.includes('generativelanguage.googleapis.com')) {
+      const promptBody = String(init?.body ?? '');
+      const isGooglePage = promptBody.includes('cloud.google.com');
+      const bodyModels = isGooglePage
+        ? [
+            // 模拟 Gemini 提取时留空 catalogKey，验证通过归一化匹配已入库模型、去重与雷达过滤
+            {
+              catalogKey: '',
+              officialModelName: 'Gemini 4 Carbon*',
+              inputPer1M: 2.0,
+              outputPer1M: 10.0,
+              cachedPer1M: 0.1,
+              hasContextTiers: false,
+              confidence: 'high',
+              evidenceQuote: 'Gemini 4 Carbon* | $2.00 | $10.00',
+            },
+            {
+              catalogKey: '',
+              officialModelName: 'Gemini 4 Carbon Cyber Permissive',
+              inputPer1M: 4.0,
+              outputPer1M: 20.0,
+              cachedPer1M: 0.2,
+              hasContextTiers: false,
+              confidence: 'high',
+              evidenceQuote: 'Gemini 4 Carbon Cyber Permissive | $4.00 | $20.00',
+            },
+            {
+              catalogKey: '',
+              officialModelName: 'Gemini 5 Nova',
+              inputPer1M: 3.5,
+              outputPer1M: 17.5,
+              cachedPer1M: 0.175,
+              hasContextTiers: false,
+              confidence: 'high',
+              evidenceQuote: 'Gemini 5 Nova | $3.50 | $17.50',
+            },
+            {
+              catalogKey: '',
+              officialModelName: 'Gemini 5 Nova*',
+              inputPer1M: 7.0,
+              outputPer1M: 35.0,
+              cachedPer1M: 0.35,
+              hasContextTiers: false,
+              confidence: 'high',
+              evidenceQuote: 'Gemini 5 Nova* promo row',
+            },
+          ]
+        : [
+            {
+              catalogKey: '',
+              officialModelName: 'Claude Opus 5.5',
+              inputPer1M: 4.0,
+              outputPer1M: 20.0,
+              cachedPer1M: 0.2,
+              cacheWritePer1M: 5.0,
+              hasContextTiers: false,
+              confidence: 'high',
+              evidenceQuote: 'Claude Opus 5.5 | $4.00 | $20.00',
+            },
+            {
+              catalogKey: '',
+              officialModelName: 'Claude Sonnet 6.0',
+              inputPer1M: 2.5,
+              outputPer1M: 12.5,
+              cachedPer1M: 0.25,
+              cacheWritePer1M: 3.125,
+              hasContextTiers: false,
+              confidence: 'high',
+              evidenceQuote: 'Claude Sonnet 6.0 | $2.50 | $12.50',
+            },
+          ];
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [{ text: JSON.stringify({ pageParsedOk: true, models: bodyModels }) }],
+              },
+            },
+          ],
+        }),
+        { status: 200 }
+      );
+    }
+    if (target.includes('litellm')) {
+      return new Response(
+        JSON.stringify({
+          'gemini/gemini-4-carbon': { input_cost_per_token: 2e-6, output_cost_per_token: 10e-6, cache_read_input_token_cost: 0.1e-6 },
+          'gemini/gemini-5-nova': { input_cost_per_token: 3.5e-6, output_cost_per_token: 17.5e-6, cache_read_input_token_cost: 0.175e-6 },
+          'anthropic/claude-opus-5-5': { input_cost_per_token: 4e-6, output_cost_per_token: 20e-6, cache_read_input_token_cost: 0.2e-6, cache_creation_input_token_cost: 5e-6 },
+          'anthropic/claude-sonnet-6-0': { input_cost_per_token: 2.5e-6, output_cost_per_token: 12.5e-6, cache_read_input_token_cost: 0.25e-6, cache_creation_input_token_cost: 3.125e-6 },
+        }),
+        { status: 200 }
+      );
+    }
+    if (target.includes('openrouter.ai')) {
+      return new Response(
+        JSON.stringify({
+          data: [
+            { id: 'google/gemini-5-nova', pricing: { prompt: '0.0000035', completion: '0.0000175', input_cache_read: '0.000000175' } },
+            { id: 'anthropic/claude-sonnet-6.0', pricing: { prompt: '0.0000025', completion: '0.0000125', input_cache_read: '0.00000025' } },
+          ],
+        }),
+        { status: 200 }
+      );
+    }
+    throw new Error(`Unexpected URL in mockFetch: ${target}`);
+  };
+
+  const report = await runAutoUpdatePricing({
+    write: false,
+    nowMs: Date.parse('2026-11-19T02:00:00Z'),
+    catalogPath,
+    feedPath,
+    reportPath,
+    geminiApiKey: 'test-fake-key',
+    fetchImpl: mockFetch,
+  });
+
+  assert.equal(report.decision, 'yellow_needs_review');
+  assert.equal(report.yellowItems.length, 0);
+  assert.deepEqual(
+    report.newModelsRadar.map((n) => n.model),
+    ['gemini-5-nova', 'claude-sonnet-6.0']
+  );
+  assert.equal(report.newModelsRadar[0].litellm?.input, 3.5);
+  assert.equal(report.newModelsRadar[0].openrouter?.output, 17.5);
+  assert.equal(report.newModelsRadar[1].litellm?.input, 2.5);
+  assert.equal(report.newModelsRadar[1].openrouter?.output, 12.5);
+});
+
+test('新模型自动预入库门禁与 PR 草案生成：双源共识自动写 feedModels+衍生别名（不动 activeModels），未经 LiteLLM 确认的 cacheWrite 或阶梯价拦截', async (t) => {
+  // 1) buildAutoStagedAliases：仅 Gemini 4+ 代号生成 Orchestrator / tiered 别名
+  assert.deepEqual(buildAutoStagedAliases('gemini-5-nova'), {
+    'gemini-pro-orchestrator-nova': 'gemini-5-nova',
+    'orchestrator (nova)': 'gemini-5-nova',
+    'Orchestrator (Nova)': 'gemini-5-nova',
+    'gemini-5-nova-tiered': 'gemini-5-nova',
+    'gemini-5-nova-tiered-low': 'gemini-5-nova',
+    'gemini-5-nova-tiered-medium': 'gemini-5-nova',
+    'gemini-5-nova-tiered-high': 'gemini-5-nova',
+    'gemini-5-nova-tiered-xhigh': 'gemini-5-nova',
+    'gemini-5-nova-tiered-extra-high': 'gemini-5-nova',
+  });
+  assert.deepEqual(buildAutoStagedAliases('claude-sonnet-6-0'), {});
+
+  // 2) 未经 LiteLLM 确认的 cacheWritePer1M 或含 hasContextTiers 时不得自动预入库
+  const blockedCacheWrite = evaluateNewModelStagingCandidate({
+    id: 'gemini-5-pulsar',
+    vendor: 'Google',
+    url: 'https://cloud.google.com/model-garden/pricing?hl=en',
+    official: {
+      officialModelName: 'Gemini 5 Pulsar',
+      inputPer1M: 3.0,
+      outputPer1M: 15.0,
+      cachedPer1M: 0.15,
+      cacheWritePer1M: 3.75,
+      hasContextTiers: false,
+      confidence: 'high',
+    },
+    litellm: { input: 3.0, output: 15.0, cached: 0.15 },
+  });
+  assert.equal(blockedCacheWrite.stageable, false);
+
+  const blockedTiers = evaluateNewModelStagingCandidate({
+    id: 'gemini-5-quasar',
+    vendor: 'Google',
+    url: 'https://cloud.google.com/model-garden/pricing?hl=en',
+    official: {
+      officialModelName: 'Gemini 5 Quasar',
+      inputPer1M: 2.0,
+      outputPer1M: 10.0,
+      cachedPer1M: 0.1,
+      hasContextTiers: true,
+      confidence: 'high',
+    },
+    litellm: { input: 2.0, output: 10.0, cached: 0.1 },
+  });
+  assert.equal(blockedTiers.stageable, false);
+
+  // 3) 端到端 write: true：严格双源共识新模型预写入 model-catalog.json 与 pricing-feed.json，决策保持 yellow_needs_review 走 PR 审阅
+  const dir = await mkdtemp(join(tmpdir(), 'gb-auto-pricing-stage-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const catalogPath = join(dir, 'model-catalog.json');
+  const feedPath = join(dir, 'pricing-feed.json');
+  const reportPath = join(dir, 'report.json');
+
+  const fixtureCatalog = {
+    schema: 1,
+    names: { 'gemini-4-carbon': 'Gemini 4 Carbon' },
+    prices: {
+      'gemini-4-carbon': {
+        model: 'gemini-4-carbon',
+        input: 2.0,
+        output: 10.0,
+        cached: 0.1,
+        provenance: {
+          sourceUrl: 'https://cloud.google.com/model-garden/pricing?hl=en',
+          platform: 'Google Cloud 标准 Global API',
+          conditions: 'Google Cloud 官方推广期标准 Global API 文本基准（优惠截至2026-11-30）',
+          checkedAt: '2026-11-18',
+          validUntil: '2026-11-30T23:59:59Z',
+          verification: 'confirmed',
+        },
+        intervals: [
+          { model: 'gemini-4-carbon', validFrom: null, validUntil: '2026-11-30T23:59:59Z', input: 2.0, output: 10.0, cached: 0.1 },
+          { model: 'gemini-4-carbon', validFrom: '2026-12-01T00:00:00Z', validUntil: null, input: 4.0, output: 20.0, cached: 0.2 },
+        ],
+      },
+    },
+    aliases: {},
+    activeModels: ['gemini-4-carbon'],
+    feedModels: ['gemini-4-carbon'],
+    pricingVersion: '2026-11-18',
+    pricingUpdatedAt: '2026-11-18T00:00:00Z',
+  };
+  await writeFile(catalogPath, JSON.stringify(fixtureCatalog, null, 2) + '\n', 'utf8');
+
+  const mockFetch = async (url) => {
+    const target = String(url);
+    if (target.includes('cloud.google.com')) {
+      return new Response(
+        '<html><body><h1>Gemini Model Garden Standard Global API Pricing</h1>' +
+          '<p>Standard pay-as-you-go text token pricing on Google Cloud per 1 million tokens in USD for global endpoints.</p>' +
+          '<table><tr><td>Gemini 4 Carbon*</td><td>$2.00</td><td>$10.00</td></tr>' +
+          '<tr><td>Gemini 5 Nova*</td><td>$3.50</td><td>$17.50</td></tr>' +
+          '<tr><td>Gemini 5 Pulsar</td><td>$3.00</td><td>$15.00</td></tr></table>' +
+          '<p>All rates apply to global standard pay-as-you-go text endpoints in USD.</p></body></html>',
+        { status: 200 }
+      );
+    }
+    if (target.includes('generativelanguage.googleapis.com')) {
+      return new Response(
+        JSON.stringify({
+          candidates: [
+            {
+              content: {
+                parts: [
+                  {
+                    text: JSON.stringify({
+                      pageParsedOk: true,
+                      models: [
+                        {
+                          catalogKey: 'gemini-4-carbon',
+                          officialModelName: 'Gemini 4 Carbon*',
+                          inputPer1M: 2.0,
+                          outputPer1M: 10.0,
+                          cachedPer1M: 0.1,
+                          hasContextTiers: false,
+                          confidence: 'high',
+                          evidenceQuote: 'Gemini 4 Carbon* | $2.00 | $10.00',
+                        },
+                        {
+                          catalogKey: '',
+                          officialModelName: 'Gemini 5 Nova*',
+                          inputPer1M: 3.5,
+                          outputPer1M: 17.5,
+                          cachedPer1M: 0.175,
+                          hasContextTiers: false,
+                          confidence: 'high',
+                          evidenceQuote: 'Gemini 5 Nova* | $3.50 | $17.50',
+                        },
+                        {
+                          catalogKey: '',
+                          officialModelName: 'Gemini 5 Pulsar',
+                          inputPer1M: 3.0,
+                          outputPer1M: 15.0,
+                          cachedPer1M: 0.15,
+                          cacheWritePer1M: 3.75,
+                          hasContextTiers: false,
+                          confidence: 'high',
+                          evidenceQuote: 'Gemini 5 Pulsar | $3.00 | $15.00 | cw:$3.75',
+                        },
+                      ],
+                    }),
+                  },
+                ],
+              },
+            },
+          ],
+        }),
+        { status: 200 }
+      );
+    }
+    if (target.includes('litellm')) {
+      return new Response(
+        JSON.stringify({
+          'gemini/gemini-4-carbon': { input_cost_per_token: 2e-6, output_cost_per_token: 10e-6, cache_read_input_token_cost: 0.1e-6 },
+          'gemini/gemini-5-nova': { input_cost_per_token: 3.5e-6, output_cost_per_token: 17.5e-6, cache_read_input_token_cost: 0.175e-6 },
+          'gemini/gemini-5-pulsar': { input_cost_per_token: 3e-6, output_cost_per_token: 15e-6, cache_read_input_token_cost: 0.15e-6 },
+        }),
+        { status: 200 }
+      );
+    }
+    if (target.includes('openrouter.ai')) {
+      return new Response(JSON.stringify({ data: [] }), { status: 200 });
+    }
+    throw new Error(`Unexpected URL in mockFetch: ${target}`);
+  };
+
+  const report = await runAutoUpdatePricing({
+    write: true,
+    nowMs: Date.parse('2026-11-19T02:00:00Z'),
+    catalogPath,
+    feedPath,
+    reportPath,
+    geminiApiKey: 'test-fake-key',
+    fetchImpl: mockFetch,
+  });
+
+  assert.equal(report.decision, 'yellow_needs_review', '新模型预入库必须走 yellow_needs_review 人工 PR 审阅');
+  assert.equal(report.filesModified, true);
+  assert.equal(report.stagedNewModels.length, 1);
+  assert.equal(report.stagedNewModels[0].catalogKey, 'gemini-5-nova');
+  assert.match(report.summaryMarkdown, /Auto-Staged New Model Candidates/);
+
+  const updatedCatalog = JSON.parse(await readFile(catalogPath, 'utf8'));
+  const updatedFeed = JSON.parse(await readFile(feedPath, 'utf8'));
+  assert.equal(updatedCatalog.names['gemini-5-nova'], 'Gemini 5 Nova');
+  assert.equal(updatedCatalog.prices['gemini-5-nova']?.input, 3.5);
+  assert.equal(updatedCatalog.prices['gemini-5-nova']?.output, 17.5);
+  assert.equal(updatedCatalog.prices['gemini-5-nova']?.cached, 0.175);
+  assert.equal(updatedCatalog.prices['gemini-5-pulsar'], undefined, '未经 LiteLLM 确认 cacheWrite 的模型不得自动预写入');
+  assert.equal(updatedCatalog.aliases['gemini-pro-orchestrator-nova'], 'gemini-5-nova');
+  assert.equal(updatedCatalog.aliases['Orchestrator (Nova)'], 'gemini-5-nova');
+  assert.deepEqual(updatedCatalog.activeModels, ['gemini-4-carbon'], 'activeModels 不得擅自扩大');
+  assert.deepEqual(updatedCatalog.feedModels, ['gemini-4-carbon', 'gemini-5-nova']);
+  assert.equal(updatedCatalog.pricingVersion, '2026-11-19');
+  assert.deepEqual(buildPricingFeed(updatedCatalog), updatedFeed);
+
+  if (typeof pricingMod.localizePricingProvenance === 'function') {
+    const enProv = pricingMod.localizePricingProvenance(updatedCatalog.prices['gemini-5-nova'].provenance, 'en');
+    assert.equal(/[\u4e00-\u9fff]/.test(enProv?.platform ?? ''), false);
+    assert.equal(/[\u4e00-\u9fff]/.test(enProv?.conditions ?? ''), false);
+  }
 });
 

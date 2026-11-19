@@ -4,8 +4,10 @@ import { createHash } from 'node:crypto';
 import type { DataDirectoryName } from './application-target.js';
 import { SqliteReadSnapshot, runUsageDbScanInWorker } from './sqlite-read.js';
 import { ProtobufReader } from './protobuf.js';
+import { USAGE_PROJECTION_VERSION } from './protobuf-projection.js';
 import type { LedgerEvent } from './usage-ledger.js';
 import {
+  isFileCacheEntryReusable,
   resolveDatabaseModelFullName,
   type FileCacheEntry,
   type GenerationEvent,
@@ -255,7 +257,9 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
     if (!bypassCache) {
       const cached = ctx.fileCache.get(dbPath);
       if (
-        cached && cached.events.every(event => event.source_id === sourceId) &&
+        cached &&
+        isFileCacheEntryReusable(cached) &&
+        cached.events.every(event => event.source_id === sourceId) &&
         cached.mtimeMs === fileStat.mtimeMs &&
         cached.size === fileStat.size &&
         cached.walMtimeMs === walMtimeMs &&
@@ -334,6 +338,7 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
         events: [],
         generationsScanned: 0,
         skippedLargeRecords: 0,
+        projectionVersion: USAGE_PROJECTION_VERSION,
         hasError: false,
         lastSuccessAt: Math.floor(Date.now() / 1000),
       });
@@ -491,6 +496,7 @@ async function scanDatabaseEventsOnce(ctx: UsageScanContext, dbPath: string, byp
     events,
     generationsScanned,
     skippedLargeRecords,
+    projectionVersion: USAGE_PROJECTION_VERSION,
     hasError,
     error: timeError,
     lastSuccessAt: hasError ? ctx.fileCache.get(dbPath)?.lastSuccessAt : Math.floor(Date.now() / 1000),

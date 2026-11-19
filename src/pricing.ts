@@ -8,6 +8,7 @@ import {
   getEffectiveModelDisplayName,
 } from './model-catalog.js';
 import { bt, getActiveLocale } from './i18n.js';
+import { resolveDynamicOrchestratorModel } from './usage-types.js';
 
 export interface ApiPricingContextTier {
   /** 单步总输入规模阈值（promptTokens > thresholdTokens 触发；inclusive=true 时为 >=） */
@@ -403,6 +404,63 @@ export function mergePricingEntries(
   }
 }
 
+const LEGACY_INTERNAL_TRIAL_LITE_IDS = new Set([
+  'gemini-3.1-flash-lite',
+  'gemini-4-argon-trial',
+]);
+
+function buildKnownPricedKeys(
+  rawPricingTable?: Record<string, ApiPricingEntry> | null,
+  extraPricingKeys?: Iterable<string>
+): Set<string> {
+  const known = new Set<string>();
+  for (const k of FEED_MODEL_KEYS) {
+    const norm = normalizeModelId(k);
+    if (norm) known.add(norm);
+  }
+  if (rawPricingTable) {
+    for (const k of Object.keys(rawPricingTable)) {
+      const norm = normalizeModelId(k);
+      if (norm) known.add(norm);
+    }
+  }
+  if (extraPricingKeys) {
+    for (const rawKey of extraPricingKeys) {
+      const norm = normalizeModelId(String(rawKey));
+      if (norm) known.add(norm);
+    }
+  }
+  return known;
+}
+
+function isPricedCatalogFlashLiteModel(
+  rawId: string,
+  canonicalKey: string,
+  knownPricedKeys: ReadonlySet<string>
+): boolean {
+  const id = stripModelProviderPrefix(String(rawId ?? '')).trim();
+  if (!id) return false;
+  if (
+    /^(?:chat_|tab_|model_placeholder_)/i.test(id) ||
+    /(?:^|[-_])(?:image|tiered|safety[-_]le|control|exp[-_][a-z0-9]+|trial)(?:$|[-_])/i.test(id)
+  ) {
+    return false;
+  }
+  const normId = normalizeModelId(id);
+  const normKey = normalizeModelId(canonicalKey);
+  if (
+    !normId ||
+    LEGACY_INTERNAL_TRIAL_LITE_IDS.has(normId) ||
+    (normKey && LEGACY_INTERNAL_TRIAL_LITE_IDS.has(normKey))
+  ) {
+    return false;
+  }
+  if (!/(?:^|[-_])flash[-_]lite(?:$|[-_])/i.test(id)) {
+    return false;
+  }
+  return knownPricedKeys.has(normId) || (Boolean(normKey) && knownPricedKeys.has(normKey));
+}
+
 export function isInternalNonChatModelId(rawId: string): boolean {
   const id = stripModelProviderPrefix(String(rawId ?? '')).trim();
   if (!id) return false;
@@ -418,14 +476,16 @@ export function canonicalActivePricingKeys(
 ): Set<string> {
   const source = modelIds ? Array.from(modelIds) : [];
   const effectiveActive = new Set(Array.from(getEffectiveActiveModelKeys(), (k) => normalizeModelId(k)));
+  const knownPricedKeys = buildKnownPricedKeys(DEFAULT_API_PRICES, extraPricingKeys);
   const keys = new Set<string>();
   for (const rawId of source) {
     const trimmed = String(rawId).trim();
     if (!trimmed) continue;
     const baseId = trimmed.replace(/(?:^|[-_])disabled$/i, '').trim();
     const normBase = normalizeModelId(baseId);
-    if (!baseId || (!effectiveActive.has(normBase) && isInternalNonChatModelId(baseId))) continue;
     const matched = matchPricingKeys(baseId, extraPricingKeys);
+    const isPricedFlashLite = isPricedCatalogFlashLiteModel(baseId, matched, knownPricedKeys);
+    if (!baseId || (!effectiveActive.has(normBase) && !isPricedFlashLite && isInternalNonChatModelId(baseId))) continue;
     if (matched) keys.add(matched);
   }
   if (keys.size === 0) {
@@ -452,6 +512,7 @@ export interface UnpricedLiveModelEntry {
   key: string;
   displayName: string;
   disabled: boolean;
+  variants?: string[];
 }
 
 export interface PricingCatalogModelInput {
@@ -543,12 +604,69 @@ interface ExtractedCatalogCandidate {
   resolvedPricing: ApiPricing | null;
   displayName: string;
   disabled: boolean;
+  variantLabel?: string;
+  isOrchestratorVariant?: boolean;
 }
 
-const LEGACY_INTERNAL_TRIAL_LITE_IDS = new Set([
-  'gemini-3.1-flash-lite',
-  'gemini-4-argon-trial',
-]);
+const UNPRICED_THINKING_SUFFIX_LABELS: Record<string, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'XHigh',
+  'extra-high': 'Extra High',
+  'extra-low': 'Extra Low',
+  thinking: 'Thinking',
+};
+
+const UNPRICED_VARIANT_ORDER: Record<string, number> = {
+  Low: 0,
+  Medium: 1,
+  High: 2,
+  XHigh: 3,
+  'Extra High': 4,
+  'Extra Low': 5,
+  Thinking: 6,
+  Orchestrator: 7,
+};
+
+function stripDisplayTierSuffix(displayName: string): string {
+  const cleaned = displayName
+    .replace(/\s*[（(]\s*(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|thinking)\s*[）)]\s*$/i, '')
+    .replace(/\s+(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|thinking)\s*$/i, '')
+    .trim();
+  return cleaned || displayName;
+}
+
+function foldUnpricedLiveCandidate(
+  baseId: string,
+  canonicalKey: string,
+  rawDisplayName: string,
+  siblingNormIds: ReadonlySet<string>
+): { canonicalKey: string; displayName: string; variantLabel?: string; isOrchestratorVariant?: boolean } {
+  const orchestratorTarget = resolveDynamicOrchestratorModel(baseId, rawDisplayName, siblingNormIds);
+  if (orchestratorTarget) {
+    const isOrchLabel = /^Orchestrator\s*\(/i.test(rawDisplayName);
+    return {
+      canonicalKey: orchestratorTarget,
+      displayName: isOrchLabel ? '' : stripDisplayTierSuffix(rawDisplayName),
+      variantLabel: 'Orchestrator',
+      isOrchestratorVariant: true,
+    };
+  }
+  if (/^(?:gemini|claude|gpt|o[1-9])/.test(canonicalKey)) {
+    const suffixMatch = canonicalKey.match(/^(.+)-(extra-high|extra-low|xhigh|high|medium|low|thinking)$/i);
+    if (suffixMatch) {
+      const baseKey = suffixMatch[1]!;
+      const rawSuffix = suffixMatch[2]!.toLowerCase();
+      return {
+        canonicalKey: baseKey,
+        displayName: stripDisplayTierSuffix(rawDisplayName),
+        variantLabel: UNPRICED_THINKING_SUFFIX_LABELS[rawSuffix] ?? rawSuffix,
+      };
+    }
+  }
+  return { canonicalKey, displayName: rawDisplayName };
+}
 
 function isUserVisiblePreviewChatModel(
   sourceKind: CatalogSourceKind,
@@ -585,9 +703,20 @@ function extractCatalogModels(
   extraKeys: Set<string>,
   effectiveActiveSet: Set<string>,
   feedModelSet: Set<string>,
+  knownPricedKeys: ReadonlySet<string>,
   timestampSeconds: number
 ): ExtractedCatalogCandidate[] {
   if (!Array.isArray(rawModels) || rawModels.length === 0) return [];
+  const siblingNormIds = new Set<string>();
+  for (const m of rawModels) {
+    if (!m || typeof m !== 'object') continue;
+    if (m.stale === true || m.quota_source === 'carried') continue;
+    const rawId = String(m.model_id ?? m.id ?? m.name ?? m.model_or_alias ?? m.modelOrAlias ?? '').trim();
+    if (!rawId) continue;
+    const cleaned = normalizeModelId(rawId.replace(/(?:^|[-_])disabled$/i, '').trim())
+      .replace(/-(?:extra-high|extra-low|xhigh|high|medium|low|thinking)$/i, '');
+    if (cleaned) siblingNormIds.add(cleaned);
+  }
   const parsed: ExtractedCatalogCandidate[] = [];
   for (const m of rawModels) {
     if (!m || typeof m !== 'object') continue;
@@ -601,27 +730,34 @@ function extractCatalogModels(
     const rawDisplayName = typeof (m.display_name ?? m.displayName) === 'string'
       ? String(m.display_name ?? m.displayName).trim()
       : '';
+    const foundPricing = lookupPricingEntry(rawPricingTable, baseId);
+    const resolvedPricing = foundPricing
+      ? resolvePricingForTimestamp(foundPricing.entry, timestampSeconds, foundPricing.key)
+      : null;
+    const initialKey = foundPricing?.key || matchPricingKeys(baseId, extraKeys) || normBase;
+    if (!initialKey || FORBIDDEN_CATALOG_KEYS.has(initialKey)) continue;
+    const isPricedFlashLite = isPricedCatalogFlashLiteModel(baseId, initialKey, knownPricedKeys);
     if (
       !effectiveActiveSet.has(normBase) &&
+      !isPricedFlashLite &&
       isInternalNonChatModelId(baseId) &&
       !isUserVisiblePreviewChatModel(sourceKind, baseId, normBase, rawDisplayName, feedModelSet)
     ) {
       continue;
     }
     const disabled = m.disabled === true || hasDisabledSuffix;
-
-    const foundPricing = lookupPricingEntry(rawPricingTable, baseId);
-    const resolvedPricing = foundPricing
-      ? resolvePricingForTimestamp(foundPricing.entry, timestampSeconds, foundPricing.key)
-      : null;
-    const canonicalKey = foundPricing?.key || matchPricingKeys(baseId, extraKeys) || normBase;
-    if (!canonicalKey || FORBIDDEN_CATALOG_KEYS.has(canonicalKey)) continue;
+    const folded = resolvedPricing
+      ? { canonicalKey: initialKey, displayName: rawDisplayName }
+      : foldUnpricedLiveCandidate(baseId, initialKey, rawDisplayName, siblingNormIds);
+    if (!folded.canonicalKey || FORBIDDEN_CATALOG_KEYS.has(folded.canonicalKey)) continue;
 
     parsed.push({
-      canonicalKey,
+      canonicalKey: folded.canonicalKey,
       resolvedPricing,
-      displayName: rawDisplayName,
+      displayName: folded.displayName,
       disabled,
+      ...(folded.variantLabel ? { variantLabel: folded.variantLabel } : {}),
+      ...(folded.isOrchestratorVariant ? { isOrchestratorVariant: true } : {}),
     });
   }
 
@@ -686,6 +822,7 @@ export function resolvePricingCatalogSnapshot(
     .filter((k) => Boolean(k) && !FORBIDDEN_CATALOG_KEYS.has(k));
   const effectiveActiveSet = new Set<string>(effectiveActiveList);
   const feedModelSet = new Set<string>(FEED_MODEL_KEYS);
+  const knownPricedKeys = buildKnownPricedKeys(rawPricingTable);
 
   let primaryKind: CatalogSourceKind | null = null;
   let primaryTier = '';
@@ -700,6 +837,7 @@ export function resolvePricingCatalogSnapshot(
       extraKeys,
       effectiveActiveSet,
       feedModelSet,
+      knownPricedKeys,
       timestampSeconds
     );
     if (extracted.length > 0) {
@@ -717,6 +855,7 @@ export function resolvePricingCatalogSnapshot(
       extraKeys,
       effectiveActiveSet,
       feedModelSet,
+      knownPricedKeys,
       timestampSeconds
     );
     if (extracted.length > 0) {
@@ -737,6 +876,7 @@ export function resolvePricingCatalogSnapshot(
       extraKeys,
       effectiveActiveSet,
       feedModelSet,
+      knownPricedKeys,
       timestampSeconds
     );
     if (extracted.length > 0 || accKind === 'account_cloud') {
@@ -747,7 +887,29 @@ export function resolvePricingCatalogSnapshot(
   }
 
   const primaryPricedMap = new Map<string, { pricing: ApiPricing; enabled: boolean; displayName: string }>();
-  const unpricedMap = new Map<string, UnpricedLiveModelEntry>();
+  const unpricedMap = new Map<string, {
+    key: string;
+    displayName: string;
+    hasNonOrchestratorName: boolean;
+    disabled: boolean;
+    variants: Set<string>;
+  }>();
+  const recordUnpricedCandidate = (c: ExtractedCatalogCandidate, disabled: boolean) => {
+    const existing = unpricedMap.get(c.canonicalKey);
+    const incomingNonOrch = !c.isOrchestratorVariant && Boolean(c.displayName);
+    const nextDisplayName = incomingNonOrch || !existing?.hasNonOrchestratorName
+      ? resolveCatalogDisplayName(c.canonicalKey, c.displayName, existing?.displayName)
+      : existing.displayName;
+    const variants = existing?.variants ?? new Set<string>();
+    if (c.variantLabel) variants.add(c.variantLabel);
+    unpricedMap.set(c.canonicalKey, {
+      key: c.canonicalKey,
+      displayName: nextDisplayName,
+      hasNonOrchestratorName: Boolean(existing?.hasNonOrchestratorName || incomingNonOrch),
+      disabled: existing ? (existing.disabled && disabled) : disabled,
+      variants,
+    });
+  };
 
   if (primaryKind) {
     const allowUnpricedLive = primaryKind === 'live' || primaryKind === 'snapshot' || primaryKind === 'account_live';
@@ -759,16 +921,13 @@ export function resolvePricingCatalogSnapshot(
           enabled: (existing?.enabled ?? false) || !c.disabled,
           displayName: resolveCatalogDisplayName(c.canonicalKey, c.displayName, existing?.displayName),
         });
+        unpricedMap.delete(c.canonicalKey);
       } else if (
-        allowUnpricedLive ||
-        (primaryKind === 'account_cloud' && !c.disabled && !feedModelSet.has(c.canonicalKey))
+        !primaryPricedMap.has(c.canonicalKey) &&
+        (allowUnpricedLive ||
+          (primaryKind === 'account_cloud' && !c.disabled && !feedModelSet.has(c.canonicalKey)))
       ) {
-        const existing = unpricedMap.get(c.canonicalKey);
-        unpricedMap.set(c.canonicalKey, {
-          key: c.canonicalKey,
-          displayName: resolveCatalogDisplayName(c.canonicalKey, c.displayName, existing?.displayName),
-          disabled: existing ? (existing.disabled && c.disabled) : c.disabled,
-        });
+        recordUnpricedCandidate(c, c.disabled);
       }
     }
 
@@ -802,18 +961,14 @@ export function resolvePricingCatalogSnapshot(
       extraKeys,
       effectiveActiveSet,
       feedModelSet,
+      knownPricedKeys,
       timestampSeconds
     );
     for (const c of extracted) {
       if (c.disabled || primaryPricedMap.has(c.canonicalKey)) continue;
       if (!c.resolvedPricing) {
         if (!feedModelSet.has(c.canonicalKey)) {
-          const existingUnpriced = unpricedMap.get(c.canonicalKey);
-          unpricedMap.set(c.canonicalKey, {
-            key: c.canonicalKey,
-            displayName: resolveCatalogDisplayName(c.canonicalKey, c.displayName, existingUnpriced?.displayName),
-            disabled: false,
-          });
+          recordUnpricedCandidate(c, false);
         }
         continue;
       }
@@ -872,7 +1027,17 @@ export function resolvePricingCatalogSnapshot(
     };
   }
 
-  const unpricedLiveModels = Array.from(unpricedMap.values());
+  const unpricedLiveModels: UnpricedLiveModelEntry[] = Array.from(unpricedMap.values()).map((u) => {
+    const variants = [...u.variants].sort(
+      (a, b) => (UNPRICED_VARIANT_ORDER[a] ?? 99) - (UNPRICED_VARIANT_ORDER[b] ?? 99) || a.localeCompare(b)
+    );
+    return {
+      key: u.key,
+      displayName: u.displayName,
+      disabled: u.disabled,
+      ...(variants.length > 0 ? { variants } : {}),
+    };
+  });
   for (const u of unpricedLiveModels) {
     modelCatalogState[u.key] = {
       availability: 'unpriced_live',
@@ -882,7 +1047,9 @@ export function resolvePricingCatalogSnapshot(
   }
 
   for (const key of publicCandidateKeys) {
-    if (!key || FORBIDDEN_CATALOG_KEYS.has(key) || (!effectiveActiveSet.has(key) && isInternalNonChatModelId(key))) continue;
+    if (!key || FORBIDDEN_CATALOG_KEYS.has(key)) continue;
+    const isPricedFlashLite = isPricedCatalogFlashLiteModel(key, key, knownPricedKeys);
+    if (!effectiveActiveSet.has(key) && !isPricedFlashLite && isInternalNonChatModelId(key)) continue;
     if (Object.hasOwn(rawActivePrices, key)) continue;
     const entry = Object.hasOwn(rawPricingTable, key) ? rawPricingTable[key] : lookupPricingEntry(rawPricingTable, key)?.entry;
     if (!entry) continue;

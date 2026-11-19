@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { UsageStatsManager, resolveDatabaseModelFullName } from '../dist/usage.js';
-import { resolvePricingForTimestamp, calculateEstimatedUsd, matchPricingKeys } from '../dist/pricing.js';
+import { resolvePricingForTimestamp, calculateEstimatedUsd, matchPricingKeys, localizePricingProvenance } from '../dist/pricing.js';
 import { ProtobufWriter } from '../dist/protobuf.js';
 import { MODEL_PRICES } from '../dist/model-catalog.js';
 import { execFile } from 'node:child_process';
@@ -382,4 +382,43 @@ test('Orchestrator 双阶段模型识别与合并计费（Argon / Carbon + 执�
   assert.equal(byModel.get('gemini-3.8-flash')?.request_count, 1);
   assert.equal(byModel.get('gemini-3.8-flash')?.estimated_usd, 1.125);
   assert.equal(summary.all_time.estimated_usd, 6.625);
+});
+
+test('Gemini 4 Neon 定价、全档位/Orchestrator 别名映射、2027-01-12 缓存写入生效及英文条款本地化', () => {
+  for (const variant of [
+    'gemini-4-neon',
+    'gemini-4-neon-low',
+    'gemini-4-neon-medium',
+    'gemini-4-neon-high',
+    'gemini-4-neon-xhigh',
+    'Gemini 4 Neon (XHigh)',
+    'gemini-pro-orchestrator-neon',
+    'Orchestrator (Neon)',
+  ]) {
+    assert.equal(matchPricingKeys(variant), 'gemini-4-neon', `${variant} 应归并至 gemini-4-neon`);
+  }
+  assert.equal(resolveDatabaseModelFullName('gemini-pro-orchestrator-neon', 'Orchestrator (Neon)'), 'gemini-4-neon');
+
+  const neon = MODEL_PRICES['gemini-4-neon'];
+  assert.ok(neon && !Array.isArray(neon), 'gemini-4-neon 必须存在内置单价');
+  assert.equal(neon.input, 3.0);
+  assert.equal(neon.output, 15.0);
+  assert.equal(neon.cached, 0.15);
+  assert.equal(neon.cacheWrite, 0);
+
+  const beforeCacheWriteSec = Math.floor(Date.parse('2026-11-19T12:00:00Z') / 1000);
+  const afterCacheWriteSec = Math.floor(Date.parse('2027-01-12T12:00:00Z') / 1000);
+  const resolvedBefore = resolvePricingForTimestamp(neon, beforeCacheWriteSec, 'gemini-4-neon');
+  const resolvedAfter = resolvePricingForTimestamp(neon, afterCacheWriteSec, 'gemini-4-neon');
+
+  assert.equal(resolvedBefore?.cacheWrite, 0);
+  assert.equal(resolvedAfter?.cacheWrite, 3.75);
+  assert.equal(calculateEstimatedUsd(1_000_000, 100_000, 2_000_000, resolvedBefore, 500_000), 3.0 + 1.5 + 0.3);
+  assert.equal(calculateEstimatedUsd(1_000_000, 100_000, 2_000_000, resolvedAfter, 500_000), 3.0 + 1.5 + 0.3 + 1.875);
+
+  const enBefore = localizePricingProvenance(resolvedBefore?.provenance, 'en');
+  const enAfter = localizePricingProvenance(resolvedAfter?.provenance, 'en');
+  assert.equal(/[\u4e00-\u9fff]/.test(enBefore?.platform ?? ''), false);
+  assert.equal(/[\u4e00-\u9fff]/.test(enBefore?.conditions ?? ''), false);
+  assert.equal(/[\u4e00-\u9fff]/.test(enAfter?.conditions ?? ''), false);
 });

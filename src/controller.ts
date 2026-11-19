@@ -11,7 +11,14 @@ import { sanitizeNativeMenus, deepMarkdown, type DeepReport } from './deep-scan.
 import { homedir } from 'node:os';
 import { join } from 'node:path';
 import { CDP, assertLoopback } from './cdp.js';
-import { allowedTarget, discover, verifyPageService, type Endpoint } from './discovery.js';
+import {
+  allowedTarget,
+  discover,
+  inspectBundle,
+  isApplicationRunning,
+  verifyPageService,
+  type Endpoint,
+} from './discovery.js';
 import { compareLayers, type Dictionary } from './dictionary.js';
 import { normalizeLocale, translate } from './i18n.js';
 import {
@@ -113,6 +120,10 @@ export class Controller {
     hasTargetDictionary?: boolean;
     reloadDictionary?: () => Promise<void>;
     selectDictionary?: (version: string) => Promise<Dictionary>;
+    isAppRunning?: () => Promise<boolean>;
+    discoverEndpoint?: (appPath: string, profile: string) => Promise<Endpoint | undefined>;
+    inspectAppBundle?: (appPath: string) => Promise<{ version: string; legacyPatch: boolean }>;
+    verifyPage?: (url: string, appPath: string) => Promise<boolean>;
     onStatus: (status: AssistantStatus) => void;
   }) {
     const initialLocale = normalizeLocale(options.locale ?? '') ?? (options.initiallyPaused ? 'en' : 'zh-Hans');
@@ -146,6 +157,26 @@ export class Controller {
   private activeAppPath(): string {
     return this.endpoint?.appPath ?? this.options.appPath;
   }
+  private checkAppRunning(): Promise<boolean> {
+    return this.options.isAppRunning
+      ? this.options.isAppRunning()
+      : isApplicationRunning(this.activeAppPath());
+  }
+  private discoverEndpoint(appPath: string, profile: string): Promise<Endpoint | undefined> {
+    return this.options.discoverEndpoint
+      ? this.options.discoverEndpoint(appPath, profile)
+      : discover(appPath, profile);
+  }
+  private inspectAppBundle(appPath: string): Promise<{ version: string; legacyPatch: boolean }> {
+    return this.options.inspectAppBundle
+      ? this.options.inspectAppBundle(appPath)
+      : inspectBundle(appPath);
+  }
+  private checkPageService(url: string, appPath: string): Promise<boolean> {
+    return this.options.verifyPage
+      ? this.options.verifyPage(url, appPath)
+      : verifyPageService(url, appPath);
+  }
   private closeProfileWatchers() {
     for (const w of this.profileWatchers.splice(0)) {
       try { w.close(); } catch {}
@@ -173,7 +204,7 @@ export class Controller {
     this.engine = await readFile(new URL('./engine.js', import.meta.url), 'utf8');this.runtimeId=createHash('sha256').update(this.engine).digest('hex');
     this.watchProfiles();
     if(this.dormant) {
-      if(!this.options.fixture) { this.endpoint=await discover(this.options.appPath,this.options.profile);this.status.appVersion=this.endpoint?.appVersion; }
+      if(!this.options.fixture) { this.endpoint=await this.discoverEndpoint(this.options.appPath,this.options.profile);this.status.appVersion=this.endpoint?.appVersion; }
       this.publish('paused', this.t('status.paused_keep'));return;
     }
     await this.tryConnect();
@@ -185,7 +216,7 @@ export class Controller {
     return attempt.finally(() => { this.connecting = undefined; });
   }
   private async connectOnce() {
-    if (this.stopped) return;
+    if (this.stopped || this.dormant) return;
     try {
       if (this.browser) { await this.sync(); return; }
       if (this.options.fixture) {
@@ -195,9 +226,22 @@ export class Controller {
         const url = assertLoopback(version.webSocketDebuggerUrl);
         if (Number(url.port) !== port) throw new Error(this.t('controller.err.fixture_port_mismatch'));
         this.endpoint = { port, browserURL: url.href, pid: 0, appVersion: 'fixture', legacyPatch: false };
-      } else this.endpoint = await discover(this.options.appPath, this.options.profile);
-      if (this.stopped) return;
-      if (!this.endpoint) { this.publish('waiting', this.t('status.waiting_app')); this.retry(); return; }
+      } else this.endpoint = await this.discoverEndpoint(this.options.appPath, this.options.profile);
+      if (this.stopped || this.dormant) return;
+      if (!this.endpoint) {
+        if (!this.options.fixture && await this.checkAppRunning()) {
+          if (this.stopped || this.dormant) return;
+          const inspected = await this.inspectAppBundle(this.activeAppPath()).catch(() => undefined);
+          if (this.stopped || this.dormant) return;
+          if (inspected?.version) this.status.appVersion = inspected.version;
+          this.publish('debug-port-missing', this.t('status.debug_port_missing'));
+          this.retry(3000);
+          return;
+        }
+        this.publish('waiting', this.t('status.waiting_app'));
+        this.retry();
+        return;
+      }
       this.status.appVersion = this.endpoint.appVersion;
       if(this.options.selectDictionary){const dictionary=await this.options.selectDictionary(this.endpoint.appVersion);this.options.dictionary=dictionary;this.status.dictionaryVersion=dictionary.version;this.status.entries=Object.keys(dictionary.entries).length;this.bootCache.clear();}
       if (this.endpoint.legacyPatch) { this.publish('legacy-blocked', this.t('status.legacy_blocked')); this.retry(30000); return; }
@@ -206,7 +250,7 @@ export class Controller {
         const activeApp = this.activeAppPath();
         const targets = await (await fetch(`http://127.0.0.1:${this.endpoint.port}/json/list`, { signal: AbortSignal.timeout(2000), redirect: 'error' })).json() as {type: string; url: string}[];
         const target = targets.find(t => allowedTarget(t));
-        if (!target || !await verifyPageService(target.url, activeApp)) { this.publish('waiting-window', this.t('status.waiting_window')); this.retry(); return; }
+        if (!target || !await this.checkPageService(target.url, activeApp)) { this.publish('waiting-window', this.t('status.waiting_window')); this.retry(); return; }
         const bundle=await this.bundleCache.read(activeApp,this.endpoint.pid,this.endpoint.appVersion,new URL(target.url).origin);
         if(this.status.bundleSha256!==bundle.hash){this.trustedCandidates=[];}this.status.bundleSha256=bundle.hash;this.status.bundleCacheHit=bundle.cacheHit;this.initialBundle=bundle.source;
       }
@@ -283,7 +327,7 @@ export class Controller {
       if (!this.dormant) for (const target of permitted) if (!this.pages.has(target.id)) {
         if (this.dormant || this.stopped) break;
         try {
-          if (!this.options.fixture && !await verifyPageService(target.url, this.activeAppPath())) {
+          if (!this.options.fixture && !await this.checkPageService(target.url, this.activeAppPath())) {
             this.status.errors.push(this.t('controller.err.window_unverified'));
             continue;
           }
@@ -371,7 +415,7 @@ export class Controller {
       if (!allowedTarget({ type: 'page', url: frame.url }, this.options.fixture?.origin)) return;
       if(!this.options.fixture&&this.endpoint){
         const activeApp = this.activeAppPath();
-        if(!await verifyPageService(frame.url,activeApp))throw new Error(this.t('controller.err.page_unverified'));
+        if(!await this.checkPageService(frame.url,activeApp))throw new Error(this.t('controller.err.page_unverified'));
         const bundle=await this.bundleCache.read(activeApp,this.endpoint.pid,this.endpoint.appVersion,new URL(frame.url).origin);
         this.status.bundleSha256=bundle.hash;this.status.bundleCacheHit=bundle.cacheHit;this.status.unverifiedVersion=!this.verifiedBundle();
         if(bundle.source)this.initialBundle=bundle.source;
@@ -598,6 +642,12 @@ export class Controller {
         if (this.effectiveHudLocale() !== prevHudLocale) {
           await this.hudBridge.refreshAllForLocaleChange();
         }
+        if (!this.browser && this.status.mode === 'debug-port-missing') {
+          this.publish('debug-port-missing', this.t('status.debug_port_missing'));
+          return;
+        }
+      } else {
+        clearTimeout(this.reconnection);
       }
       this.publish('paused', this.status.errors.length ? this.t('status.pausedWithErrors') : this.t('status.paused'));
     });
@@ -685,10 +735,15 @@ export class Controller {
             await this.resumeHudOnly();
             await this.hudBridge.refreshAllForLocaleChange();
           } else {
+            clearTimeout(this.reconnection);
             this.hudBridge.clearActivePanes();
             this.browser?.close();
             this.browser = undefined;
           }
+        }
+        if (this.hudEnabled && !this.browser && this.status.mode === 'debug-port-missing') {
+          this.publish('debug-port-missing', this.t('status.debug_port_missing'));
+          return;
         }
         const message = this.status.errors.length
           ? this.t('status.pausedWithErrors')
@@ -718,6 +773,10 @@ export class Controller {
       }));
       if (this.hudEnabled) {
         await this.hudBridge.refreshAllForLocaleChange();
+      }
+      if (!this.browser && this.status.mode === 'debug-port-missing') {
+        this.publish('debug-port-missing', this.t('status.debug_port_missing'));
+        return;
       }
       this.publish();
     });
@@ -749,9 +808,12 @@ export class Controller {
         if (enabled) {
           await this.resumeHudOnly();
         } else {
+          clearTimeout(this.reconnection);
           this.hudBridge.clearActivePanes();
           this.browser?.close();
           this.browser = undefined;
+          this.publish('paused', this.t('status.paused_keep'));
+          return;
         }
         this.publish(); return;
       }

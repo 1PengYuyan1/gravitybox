@@ -33,6 +33,8 @@ import { decodeVarint64, skipProtobufField } from '../protobuf.js';
 
 const UUID_REGEX_GLOBAL = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/gi;
 const ACTIVE_STEP_STATUSES = new Set([1, 2, 8, 9]);
+const RUNNING_SUBAGENT_STEP_STATUSES = new Set([1, 2, 8]);
+const TRANSPARENT_HANDOFF_STEP_TYPES = new Set([81, 98, 99, 101, 102, 104]);
 const SUBAGENT_TOOL_NAMES = new Set([
   'invoke_subagent',
   'default_api:invoke_subagent',
@@ -40,6 +42,15 @@ const SUBAGENT_TOOL_NAMES = new Set([
   'start_subagent',
   'spawn_subagent',
 ]);
+const SUBAGENT_WAITING_TOOL_NAMES = new Set([
+  'swarm_wait',
+  'default_api:swarm_wait',
+]);
+
+function isWaitingSubagentToolName(toolCallName: string | undefined): boolean {
+  if (!toolCallName) return false;
+  return SUBAGENT_WAITING_TOOL_NAMES.has(toolCallName.trim().toLowerCase());
+}
 const MAX_CACHED_CONVERSATIONS = 128;
 const ACTIVE_DB_RECENCY_MS = 60 * 60 * 1000;
 const TURN_STEP_HANDOFF_GRACE_SEC = 600;
@@ -943,6 +954,7 @@ interface StageAccumulator {
 const COMPACT_MODEL_LABEL_RULES: ReadonlyArray<readonly [RegExp, string, string]> = [
   [/^gemini-4-carbon/, 'Carbon', 'C'],
   [/^gemini-4-argon/, 'Argon', 'A'],
+  [/^gemini-4-neon/, 'Neon', 'N'],
   [/^gemini-4-hydrogen/, 'Hydrogen', 'H'],
   [/^gemini-(?:[\d.]+-)?pro|^gemini-pro/, 'Pro', 'P'],
   [/^gemini-(?:[\d.]+-)?flash|^gemini-flash/, 'Flash', 'F'],
@@ -1018,10 +1030,13 @@ function classifyContextModelSlot(params: {
     /\borchestrator\b/i.test(stepModelName);
 
   if (isPlannerHint || (!combinedRaw && /\borchestrator\b|^MODEL_PLACEHOLDER_M66[78]$/i.test(fallbackInputModelId))) {
-    const hasCodenameInStep = /\b(?:carbon|argon|hydrogen)\b/i.test(combinedRaw);
+    const hasCodenameInStep = /\b(?:carbon|argon|hydrogen|neon)\b|\bgemini-pro-orchestrator-(?!g1(?:-|$))[a-z][a-z0-9]*\b/i.test(combinedRaw);
     const isCarbon = /\bcarbon\b/i.test(combinedRaw) || modelEnum === 1667 || /M667$/i.test(responseModel) || (!hasCodenameInStep && /\bcarbon\b/i.test(fallbackInputModelId));
     const isArgon = !isCarbon && (/\bargon\b/i.test(combinedRaw) || modelEnum === 1668 || /M668$/i.test(responseModel) || (!hasCodenameInStep && /\bargon\b/i.test(fallbackInputModelId)));
-    const dynMatch = !isCarbon && !isArgon ? `${combinedRaw} ${fallbackInputModelId}`.match(/Orchestrator\s*\(\s*([A-Za-z][A-Za-z0-9._-]{1,31})\s*\)/i) : null;
+    const dynMatch = !isCarbon && !isArgon
+      ? `${combinedRaw} ${fallbackInputModelId}`.match(/Orchestrator\s*\(\s*([A-Za-z][A-Za-z0-9._-]{1,31})\s*\)/i)
+        ?? `${combinedRaw} ${fallbackInputModelId}`.match(/\bgemini-pro-orchestrator-(?!g1(?:-|$))([a-z][a-z0-9]*)\b/i)
+      : null;
     const rawCode = isCarbon ? 'Carbon' : isArgon ? 'Argon' : dynMatch?.[1] || 'Argon';
     const lowerCode = rawCode.toLowerCase();
     const shortLabel = rawCode.charAt(0).toUpperCase() + rawCode.slice(1);
@@ -1887,10 +1902,15 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
       const candidateStatus = candidate.status ?? 3;
       if (!ACTIVE_STEP_STATUSES.has(candidateStatus)) continue;
       const isCandidateSubagent =
-        Boolean(candidate.isSubagentStep) ||
-        candidateType === 127 ||
-        Boolean(candidate.toolCallName && SUBAGENT_TOOL_NAMES.has(candidate.toolCallName));
-      if (isCandidateSubagent && !turnFinished) {
+        !isWaitingSubagentToolName(candidate.toolCallName) &&
+        (Boolean(candidate.isSubagentStep) ||
+          candidateType === 127 ||
+          Boolean(candidate.toolCallName && SUBAGENT_TOOL_NAMES.has(candidate.toolCallName)));
+      if (
+        isCandidateSubagent &&
+        !turnFinished &&
+        RUNNING_SUBAGENT_STEP_STATUSES.has(candidateStatus)
+      ) {
         detectedRunningSubagents++;
       }
       if (input.allowDbActiveStepInference && latestActiveForegroundKind === null) {
@@ -2346,7 +2366,6 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   const currentTurnOutputTpsPending = currentTurnTimedSamples === 0 && isStreaming;
   const currentTurnOutputTpsFormatted =
     currentTurnTimedSamples > 0 ? currentTurnTpsInfo.formatted : isStreaming ? bt('metrics.calculating') : '—';
-  const TRANSPARENT_HANDOFF_STEP_TYPES = new Set([81, 98, 99, 101, 102, 104]);
   let effectiveLastCtxIdx = contextSteps.length - 1;
   while (effectiveLastCtxIdx > lastTurnStartIndex && effectiveLastCtxIdx >= 0) {
     const candidate = contextSteps[effectiveLastCtxIdx]!;
@@ -3275,8 +3294,9 @@ export class ConversationMetricsEngine {
 
     const hasActiveSubagentStep = mainIsRecent && mainState.steps.some(
       (s) =>
+        !isWaitingSubagentToolName(s.toolCallName) &&
         (s.isSubagentStep || (s.toolCallName && SUBAGENT_TOOL_NAMES.has(s.toolCallName))) &&
-        ACTIVE_STEP_STATUSES.has(s.status)
+        RUNNING_SUBAGENT_STEP_STATUSES.has(s.status)
     );
     const hasSubagentEvidenceInMain = mainState.steps.some(
       (s) =>
@@ -3546,6 +3566,8 @@ export class ConversationMetricsEngine {
           if (recent) {
             let childActive = false;
             let childTurnTerminated = terminalSummaryChildren.has(childId);
+            let sawWaitingTailStep = false;
+            let tailInspectionDone = false;
             for (let idx = childState.steps.length - 1; idx >= 0; idx--) {
               const step = childState.steps[idx]!;
               if (step.stepType === 14) break;
@@ -3557,10 +3579,30 @@ export class ConversationMetricsEngine {
                 childTurnTerminated = true;
                 break;
               }
-              if (ACTIVE_STEP_STATUSES.has(step.status)) {
+              if (!tailInspectionDone && !TRANSPARENT_HANDOFF_STEP_TYPES.has(step.stepType)) {
+                tailInspectionDone = true;
+                if (isWaitingSubagentToolName(step.toolCallName)) {
+                  childTurnTerminated = true;
+                  break;
+                }
+                if (step.status === 9) {
+                  sawWaitingTailStep = true;
+                }
+              }
+              if (isWaitingSubagentToolName(step.toolCallName)) {
+                if (ACTIVE_STEP_STATUSES.has(step.status)) {
+                  childTurnTerminated = true;
+                  break;
+                }
+                continue;
+              }
+              if (RUNNING_SUBAGENT_STEP_STATUSES.has(step.status)) {
                 childActive = true;
                 break;
               }
+            }
+            if (!childActive && sawWaitingTailStep) {
+              childTurnTerminated = true;
             }
             if (!childTurnTerminated && runningSummaryChildren.has(childId)) {
               childActive = true;
@@ -3638,11 +3680,12 @@ export class ConversationMetricsEngine {
     const normalizedContextSteps =
       verifiedChildIds.size > 0
         ? mainState.steps.map((step, idx) => {
-            if (!ACTIVE_STEP_STATUSES.has(step.status)) return step;
+            if (!RUNNING_SUBAGENT_STEP_STATUSES.has(step.status)) return step;
             const isSubStep =
-              Boolean(step.isSubagentStep) ||
-              step.stepType === 127 ||
-              Boolean(step.toolCallName && SUBAGENT_TOOL_NAMES.has(step.toolCallName));
+              !isWaitingSubagentToolName(step.toolCallName) &&
+              (Boolean(step.isSubagentStep) ||
+                step.stepType === 127 ||
+                Boolean(step.toolCallName && SUBAGENT_TOOL_NAMES.has(step.toolCallName)));
             if (!isSubStep) return step;
             if (step.childConversationIds && step.childConversationIds.length > 0) {
               const allVerified = step.childConversationIds.every((cid) => verifiedChildIds.has(cid.toLowerCase()));

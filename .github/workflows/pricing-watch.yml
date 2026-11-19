@@ -86,6 +86,7 @@ jobs:
           GH_TOKEN: ${{ secrets.PRICING_AUTO_MERGE_TOKEN || secrets.GITHUB_TOKEN }}
           DECISION: ${{ steps.audit.outputs.decision }}
           GATE_PASSED: ${{ steps.gate.outputs.passed }}
+          STAGED_NEW_COUNT: ${{ steps.audit.outputs.staged_new_count || '0' }}
         shell: bash
         run: |
           set -euo pipefail
@@ -109,6 +110,9 @@ jobs:
           if [ "$EFFECTIVE_DECISION" = "green_auto_merge" ]; then
             COMMIT_MSG="chore(pricing): auto-sync verified model prices"
             PR_TITLE="chore(pricing): auto-sync verified model prices"
+          elif [ "${STAGED_NEW_COUNT:-0}" -gt 0 ]; then
+            COMMIT_MSG="chore(pricing): stage verified new model candidates for review"
+            PR_TITLE="[Needs-Review] Auto-staged new model pricing candidates"
           else
             COMMIT_MSG="chore(pricing): pricing update needs manual review"
             PR_TITLE="[Needs-Review] Pricing update or divergence detected"

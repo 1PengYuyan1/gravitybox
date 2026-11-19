@@ -5,6 +5,7 @@ import fs from "node:fs";
 import path from "node:path";
 import os from "node:os";
 import * as hudExports from "../dist/hud.js";
+import { AntigravityHudManager } from "../runtime/hud-manager.js";
 const { computeTps, parseProtobufTimestamp, parseStepMetadataBlob, parseLatestGenMetadataBlob, ConversationMetricsEngine, buildConversationHudMetrics, resolveModelCapacity } = hudExports;
 
 // Fixture state and hooks are scoped to this group; child cases run serially.
@@ -1167,3 +1168,259 @@ test('Case I: Orchestrator 后新轮切回独立 Gemini 4 Hydrogen (High) 按轮
   assert.equal(resFallbackModel.context.modelStages?.filter((s) => s.modelId === 'gemini-4-hydrogen').length, 1);
 });
 });
+
+describeContractGroup("HUD 前端探针 · resolveSubagentState 等待/阻塞态过滤", { concurrency: false }, async () => {
+  class MockDomNode {
+    constructor(tagName = 'div', attrs = {}, text = '') {
+      this.tagName = tagName.toUpperCase();
+      this.attributes = new Map();
+      this.children = [];
+      this.parentNode = null;
+      this.classList = new Set();
+      this._textContent = text;
+      for (const [k, v] of Object.entries(attrs)) {
+        if (k === 'class') {
+          String(v).split(/\s+/).filter(Boolean).forEach((c) => this.classList.add(c));
+        } else {
+          this.attributes.set(k, String(v));
+        }
+      }
+    }
+    get textContent() {
+      if (this._textContent) return this._textContent;
+      return this.children.map((c) => c.textContent).join('');
+    }
+    set textContent(v) {
+      this._textContent = String(v ?? '');
+    }
+    setAttribute(k, v) {
+      this.attributes.set(k, String(v));
+    }
+    getAttribute(k) {
+      return this.attributes.has(k) ? this.attributes.get(k) : null;
+    }
+    hasAttribute(k) {
+      return this.attributes.has(k);
+    }
+    appendChild(child) {
+      child.parentNode = this;
+      this.children.push(child);
+      return child;
+    }
+    matchesSingle(part) {
+      const p = part.trim();
+      if (!p) return false;
+      if (/^[a-zA-Z]+$/.test(p)) return this.tagName === p.toUpperCase();
+      if (p.startsWith('.')) return this.classList.has(p.slice(1));
+      const hasAttr = p.match(/^\[([a-zA-Z0-9_-]+)\]$/);
+      if (hasAttr) return this.hasAttribute(hasAttr[1]);
+      const exactAttr = p.match(/^\[([a-zA-Z0-9_-]+)="([^"]+)"\]$/);
+      if (exactAttr) return this.getAttribute(exactAttr[1]) === exactAttr[2];
+      const prefAttr = p.match(/^\[([a-zA-Z0-9_-]+)\^="([^"]+)"\]$/);
+      if (prefAttr) return (this.getAttribute(prefAttr[1]) || '').startsWith(prefAttr[2]);
+      const subAttr = p.match(/^\[([a-zA-Z0-9_-]+)\*="([^"]+)"(?:\s+i)?\]$/);
+      if (subAttr) return (this.getAttribute(subAttr[1]) || '').toLowerCase().includes(subAttr[2].toLowerCase());
+      return false;
+    }
+    matches(sel) {
+      return String(sel).split(',').some((part) => this.matchesSingle(part));
+    }
+    closest(sel) {
+      let cur = this;
+      while (cur) {
+        if (cur.matches(sel)) return cur;
+        cur = cur.parentNode;
+      }
+      return null;
+    }
+    querySelector(sel) {
+      return this.querySelectorAll(sel)[0] || null;
+    }
+    querySelectorAll(sel) {
+      const out = [];
+      const visit = (node) => {
+        for (const child of node.children) {
+          if (child.matches(sel)) out.push(child);
+          visit(child);
+        }
+      };
+      visit(this);
+      return out;
+    }
+  }
+
+  function makeChip(name, dotState, extraChildren = []) {
+    const chip = new MockDomNode('button', { 'aria-label': `Open Subagent: ${name}` });
+    if (dotState !== null && dotState !== undefined) {
+      chip.appendChild(new MockDomNode('span', { 'data-agent-state-dot': dotState }));
+    }
+    for (const child of extraChildren) chip.appendChild(child);
+    return chip;
+  }
+
+  test('data-agent-state-dot 为 waiting / standing_by / blocked / needs_attention 等等待与阻塞态不被计入 running', () => {
+    const mgr = new AntigravityHudManager();
+    try {
+      const nonRunningStates = [
+        'waiting',
+        'standing_by',
+        'standing-by',
+        'standing by',
+        'STANDING_BY',
+        'blocked',
+        'needs_you',
+        'needs-you',
+        'needs you',
+        'needs_attention',
+        'needs-attention',
+        'Needs Attention',
+        'needs_approval',
+        'needs_input',
+      ];
+      for (const state of nonRunningStates) {
+        const view = new MockDomNode('div', { 'data-testid': 'conversation-view' });
+        view.appendChild(makeChip(`Worker-${state}`, state));
+        const res = mgr.resolveSubagentState(view, { isSubpane: false });
+        assert.equal(res.isSubagentRunning, false, `dotState="${state}" 不应判定为运行中`);
+        assert.equal(res.runningSubagentCount, 0, `dotState="${state}" 计数应为 0`);
+      }
+
+      // 混合场景：1 个 running + 4 个分别处于 waiting / standing_by / blocked / needs_attention，仅计 1
+      const mixedView = new MockDomNode('div', { 'data-testid': 'conversation-view' });
+      mixedView.appendChild(makeChip('Worker-Waiting', 'waiting'));
+      mixedView.appendChild(makeChip('Worker-StandingBy', 'standing_by'));
+      mixedView.appendChild(makeChip('Worker-Blocked', 'blocked'));
+      mixedView.appendChild(makeChip('Worker-NeedsAttention', 'needs_attention'));
+      mixedView.appendChild(makeChip('Worker-Active', 'running'));
+      const mixedRes = mgr.resolveSubagentState(mixedView, { isSubpane: false });
+      assert.equal(mixedRes.isSubagentRunning, true);
+      assert.equal(mixedRes.runningSubagentCount, 1);
+    } finally {
+      mgr.dispose();
+    }
+  });
+
+  test('agent-status-waiting / agent-status-blocked / agent-status-paused 在 agentRefs 与 activeToolNodes 中均被排除', () => {
+    const mgr = new AntigravityHudManager();
+    try {
+      for (const statusTestId of ['agent-status-waiting', 'agent-status-blocked', 'agent-status-paused']) {
+        const view = new MockDomNode('div', { 'data-testid': 'conversation-view' });
+        // agentRefs 芯片即使残留 spinner，命中等待/阻塞/暂停图标也必须排除
+        view.appendChild(
+          makeChip('Swarm-Member', null, [
+            new MockDomNode('span', { 'data-testid': statusTestId }),
+            new MockDomNode('span', { 'data-testid': 'status-loading-spinner' }),
+          ])
+        );
+        // activeToolNodes 卡片命中等待/阻塞/暂停图标也必须排除
+        const card = new MockDomNode('div', { 'data-testid': 'browser-subagent-row' });
+        card.appendChild(new MockDomNode('span', { 'data-testid': statusTestId }));
+        card.appendChild(new MockDomNode('span', { class: 'animate-spin' }));
+        view.appendChild(card);
+
+        const res = mgr.resolveSubagentState(view, { isSubpane: false });
+        assert.equal(res.isSubagentRunning, false, `${statusTestId} 不应计入 running`);
+        assert.equal(res.runningSubagentCount, 0, `${statusTestId} 计数应为 0`);
+      }
+    } finally {
+      mgr.dispose();
+    }
+  });
+
+  test('idle-status-text 为 "1 subagent running" 与等待/阻塞态芯片及提示共存时准确返回 runningSubagentCount: 1', () => {
+    const mgr = new AntigravityHudManager();
+    try {
+      const view = new MockDomNode('div', { 'data-testid': 'conversation-view' });
+      const idleText = new MockDomNode('div', { 'data-testid': 'idle-status-text' }, '1 subagent running');
+      view.appendChild(idleText);
+      view.appendChild(makeChip('native-ui', 'running'));
+      view.appendChild(makeChip('i18n-backend', 'standing_by'));
+      view.appendChild(makeChip('verifier', 'waiting'));
+      view.appendChild(
+        makeChip('coordinator', 'needs_attention', [
+          new MockDomNode('span', { 'data-testid': 'agent-status-blocked' }),
+        ])
+      );
+
+      const res1 = mgr.resolveSubagentState(view, { isSubpane: false });
+      assert.equal(res1.isSubagentRunning, true);
+      assert.equal(res1.runningSubagentCount, 1);
+
+      // 同一 idle-status-text 含 blocked / waiting 并存文案时仍准确提取 running 计数
+      idleText.textContent = '1 subagent running, 2 blocked';
+      const res2 = mgr.resolveSubagentState(view, { isSubpane: false });
+      assert.equal(res2.isSubagentRunning, true);
+      assert.equal(res2.runningSubagentCount, 1);
+
+      idleText.textContent = '2 subagents blocked, 1 subagent running';
+      const res3 = mgr.resolveSubagentState(view, { isSubpane: false });
+      assert.equal(res3.isSubagentRunning, true);
+      assert.equal(res3.runningSubagentCount, 1);
+
+      // 仅有 blocked/waiting 提示且无运行态芯片时返回 0
+      const blockedOnlyView = new MockDomNode('div', { 'data-testid': 'conversation-view' });
+      blockedOnlyView.appendChild(new MockDomNode('div', { 'data-testid': 'idle-status-text' }, '2 subagents blocked'));
+      blockedOnlyView.appendChild(makeChip('i18n-backend', 'standing_by'));
+      blockedOnlyView.appendChild(makeChip('verifier', 'blocked'));
+      const res4 = mgr.resolveSubagentState(blockedOnlyView, { isSubpane: false });
+      assert.equal(res4.isSubagentRunning, false);
+      assert.equal(res4.runningSubagentCount, 0);
+
+      // P1-04 回归：agentRefs 芯片明确处于 standing_by / waiting / blocked 时，即便含装饰性 .animate-spin / .spinner 也必须短路排除；
+      // 而 2.33.0 四点加载动画（status-loading-spinner 内含空值 data-agent-state-dot=""）仍正常识别为运行中
+      const spinnerStandbyView = new MockDomNode('div', { 'data-testid': 'conversation-view' });
+      spinnerStandbyView.appendChild(
+        makeChip('standby-with-spinner', 'standing_by', [new MockDomNode('span', { class: 'animate-spin' })])
+      );
+      spinnerStandbyView.appendChild(
+        makeChip('blocked-with-spinner', 'blocked', [new MockDomNode('span', { class: 'spinner' })])
+      );
+      const resStandbySpin = mgr.resolveSubagentState(spinnerStandbyView, { isSubpane: false });
+      assert.equal(resStandbySpin.isSubagentRunning, false, '非运行态 dot 芯片含装饰 spinner 时必须短路排除');
+      assert.equal(resStandbySpin.runningSubagentCount, 0);
+
+      const fourDotSpinner = new MockDomNode('span', { 'data-testid': 'status-loading-spinner' });
+      fourDotSpinner.appendChild(new MockDomNode('span', { 'data-agent-state-dot': '' }));
+      spinnerStandbyView.appendChild(makeChip('active-233-four-dot', null, [fourDotSpinner]));
+      const resFourDot = mgr.resolveSubagentState(spinnerStandbyView, { isSubpane: false });
+      assert.equal(resFourDot.isSubagentRunning, true, '空值 data-agent-state-dot 的 2.33.0 四点加载器仍应计入运行中');
+      assert.equal(resFourDot.runningSubagentCount, 1);
+    } finally {
+      mgr.dispose();
+    }
+  });
+
+  test('MutationObserver attributeFilter 包含 data-agent-state-dot 以即时感知子智能体圆点状态切换', () => {
+    const prevDoc = globalThis.document;
+    const prevMo = globalThis.MutationObserver;
+    const observedConfigs = [];
+    globalThis.MutationObserver = class FakeMutationObserver {
+      observe(target, config) {
+        observedConfigs.push({ target, config });
+      }
+      disconnect() {}
+    };
+    globalThis.document = {
+      body: new MockDomNode('body'),
+      documentElement: new MockDomNode('html'),
+      querySelectorAll: () => [],
+      addEventListener() {},
+      removeEventListener() {},
+    };
+    const mgr = new AntigravityHudManager();
+    try {
+      mgr.start();
+      const bodyConfig = observedConfigs.find((item) => item.target === globalThis.document.body)?.config;
+      assert.ok(bodyConfig, '应监听 document.body');
+      assert.ok(
+        Array.isArray(bodyConfig.attributeFilter) && bodyConfig.attributeFilter.includes('data-agent-state-dot'),
+        'attributeFilter 必须包含 data-agent-state-dot'
+      );
+    } finally {
+      mgr.dispose();
+      globalThis.document = prevDoc;
+      globalThis.MutationObserver = prevMo;
+    }
+  });
+});
+

@@ -7,6 +7,8 @@ import { join, basename } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { UsageStatsManager } from '../dist/usage.js';
 import { UsageLedger } from '../dist/usage-ledger.js';
+import { SqliteReadSnapshot } from '../dist/sqlite-read.js';
+import { USAGE_PROJECTION_VERSION } from '../dist/protobuf-projection.js';
 import {
   classifyUsageWarningCode,
   buildPricingWarningCodes,
@@ -1143,5 +1145,257 @@ test('1.1.1 终审回归: 反向旧别名重入零自环零丢账、Protobuf 严
     assert.equal(enSummary.available_accounts?.[0]?.label, 'All Accounts', '切换语言后 calendarKey 变化应立即返回英文摘要而非复用中文缓存');
   });
 });
+
+test('v1.1.1 超大重复分块与大1.9/废弃字段3投影修复及策略A缓存自愈', async t => {
+  await withFixture(t, async ({ stateDir, geminiDir, convDir }) => {
+    const now = Math.floor(Date.now() / 1000);
+    const largeDbPath = join(convDir, 'large-repeated-chunks.db');
+
+    // 1. 构造 >18MB gen_metadata：包含 120 个 150KB 重复 1.2 载荷、>64KB 的 1.9（含 1.9.4.1 时间戳）与 >4MB 废弃字段 3
+    {
+      const db = new DatabaseSync(largeDbPath);
+      db.exec('CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY,data BLOB);CREATE TABLE steps(idx INTEGER PRIMARY KEY,step_type INTEGER,metadata BLOB)');
+      const repeated1_2 = Array.from({ length: 120 }, () =>
+        W.encodeLengthDelimited(2, Buffer.alloc(150 * 1024))
+      );
+      const usagePayload = Buffer.concat([
+        W.encodeVarintField(1, 1525),
+        W.encodeVarintField(2, 2290),
+        W.encodeVarintField(3, 1069),
+        W.encodeVarintField(5, 495387),
+      ]);
+      const largeChatStart1_9 = Buffer.concat([
+        W.encodeLengthDelimited(4, W.encodeVarintField(1, now - 120)),
+        W.encodeLengthDelimited(10, Buffer.alloc(70 * 1024)),
+      ]);
+      const wrapped = Buffer.concat([
+        ...repeated1_2,
+        W.encodeVarintField(3, 1525),
+        W.encodeLengthDelimited(4, usagePayload),
+        W.encodeLengthDelimited(9, largeChatStart1_9),
+        W.encodeString(19, 'gemini-4-hydrogen'),
+        W.encodeString(21, 'Gemini 4 Hydrogen (High)'),
+      ]);
+      const deprecatedField3 = Buffer.concat([
+        W.encodeLengthDelimited(27, W.encodeString(8, 'ignored-planner-model')),
+        W.encodeLengthDelimited(28, Buffer.alloc(4 * 1024 * 1024 + 128)),
+      ]);
+      const genBlob = Buffer.concat([
+        W.encodeLengthDelimited(2, W.encodeVarint(10)),
+        W.encodeLengthDelimited(3, deprecatedField3),
+        W.encodeString(4, 'exec-large-gen-1'),
+        W.encodeLengthDelimited(1, wrapped),
+      ]);
+      assert.ok(genBlob.length > 16 * 1024 * 1024);
+      db.prepare('INSERT INTO gen_metadata VALUES(?,?)').run(0, genBlob);
+      db.close();
+    }
+
+    const reader = new SqliteReadSnapshot(largeDbPath);
+    try {
+      const projected = await reader.projectBlob('gen_metadata', 'data', 0);
+      assert.equal(projected.ok, true, projected.error);
+      assert.ok(projected.rows[0].data_blob.length < 4096);
+    } finally {
+      await reader.close();
+    }
+
+    const scanGenMgr = new UsageStatsManager({ stateDir: join(stateDir, 'scan-gen'), geminiDir });
+    const genScan = await scanGenMgr.scanDatabaseEvents(largeDbPath);
+    assert.equal(genScan.skippedLargeRecords, 0);
+    assert.equal(genScan.events.length, 1);
+    assert.equal(genScan.events[0].model, 'gemini-4-hydrogen');
+    assert.equal(genScan.events[0].input_tokens, 2290);
+    assert.equal(genScan.events[0].output_tokens, 1069);
+    assert.equal(genScan.events[0].cached_tokens, 495387);
+    assert.equal(genScan.events[0].total_tokens, 498746);
+    assert.equal(genScan.events[0].timestamp_seconds, now - 120);
+
+    // 2. 构造 >16MB steps (step_type=15)：含大字段 24 与大干扰字段，验证 STEP_PROJECTION 提取 1.1 时间戳回填
+    const largeStepsDbPath = join(convDir, 'large-steps-resolvable.db');
+    {
+      const db = new DatabaseSync(largeStepsDbPath);
+      db.exec('CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY,data BLOB);CREATE TABLE steps(idx INTEGER PRIMARY KEY,step_type INTEGER,metadata BLOB)');
+      const usageBuf = Buffer.concat([W.encodeVarintField(2, 310), W.encodeVarintField(3, 90)]);
+      const execBuf = Buffer.from('exec-large-step-1', 'utf8');
+      const genBlob = Buffer.concat([
+        W.encodeLengthDelimited(
+          1,
+          Buffer.concat([W.encodeString(19, 'gemini-4-carbon'), W.encodeLengthDelimited(4, usageBuf)])
+        ),
+        W.encodeLengthDelimited(2, W.encodeVarint(130)),
+        W.encodeLengthDelimited(4, execBuf),
+      ]);
+      db.prepare('INSERT INTO gen_metadata VALUES(?,?)').run(0, genBlob);
+      const stepChunks = Array.from({ length: 115 }, () =>
+        W.encodeLengthDelimited(30, Buffer.alloc(150 * 1024))
+      );
+      const oversizedStepMeta = Buffer.concat([
+        W.encodeLengthDelimited(1, W.encodeVarintField(1, now - 300)),
+        ...stepChunks,
+        W.encodeLengthDelimited(24, Buffer.alloc(128 * 1024)),
+        W.encodeLengthDelimited(9, usageBuf),
+        W.encodeLengthDelimited(12, execBuf),
+      ]);
+      assert.ok(oversizedStepMeta.length > 16 * 1024 * 1024);
+      db.prepare('INSERT INTO steps VALUES(?,15,?)').run(130, oversizedStepMeta);
+      db.close();
+    }
+
+    const scanStepMgr = new UsageStatsManager({ stateDir: join(stateDir, 'scan-step'), geminiDir });
+    const stepScan = await scanStepMgr.scanDatabaseEvents(largeStepsDbPath);
+    assert.equal(stepScan.skippedLargeRecords, 0);
+    assert.equal(stepScan.events.length, 1);
+    assert.equal(stepScan.events[0].model, 'gemini-4-carbon');
+    assert.equal(stepScan.events[0].total_tokens, 400);
+    assert.equal(stepScan.events[0].timestamp_seconds, now - 300);
+
+    // 3. 策略 A 持久化缓存自愈验证：清理 largeStepsDbPath 留下 largeDbPath + tinyDbPath
+    await rm(largeStepsDbPath, { force: true });
+    const tinyDbPath = join(convDir, 'tiny-healthy.db');
+    {
+      const db = new DatabaseSync(tinyDbPath);
+      db.exec('CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY,data BLOB);CREATE TABLE steps(idx INTEGER PRIMARY KEY,step_type INTEGER,metadata BLOB)');
+      const blob = Buffer.concat([
+        W.encodeLengthDelimited(
+          1,
+          Buffer.concat([
+            W.encodeString(19, 'gemini-4-carbon'),
+            W.encodeLengthDelimited(4, W.encodeVarintField(2, 100)),
+            W.encodeLengthDelimited(9, W.encodeLengthDelimited(4, W.encodeVarintField(1, now - 60))),
+          ])
+        ),
+        W.encodeLengthDelimited(2, W.encodeVarint(1)),
+      ]);
+      db.prepare('INSERT INTO gen_metadata VALUES(?,?)').run(0, blob);
+      db.close();
+    }
+
+    const largeSt = await lstat(largeDbPath);
+    const tinySt = await lstat(tinyDbPath);
+    const tinySourceId = createHash('sha256')
+      .update(JSON.stringify([basename(tinyDbPath), tinySt.ino, tinySt.birthtimeMs]))
+      .digest('hex');
+
+    const persistPath = join(stateDir, 'usage-db-cache-antigravity-v3.json');
+    await writeFile(
+      persistPath,
+      JSON.stringify({
+        version: 3,
+        entries: {
+          [largeDbPath]: {
+            mtimeMs: largeSt.mtimeMs,
+            size: largeSt.size,
+            walMtimeMs: 0,
+            walSize: 0,
+            events: [],
+            generationsScanned: 1,
+            skippedLargeRecords: 1,
+            hasError: false,
+            lastSuccessAt: now - 10,
+          },
+          [tinyDbPath]: {
+            mtimeMs: tinySt.mtimeMs,
+            size: tinySt.size,
+            walMtimeMs: 0,
+            walSize: 0,
+            events: [
+              {
+                event_key: 'a'.repeat(64),
+                source_id: tinySourceId,
+                generation_index: 0,
+                legacy_event_key: 'b'.repeat(64),
+                account_confidence: 'unknown',
+                model: 'gemini-4-carbon',
+                input_tokens: 100,
+                output_tokens: 0,
+                cached_tokens: 0,
+                total_tokens: 100,
+                timestamp_seconds: now - 60,
+              },
+            ],
+            generationsScanned: 1,
+            skippedLargeRecords: 0,
+            hasError: false,
+            lastSuccessAt: now - 10,
+          },
+        },
+      }),
+      'utf8'
+    );
+
+    const healMgr = new UsageStatsManager({ stateDir: join(stateDir, 'heal'), geminiDir });
+    healMgr.persistCachePath = persistPath;
+    await healMgr.loadPersistentFileCache();
+
+    // <= 16MB 健康旧缓存保留命中（策略 A 不误杀）
+    const tinyCheck = await healMgr.scanDatabaseEvents(tinyDbPath, false);
+    assert.equal(tinyCheck.cacheHit, true, '<= 16MB 且无异常的旧缓存条目应保持命中');
+
+    // 未修改文件任何时间戳，getUsageSummary(false) 自动绕过 skippedLargeRecords:1 坏缓存并完成恢复
+    const healedSummary = await healMgr.getUsageSummary(false);
+    assert.equal(healedSummary.skipped_large_records, 0);
+    assert.equal(healedSummary.availability, 'complete');
+    assert.equal(healedSummary.has_error, false);
+    assert.equal(healedSummary.all_time.totals.total_tokens, 498746 + 100);
+
+    await healMgr.persistSaveChain;
+    const savedCache = JSON.parse(await readFile(persistPath, 'utf8'));
+    assert.equal(savedCache.entries[largeDbPath]?.skippedLargeRecords, 0);
+    assert.equal(savedCache.entries[largeDbPath]?.projectionVersion, USAGE_PROJECTION_VERSION);
+
+    // 4. P1-01 回归：当前 projectionVersion 已尝试过但仍存在无法投影超限记录的静态历史库必须命中缓存并持久化，不再每轮冷扫
+    const { isFileCacheEntryReusable } = await import('../dist/usage-types.js');
+    assert.equal(
+      isFileCacheEntryReusable({ hasError: false, skippedLargeRecords: 1, size: 20 * 1024 * 1024, projectionVersion: undefined }),
+      false,
+      '无 projectionVersion 的旧版超限记录仍须触发自愈重扫'
+    );
+    assert.equal(
+      isFileCacheEntryReusable({ hasError: false, skippedLargeRecords: 1, size: 20 * 1024 * 1024, projectionVersion: USAGE_PROJECTION_VERSION - 1 }),
+      false,
+      '旧 projectionVersion 条目在算法升级后仍须触发重扫'
+    );
+    assert.equal(
+      isFileCacheEntryReusable({ hasError: false, skippedLargeRecords: 1, size: 20 * 1024 * 1024, projectionVersion: USAGE_PROJECTION_VERSION }),
+      true,
+      '当前 projectionVersion 下已完成投影探测的静态大文件应允许命中缓存'
+    );
+
+    const unprojectableDbPath = join(convDir, 'unprojectable-v2-cached.db');
+    {
+      const db = new DatabaseSync(unprojectableDbPath);
+      db.exec('CREATE TABLE gen_metadata(idx INTEGER PRIMARY KEY,data BLOB);CREATE TABLE steps(idx INTEGER PRIMARY KEY,step_type INTEGER,metadata BLOB)');
+      const genBlob = Buffer.concat([
+        W.encodeLengthDelimited(
+          1,
+          Buffer.concat([W.encodeString(19, 'gemini-2.5-flash'), W.encodeLengthDelimited(4, W.encodeVarintField(2, 55))])
+        ),
+        W.encodeLengthDelimited(2, W.encodeVarint(99)),
+      ]);
+      db.prepare('INSERT INTO gen_metadata VALUES(?,?)').run(0, genBlob);
+      db.prepare('INSERT INTO steps VALUES(?,15,?)').run(99, W.encodeLengthDelimited(9, Buffer.alloc(16 * 1024 * 1024 + 64)));
+      db.close();
+    }
+
+    const v2CachePath = join(stateDir, 'v2-skipped-persist.json');
+    const v2Mgr = new UsageStatsManager({ stateDir: join(stateDir, 'v2-skipped'), geminiDir });
+    v2Mgr.persistCachePath = v2CachePath;
+    const firstUnprojectable = await v2Mgr.scanDatabaseEvents(unprojectableDbPath, false);
+    assert.equal(firstUnprojectable.skippedLargeRecords, 1);
+    assert.equal(Boolean(firstUnprojectable.cacheHit), false);
+    const secondUnprojectable = await v2Mgr.scanDatabaseEvents(unprojectableDbPath, false);
+    assert.equal(secondUnprojectable.cacheHit, true, '同一 projectionVersion 下静态未变化大文件第二次扫描必须命中内存缓存');
+    assert.equal(secondUnprojectable.skippedLargeRecords, 1);
+
+    await v2Mgr.getUsageSummary(false);
+    await v2Mgr.persistSaveChain;
+    const v2Saved = JSON.parse(await readFile(v2CachePath, 'utf8'));
+    assert.equal(v2Saved.entries[unprojectableDbPath]?.skippedLargeRecords, 1, 'v2 已探测大记录条目应持久化落盘避免重启后重复冷扫');
+    assert.equal(v2Saved.entries[unprojectableDbPath]?.projectionVersion, USAGE_PROJECTION_VERSION);
+  });
+});
+
+
 
 

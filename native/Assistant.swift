@@ -127,6 +127,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
     var lastFetchedAccountsRevision = ""
     var lastFetchedLiveEmail = ""
     var accountListInFlight = false
+    var accountListPendingRefetch = false
     var accountListPendingNotifyPage = false
     var accountListGeneration = 0
     var accountListWaiters: [(Result<[String: Any], Error>) -> Void] = []
@@ -1224,9 +1225,12 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
         if raw["activeSubscriptionTier"] == nil { merged.activeSubscriptionTier = previous.activeSubscriptionTier }
         if raw["accountsRevision"] == nil { merged.accountsRevision = previous.accountsRevision }
         if raw["liveAccountEmail"] == nil { merged.liveAccountEmail = previous.liveAccountEmail }
+        if raw["oauthClientConfigured"] == nil { merged.oauthClientConfigured = previous.oauthClientConfigured }
         if let target = pendingTranslationTarget {
             merged.translationEnabled = target
-            if target {
+            if merged.mode == "debug-port-missing" {
+                if !target && !effectiveHudEnabled() { merged.mode = "paused" }
+            } else if target {
                 if merged.mode == "paused" || merged.mode == "error" || merged.mode == "starting" { merged.mode = "waiting" }
             } else {
                 merged.mode = "paused"

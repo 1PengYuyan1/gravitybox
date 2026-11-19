@@ -2,8 +2,44 @@ import Cocoa
 import OSLog
 
 private let lifecycleLogger = Logger(subsystem: "local.gravitybox.app", category: "Lifecycle")
+private var safeRelaunchInFlightIds = Set<ObjectIdentifier>()
+
+#if NATIVE_UI_TEST
+struct SafeRelaunchTestingHooks {
+    var confirm: ((NSAlert, @escaping (Bool) -> Void) -> Void)? = nil
+    var isRunning: (() -> Bool)? = nil
+    var hasSubprocesses: (() -> Bool)? = nil
+    var terminate: (() -> Void)? = nil
+    var relaunchAttempt: ((Int, @escaping (Bool) -> Void) -> Void)? = nil
+    var timeoutSeconds: TimeInterval? = nil
+    var pollIntervalMilliseconds: Int? = nil
+    var relaunchRetryDelayMilliseconds: Int? = nil
+}
+private var safeRelaunchTestingHooksById: [ObjectIdentifier: SafeRelaunchTestingHooks] = [:]
+#endif
 
 extension Assistant {
+    static let remoteDebuggingArguments = ["--remote-debugging-port=0"]
+
+    private static func makeOpenConfiguration() -> NSWorkspace.OpenConfiguration {
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        config.createsNewApplicationInstance = false
+        config.arguments = remoteDebuggingArguments
+        return config
+    }
+
+    #if NATIVE_UI_TEST
+    func setSafeRelaunchTestingHooks(_ hooks: SafeRelaunchTestingHooks?) {
+        let key = ObjectIdentifier(self)
+        if let hooks {
+            safeRelaunchTestingHooksById[key] = hooks
+        } else {
+            safeRelaunchTestingHooksById.removeValue(forKey: key)
+        }
+        safeRelaunchInFlightIds.remove(key)
+    }
+    #endif
     static func hasRunningAntigravityProcess(psOutput: String, appPaths: [String]) -> Bool {
         psOutput.split(separator: "\n").contains { line in
             let trimmed = line.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -11,6 +47,24 @@ extension Assistant {
                 trimmed.hasPrefix($0 + "/Contents/") ||
                 trimmed.contains($0 + "/Contents/Resources/bin/language_server")
             }
+        }
+    }
+
+    static func hasLiveAntigravitySubprocesses(appPaths: [String] = DesktopApplicationTarget.allTargets.map(\.path)) -> Bool {
+        let task = Process()
+        task.executableURL = URL(fileURLWithPath: "/bin/ps")
+        task.arguments = ["-ax", "-ww", "-o", "args="]
+        let pipe = Pipe()
+        task.standardOutput = pipe
+        task.standardError = FileHandle.nullDevice
+        do {
+            try task.run()
+            let data = pipe.fileHandleForReading.readDataToEndOfFile()
+            task.waitUntilExit()
+            let output = String(data: data, encoding: .utf8) ?? ""
+            return hasRunningAntigravityProcess(psOutput: output, appPaths: appPaths)
+        } catch {
+            return false
         }
     }
 
@@ -28,19 +82,7 @@ extension Assistant {
         }
 
         func hasAntigravityProcesses() -> Bool {
-            let task = Process()
-            task.executableURL = URL(fileURLWithPath: "/bin/ps")
-            task.arguments = ["-ax", "-ww", "-o", "args="]
-            let pipe = Pipe()
-            task.standardOutput = pipe
-            task.standardError = FileHandle.nullDevice
-            do {
-                try task.run()
-                let data = pipe.fileHandleForReading.readDataToEndOfFile()
-                task.waitUntilExit()
-                let output = String(data: data, encoding: .utf8) ?? ""
-                return Self.hasRunningAntigravityProcess(psOutput: output, appPaths: appPaths)
-            } catch { return false }
+            Self.hasLiveAntigravitySubprocesses(appPaths: appPaths)
         }
 
         func finish(_ exited: Bool) {
@@ -102,7 +144,11 @@ extension Assistant {
         statusValue.configuredLanguage = targetLanguage
         statusValue.locale = resolved
         statusValue.translationEnabled = wantsTranslation
-        if wantsTranslation {
+        if statusValue.mode == "debug-port-missing" {
+            if !wantsTranslation && !effectiveHudEnabled() {
+                statusValue.mode = "paused"
+            }
+        } else if wantsTranslation {
             if statusValue.mode == "paused" || statusValue.mode == "error" || statusValue.mode == "starting" {
                 statusValue.mode = "waiting"
             }
@@ -203,12 +249,288 @@ extension Assistant {
         #else
         suppressLifecycleAutoQuit(seconds: 30.0)
         let launchPath = DesktopApplicationTarget.preferredLaunchPath(fallbackChannel: Self.applicationChannel)
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = true
-        config.createsNewApplicationInstance = false
+        let config = Self.makeOpenConfiguration()
         NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: launchPath), configuration: config) { [weak self] _, error in
             if let error {
                 DispatchQueue.main.async { self?.showMessage(error.localizedDescription, error: true) }
+            }
+        }
+        #endif
+    }
+
+    @objc func safeRelaunchAntigravityForDebug() {
+        let key = ObjectIdentifier(self)
+        guard !safeRelaunchInFlightIds.contains(key) else { return }
+        safeRelaunchInFlightIds.insert(key)
+
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.t("assistant.safe_relaunch_title", fallback: "安全重启 Antigravity 以开启调试连接？")
+        alert.informativeText = L10n.t("assistant.safe_relaunch_body", fallback: "Antigravity 当前未开启远程调试端口，需带调试参数重新启动。请先保存 Antigravity 中未保存的工作；确认后 GravityBox 将温和请求退出并带调试端口重新打开 Antigravity。")
+        alert.addButton(withTitle: L10n.t("assistant.safe_relaunch_confirm", fallback: "安全重启并连接"))
+        alert.addButton(withTitle: L10n.t("common.cancel", fallback: "取消"))
+
+        let execute: (Bool) -> Void = { [weak self] confirmed in
+            guard let self else {
+                safeRelaunchInFlightIds.remove(key)
+                return
+            }
+            guard confirmed else {
+                safeRelaunchInFlightIds.remove(key)
+                return
+            }
+            self.performSafeRelaunchAfterConfirm(key: key)
+        }
+
+        #if NATIVE_UI_TEST
+        if let confirmHook = safeRelaunchTestingHooksById[key]?.confirm {
+            confirmHook(alert, execute)
+        } else {
+            safeRelaunchInFlightIds.remove(key)
+        }
+        return
+        #else
+        presentSheetAlert(alert) { response in
+            execute(response == .alertFirstButtonReturn)
+        }
+        #endif
+    }
+
+    private func performSafeRelaunchAfterConfirm(key: ObjectIdentifier) {
+        suppressLifecycleAutoQuit(seconds: 30.0)
+
+        let terminateTargets: () -> Void = {
+            #if NATIVE_UI_TEST
+            if let hook = safeRelaunchTestingHooksById[key]?.terminate {
+                hook()
+                return
+            }
+            #endif
+            let matchingApps = NSRunningApplication.runningApplications(withBundleIdentifier: DesktopApplicationTarget().bundleIdentifier)
+                .filter { DesktopApplicationTarget.matchesAny($0) && !$0.isTerminated }
+            for app in matchingApps {
+                _ = app.terminate()
+            }
+        }
+
+        let start = Date()
+        terminateTargets()
+
+        #if NATIVE_UI_TEST
+        let hooks = safeRelaunchTestingHooksById[key]
+        let maxWaitSeconds = hooks?.timeoutSeconds ?? 10.0
+        let pollIntervalMs = hooks?.pollIntervalMilliseconds ?? 150
+        let settleDelayMs = 20
+
+        func isStillRunningForTest() -> Bool {
+            let currentHooks = safeRelaunchTestingHooksById[key]
+            let mainRunning = currentHooks?.isRunning?() ?? Self.isAntigravityRunning()
+            let subRunning = currentHooks?.hasSubprocesses?() ?? false
+            return mainRunning || subRunning
+        }
+
+        func pollStepTest() {
+            if !isStillRunningForTest() {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(settleDelayMs)) { [weak self] in
+                    guard let self else {
+                        safeRelaunchInFlightIds.remove(key)
+                        return
+                    }
+                    self.suppressLifecycleAutoQuit(seconds: 20.0)
+                    self.relaunchAntigravityForSafeDebug(attemptsRemaining: 3, attemptNumber: 1, key: key)
+                }
+                return
+            }
+            if Date().timeIntervalSince(start) >= maxWaitSeconds {
+                safeRelaunchInFlightIds.remove(key)
+                showMessage(
+                    L10n.t("assistant.safe_relaunch_timeout", fallback: "Antigravity 在 10 秒内未能退出，未强制关闭。请先保存工作并手动退出 Antigravity，再通过「打开 Antigravity」重新启动。"),
+                    error: true
+                )
+                refresh()
+                return
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(pollIntervalMs)) { [weak self] in
+                guard self != nil else {
+                    safeRelaunchInFlightIds.remove(key)
+                    return
+                }
+                pollStepTest()
+            }
+        }
+
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(min(50, pollIntervalMs))) { [weak self] in
+            guard self != nil else {
+                safeRelaunchInFlightIds.remove(key)
+                return
+            }
+            pollStepTest()
+        }
+        #else
+        let appPaths = DesktopApplicationTarget.allTargets.map(\.path)
+        let queue = DispatchQueue(label: "local.gravitybox.safe-relaunch", qos: .userInitiated)
+        let maxWaitSeconds: TimeInterval = 10.0
+        let pollIntervalMs = 150
+        let settleDelayMs = 300
+
+        func pollStep() {
+            let stillRunning = DesktopApplicationTarget.isRegisteredRunning() || Self.hasLiveAntigravitySubprocesses(appPaths: appPaths)
+            if !stillRunning {
+                queue.asyncAfter(deadline: .now() + .milliseconds(settleDelayMs)) { [weak self] in
+                    DispatchQueue.main.async {
+                        guard let self else {
+                            safeRelaunchInFlightIds.remove(key)
+                            return
+                        }
+                        self.suppressLifecycleAutoQuit(seconds: 20.0)
+                        self.relaunchAntigravityForSafeDebug(attemptsRemaining: 3, attemptNumber: 1, key: key)
+                    }
+                }
+                return
+            }
+            if Date().timeIntervalSince(start) >= maxWaitSeconds {
+                DispatchQueue.main.async { [weak self] in
+                    safeRelaunchInFlightIds.remove(key)
+                    guard let self else { return }
+                    self.showMessage(
+                        L10n.t("assistant.safe_relaunch_timeout", fallback: "Antigravity 在 10 秒内未能退出，未强制关闭。请先保存工作并手动退出 Antigravity，再通过「打开 Antigravity」重新启动。"),
+                        error: true
+                    )
+                    self.refresh()
+                }
+                return
+            }
+            queue.asyncAfter(deadline: .now() + .milliseconds(pollIntervalMs)) { [weak self] in
+                guard self != nil else {
+                    DispatchQueue.main.async { safeRelaunchInFlightIds.remove(key) }
+                    return
+                }
+                pollStep()
+            }
+        }
+
+        queue.asyncAfter(deadline: .now() + .milliseconds(50)) { [weak self] in
+            guard self != nil else {
+                DispatchQueue.main.async { safeRelaunchInFlightIds.remove(key) }
+                return
+            }
+            pollStep()
+        }
+        #endif
+    }
+
+    private func relaunchAntigravityForSafeDebug(attemptsRemaining: Int = 3, attemptNumber: Int = 1, key: ObjectIdentifier) {
+        #if NATIVE_UI_TEST
+        let hooks = safeRelaunchTestingHooksById[key]
+        let retryDelayMs = hooks?.relaunchRetryDelayMilliseconds ?? 20
+        if let attemptHook = hooks?.relaunchAttempt {
+            attemptHook(attemptNumber) { [weak self] launched in
+                DispatchQueue.main.async {
+                    guard let self else {
+                        safeRelaunchInFlightIds.remove(key)
+                        return
+                    }
+                    if launched {
+                        safeRelaunchInFlightIds.remove(key)
+                        self.openedApplications += 1
+                        self.refresh()
+                    } else if attemptsRemaining > 1 {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(retryDelayMs)) { [weak self] in
+                            guard let self else {
+                                safeRelaunchInFlightIds.remove(key)
+                                return
+                            }
+                            self.relaunchAntigravityForSafeDebug(
+                                attemptsRemaining: attemptsRemaining - 1,
+                                attemptNumber: attemptNumber + 1,
+                                key: key
+                            )
+                        }
+                    } else {
+                        safeRelaunchInFlightIds.remove(key)
+                        self.showMessage(
+                            L10n.t("assistant.safe_relaunch_failed", ["detail": L10n.t("assistant.relaunch_manual")]),
+                            error: true
+                        )
+                        self.refresh()
+                    }
+                }
+            }
+            return
+        }
+        safeRelaunchInFlightIds.remove(key)
+        openAntigravity()
+        refresh()
+        return
+        #else
+        suppressLifecycleAutoQuit(seconds: 30.0)
+        let launchPath = DesktopApplicationTarget.preferredLaunchPath(fallbackChannel: Self.applicationChannel)
+        if attemptsRemaining <= 1 {
+            DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+                let proc = Process() 
+                proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+                proc.arguments = ["-a", launchPath, "--args"] + Self.remoteDebuggingArguments
+                proc.standardOutput = FileHandle.nullDevice
+                proc.standardError = FileHandle.nullDevice
+                let launchError: Error? = {
+                    do {
+                        try proc.run()
+                        proc.waitUntilExit()
+                        return proc.terminationStatus == 0 ? nil : BackendFailure(message: "open exited with \(proc.terminationStatus)")
+                    } catch {
+                        return error
+                    }
+                }()
+                DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1.2) { [weak self] in
+                    let running = Self.isAntigravityRunning()
+                    DispatchQueue.main.async {
+                        safeRelaunchInFlightIds.remove(key)
+                        guard let self else { return }
+                        if running {
+                            self.antigravityWasRunning = true
+                            self.refresh()
+                            DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                                self?.refresh()
+                            }
+                        } else {
+                            let detail = launchError?.localizedDescription ?? L10n.t("assistant.relaunch_manual")
+                            self.showMessage(L10n.t("assistant.safe_relaunch_failed", ["detail": detail]), error: true)
+                            self.refresh()
+                        }
+                    }
+                }
+            }
+            return
+        }
+
+        let config = Self.makeOpenConfiguration()
+        NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: launchPath), configuration: config) { [weak self] app, _ in
+            guard self != nil else {
+                DispatchQueue.main.async { safeRelaunchInFlightIds.remove(key) }
+                return
+            }
+            DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                let running = Self.isAntigravityRunning() || (app != nil && app?.isTerminated == false)
+                DispatchQueue.main.async {
+                    guard let self else {
+                        safeRelaunchInFlightIds.remove(key)
+                        return
+                    }
+                    if running {
+                        safeRelaunchInFlightIds.remove(key)
+                        self.antigravityWasRunning = true
+                        self.refresh()
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                            self?.refresh()
+                        }
+                        return
+                    }
+                    self.relaunchAntigravityForSafeDebug(
+                        attemptsRemaining: attemptsRemaining - 1,
+                        attemptNumber: attemptNumber + 1,
+                        key: key
+                    )
+                }
             }
         }
         #endif
@@ -225,7 +547,7 @@ extension Assistant {
             DispatchQueue.global(qos: .userInitiated).async { [weak self] in
                 let proc = Process()
                 proc.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-                proc.arguments = ["-a", launchPath]
+                proc.arguments = ["-a", launchPath, "--args"] + Self.remoteDebuggingArguments
                 proc.standardOutput = FileHandle.nullDevice
                 proc.standardError = FileHandle.nullDevice
                 let launchError: Error? = {
@@ -251,9 +573,7 @@ extension Assistant {
             return
         }
 
-        let config = NSWorkspace.OpenConfiguration()
-        config.activates = true
-        config.createsNewApplicationInstance = false
+        let config = Self.makeOpenConfiguration()
         NSWorkspace.shared.openApplication(at: URL(fileURLWithPath: launchPath), configuration: config) { [weak self] app, error in
             guard let self else { return }
             DispatchQueue.global(qos: .userInitiated).asyncAfter(deadline: .now() + 1.2) { [weak self] in

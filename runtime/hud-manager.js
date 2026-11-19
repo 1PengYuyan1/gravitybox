@@ -9,6 +9,24 @@ import { computeUpwardPopoverPosition } from './hud-popover.js';
 
 const RESTRICTED_HUD_ROUTE = /^\/(?:onboarding|oauth|auth|login|sign-in|api|browser|preview)(?:\/|$)/i;
 
+const NON_RUNNING_AGENT_STATUS_TESTIDS = new Set([
+  'agent-status-done',
+  'agent-status-killed',
+  'agent-status-canceled',
+  'agent-status-error',
+  'agent-status-failed',
+  'agent-status-waiting',
+  'agent-status-blocked',
+  'agent-status-paused',
+]);
+
+const NON_RUNNING_AGENT_STATUS_SELECTOR = [...NON_RUNNING_AGENT_STATUS_TESTIDS]
+  .map((id) => `[data-testid="${id}"]`)
+  .join(', ');
+
+const NON_RUNNING_AGENT_DOT_STATE_RE =
+  /^(?:idle|done|completed|paused|stopped|error|failed|canceled|cancelled|killed|inactive|none|false|0|waiting|standing[\s_-]*by|blocked|needs[\s_-]*(?:you|attention|approval|input))$/i;
+
 export class AntigravityHudManager {
   constructor(options = {}) {
     this.instances = new Map();
@@ -127,6 +145,7 @@ export class AntigravityHudManager {
           'data-theme',
           'data-subagent-id',
           'data-agent-state',
+          'data-agent-state-dot',
           'data-side-panel-open',
           'data-aux-pane-open',
           'data-split-transition',
@@ -535,7 +554,7 @@ export class AntigravityHudManager {
    * 检测当前分栏是否存在后台正在工作的子智能体，综合多源正向活跃探针：
    * 1. `[data-testid="idle-status-text"]` 文本（如 `"1 subagent running"`, `"2 subagents running"`, `"Working"`, `"1 个子智能体正在运行"`）
    * 2. `[data-testid="running-subagent-steps-toggle"]`, `[data-testid="running-subagent-browser-steps"]`, `[data-testid="browser-subagent-thinking"]`
-   * 3. `[aria-label^="Open Subagent:"]` / `[data-testid="browser-subagent-row"]` 中不含 `agent-status-done` / `agent-status-killed` / `agent-status-canceled` 的活跃卡片
+   * 3. `[aria-label^="Open Subagent:"]` / `[data-testid="browser-subagent-row"]` 中不含非运行态图标（`done` / `killed` / `canceled` / `error` / `failed` / `waiting` / `blocked` / `paused`）或非运行态圆点的活跃卡片
    */
   resolveSubagentState(view, options = {}) {
     const fallback = { isSubagentRunning: false, runningSubagentCount: 0 };
@@ -562,34 +581,41 @@ export class AntigravityHudManager {
         }
         const txt = (node.textContent || '').replace(/\s+/g, ' ').trim();
         if (!txt) return;
-        // 区分混合计数 ("2 subagents/tasks running" 含终端后台任务) 与官方纯子智能体计数 ("1 subagent running" / "6 subagents running")
-        const mixedCountMatch = txt.match(/(\d+)\s*(?:个)?\s*(?:subagents?\s*\/\s*tasks?|子智能体\s*\/\s*任务|子代理\s*\/\s*任务)/i);
-        const pureCountMatch = !mixedCountMatch
-          ? txt.match(/(\d+)\s*(?:个)?\s*(?:subagents?\b|子智能体|子代理)/i)
-          : null;
-        if (
-          pureCountMatch &&
-          /(?:running|working|运行中|正在运行|执行中|处理中)/i.test(txt)
-        ) {
-          detected = true;
-          const parsed = parseInt(pureCountMatch[1], 10);
-          if (parsed > exactIdleSubagentCount) exactIdleSubagentCount = parsed;
-          if (parsed > runningCount) runningCount = parsed;
-        } else if (
-          mixedCountMatch &&
-          /(?:running|working|运行中|正在运行|执行中|处理中)/i.test(txt)
-        ) {
-          // 混合文案 y = f + n (至少 1 个子智能体 + 至少 1 个后台终端任务)，不可将终端任务数计入子智能体数量
-          detected = true;
-          if (runningCount < 1) runningCount = 1;
-        } else if (
-          /\bsubagents?(?:\/tasks?)?\s+(?:running|working)\b|(?:子智能体|子代理).*(?:运行|工作|执行)/i.test(
-            txt
-          )
-        ) {
-          detected = true;
-          if (runningCount < 1) runningCount = 1;
-        }
+        const segments = txt
+          .split(/[,，·•;|\n()（）]+/)
+          .map((seg) => seg.trim())
+          .filter(Boolean);
+        segments.forEach((seg) => {
+          // 区分混合计数 ("2 subagents/tasks running" 含终端后台任务) 与官方纯子智能体计数 ("1 subagent running" / "6 subagents running")
+          // 并屏蔽同一横幅内并存的 blocked / waiting / standing by 等非运行态提示数字
+          const mixedCountMatch = seg.match(/(\d+)\s*(?:个)?\s*(?:subagents?\s*\/\s*tasks?|子智能体\s*\/\s*任务|子代理\s*\/\s*任务)/i);
+          const pureRunningMatch = !mixedCountMatch
+            ? seg.match(
+                /(\d+)\s*(?:个)?\s*(?:subagents?\b|子智能体|子代理)\s*(?:is|are|正在|处于)?\s*(?:running|working|运行中|正在运行|执行中|处理中)/i
+              )
+            : null;
+          const pureCountMatch = !mixedCountMatch
+            ? pureRunningMatch || seg.match(/(\d+)\s*(?:个)?\s*(?:subagents?\b|子智能体|子代理)/i)
+            : null;
+          const hasRunningKeyword = /(?:running|working|运行中|正在运行|执行中|处理中)/i.test(seg);
+          if (pureCountMatch && (pureRunningMatch || hasRunningKeyword)) {
+            detected = true;
+            const parsed = parseInt(pureCountMatch[1], 10);
+            if (parsed > exactIdleSubagentCount) exactIdleSubagentCount = parsed;
+            if (parsed > runningCount) runningCount = parsed;
+          } else if (mixedCountMatch && hasRunningKeyword) {
+            // 混合文案 y = f + n (至少 1 个子智能体 + 至少 1 个后台终端任务)，不可将终端任务数计入子智能体数量
+            detected = true;
+            if (runningCount < 1) runningCount = 1;
+          } else if (
+            /\bsubagents?(?:\/tasks?)?\s+(?:running|working)\b|(?:子智能体|子代理).*(?:运行|工作|执行)/i.test(
+              seg
+            )
+          ) {
+            detected = true;
+            if (runningCount < 1) runningCount = 1;
+          }
+        });
       });
     }
 
@@ -623,23 +649,27 @@ export class AntigravityHudManager {
       const activeRefOwners = new Set();
       agentRefs.forEach((ref) => {
         if (typeof ref.querySelector !== 'function') return;
+        const refTestId = (ref.getAttribute?.('data-testid') || '').toLowerCase();
         if (
-          ref.getAttribute?.('data-testid') === 'subagent-permission-source' ||
+          refTestId === 'subagent-permission-source' ||
           ref.closest?.('[data-testid="subagent-permission-source"]')
         ) {
           return;
         }
-        const finishedIcon = ref.querySelector(
-          '[data-testid="agent-status-done"], [data-testid="agent-status-killed"], [data-testid="agent-status-canceled"], [data-testid="agent-status-error"], [data-testid="agent-status-failed"], [data-testid="status-unread-dot"]'
-        );
+        const finishedIcon =
+          NON_RUNNING_AGENT_STATUS_TESTIDS.has(refTestId) ||
+          refTestId === 'status-unread-dot' ||
+          Boolean(
+            ref.querySelector(
+              `${NON_RUNNING_AGENT_STATUS_SELECTOR}, [data-testid="status-unread-dot"]`
+            )
+          );
         if (finishedIcon) return;
         const dotEl = ref.querySelector('[data-agent-state-dot]');
         const dotState = (dotEl?.getAttribute?.('data-agent-state-dot') || '').trim();
+        if (dotEl && dotState && NON_RUNNING_AGENT_DOT_STATE_RE.test(dotState)) return;
         const hasActiveStateDot = Boolean(
-          dotEl &&
-            !/^(?:idle|done|completed|paused|stopped|error|failed|canceled|cancelled|killed|inactive|none|false|0)$/i.test(
-              dotState
-            )
+          dotEl && !NON_RUNNING_AGENT_DOT_STATE_RE.test(dotState)
         );
         const hasActiveDotOrSpinner =
           hasActiveStateDot ||
@@ -701,10 +731,13 @@ export class AntigravityHudManager {
           testId.includes('subagent') ||
           /\b(?:invoke_subagent|browser_subagent|start_subagent|spawn_subagent)\b/i.test(headerText);
         if (!isSubagentTool) return;
-        const finished = node.querySelector?.(
-          '[data-testid="agent-status-done"], [data-testid="agent-status-killed"], [data-testid="agent-status-canceled"], [data-testid="agent-status-error"], [data-testid="agent-status-failed"]'
-        );
+        const finished =
+          NON_RUNNING_AGENT_STATUS_TESTIDS.has(testId) ||
+          Boolean(node.querySelector?.(NON_RUNNING_AGENT_STATUS_SELECTOR));
         if (finished) return;
+        const dotEl = node.querySelector?.('[data-agent-state-dot]');
+        const dotState = (dotEl?.getAttribute?.('data-agent-state-dot') || '').trim();
+        if (dotEl && NON_RUNNING_AGENT_DOT_STATE_RE.test(dotState)) return;
         const hasSpinner = Boolean(
           node.getAttribute?.('data-state') === 'running' ||
           node.querySelector?.(
