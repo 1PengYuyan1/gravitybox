@@ -1071,7 +1071,7 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
         return globalThis.__gravityboxUpdateHudMetrics({
         conversationId: '4ec6348d-0f58-49db-8aed-6f67dbb78f5d',
         sessionRevision: inst.getSessionRevision(),
-        metricsSequence: Math.max(100000, (inst.lastMetricsSequence || 0) + 1),
+        metricsSequence: Math.max(Date.now() + 10_000_000, (inst.lastMetricsSequence || 0) + 1),
         updatedAt: Date.now(),
         isStreaming: false,
         session: {
@@ -1383,7 +1383,7 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
           ...inst.lastMetrics,
           conversationId: inst.getCurrentConvId(),
           sessionRevision: inst.getSessionRevision(),
-          metricsSequence: (inst.lastMetricsSequence || 0) + 1,
+          metricsSequence: Math.max(Date.now() + 10_000_000, (inst.lastMetricsSequence || 0) + 1),
           updatedAt: Date.now(),
           availability: 'ready',
           session: { ...inst.lastMetrics.session, compactionCount: ${compactionCount} },
@@ -1482,7 +1482,7 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
       mgr.dispatchMetrics({
         conversationId: inst.getCurrentConvId(),
         sessionRevision: inst.getSessionRevision(),
-        metricsSequence: (inst.lastMetricsSequence || 0) + 1,
+        metricsSequence: Math.max(Date.now() + 10_000_000, (inst.lastMetricsSequence || 0) + 1),
         updatedAt: Date.now(),
         availability: 'ready',
         isStreaming: false,
@@ -1554,7 +1554,7 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
         mgr.dispatchMetrics({
           conversationId: inst.getCurrentConvId(),
           sessionRevision: inst.getSessionRevision(),
-          metricsSequence: (inst.lastMetricsSequence || 0) + 1,
+          metricsSequence: Math.max(Date.now() + 10_000_000, (inst.lastMetricsSequence || 0) + 1),
           updatedAt: Date.now(),
           availability: 'ready',
           isStreaming: false,
