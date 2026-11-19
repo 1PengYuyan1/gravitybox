@@ -436,7 +436,9 @@ extension Assistant {
     }
     func finishQuotaRefresh(error: String?) {
         quotaRefreshing = false; quotaRefreshStartedAt = nil; pendingAccountTaskId = nil; quotaRefreshError = error; quotaRefreshPollTimer?.invalidate(); quotaRefreshPollTimer = nil
+        lastAutoQuotaRefreshTriggerAt = Date()
         if error == nil { singleAccountRefreshErrors.removeAll() }
+        configureQuotaRefreshTimer()
         updateQuotaRefreshControls(); fetchAccountList(notifyPage: true); overview?.update(force: true); menuPanelController?.syncFromAssistant(); refresh()
     }
     func updateQuotaRefreshControls() {
@@ -530,6 +532,7 @@ extension Assistant {
                 self.updateQuotaRefreshControls()
                 self.menuPanelController?.syncFromAssistant()
                 if shouldNotifyPage { self.accountsPage?.fetch(val) }
+                self.checkAndTriggerOverdueQuotaRefreshIfNeeded()
             }
             for waiter in waiters { waiter(res) }
         }

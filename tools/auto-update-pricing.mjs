@@ -8,6 +8,8 @@ const DEFAULT_REPORT_PATH = new URL('../pricing-watch-alert.json', import.meta.u
 
 const LITELLM_URL = 'https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json';
 const OPENROUTER_URL = 'https://openrouter.ai/api/v1/models';
+const ANTIGRAVITY_MODELS_MD_URL = 'https://antigravity.google/docs/models.md';
+const ANTIGRAVITY_ENTERPRISE_MD_URL = 'https://antigravity.google/docs/enterprise.md';
 
 const MAX_PAGE_CHARS = 55_000;
 const WARN_HORIZON_MS = 14 * 24 * 60 * 60 * 1000;
@@ -183,6 +185,132 @@ export function detectBlockedOrEmptyPage(html, cleanText, rule) {
     return 'anchor_missing';
   }
   return null;
+}
+
+function stripMarkdownTableCell(rawCell) {
+  return String(rawCell ?? '')
+    .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1')
+    .replace(/\\([*_`~])/g, '$1')
+    .replace(/[*†‡]+/g, '')
+    .replace(/\([^)]*\)/g, '')
+    .replace(/`/g, '')
+    .trim();
+}
+
+export function parseAntigravityHostModels(modelsMd, enterpriseMd = '') {
+  const hostModels = new Map();
+  const keys = new Set();
+  const consumerKeys = new Set();
+
+  const registerKeyVariants = (rawId, isConsumer) => {
+    const norm = normalizeUpstreamModelKey(rawId);
+    if (!norm || /^orchestrator\b/i.test(norm)) return null;
+    const canonical = canonicalCatalogKeyForNewModel(norm);
+    for (const variant of [norm, canonical, ...expandCanonicalVariants(norm), ...expandCanonicalVariants(canonical)]) {
+      if (variant) keys.add(variant);
+    }
+    if (isConsumer) {
+      consumerKeys.add(canonical);
+    }
+    return canonical;
+  };
+
+  const parseMarkdownSectionRows = (mdText, sectionHeaderRe) => {
+    const text = String(mdText ?? '');
+    if (!text) return [];
+    const lines = text.split(/\r?\n/);
+    let inSection = false;
+    const rows = [];
+    for (const line of lines) {
+      const trimmed = line.trim();
+      if (/^#{1,3}\s+/.test(trimmed)) {
+        if (sectionHeaderRe.test(trimmed)) {
+          inSection = true;
+          continue;
+        }
+        if (inSection) break;
+      }
+      if (!inSection || !trimmed.startsWith('|')) continue;
+      const cells = trimmed.split('|').slice(1, -1).map((c) => c.trim());
+      if (cells.length < 2) continue;
+      if (cells.every((c) => /^:?-+:?$/.test(c)) || /^model$/i.test(cells[0])) continue;
+      rows.push(cells);
+    }
+    return rows;
+  };
+
+  for (const cells of parseMarkdownSectionRows(modelsMd, /^##\s+Reasoning\s+model\b/i)) {
+    const label = stripMarkdownTableCell(cells[0]);
+    if (!label || /^orchestrator\b/i.test(label)) continue;
+    const tierCols = cells.slice(1, 4);
+    const enterpriseCol = cells[4] ?? '';
+    const consumerActive = tierCols.some((c) => c.includes('✅'));
+    const enterpriseActive = enterpriseCol.includes('✅');
+    if (!consumerActive && !enterpriseActive) continue;
+    const canonical = registerKeyVariants(label, consumerActive);
+    if (!canonical) continue;
+    hostModels.set(canonical, {
+      key: canonical,
+      displayName: label,
+      consumerActive,
+      enterpriseActive,
+    });
+  }
+
+  for (const cells of parseMarkdownSectionRows(enterpriseMd, /^##\s+Supported\s+models\b/i)) {
+    const label = stripMarkdownTableCell(cells[0]);
+    if (!label || /^orchestrator\b/i.test(label)) continue;
+    const enterpriseCol = cells[2] ?? '';
+    const enterpriseActive = enterpriseCol.includes('✅');
+    const existing = hostModels.get(canonicalCatalogKeyForNewModel(normalizeUpstreamModelKey(label)));
+    const isConsumer = Boolean(existing?.consumerActive);
+    if (!enterpriseActive && !isConsumer) continue;
+    const canonical = registerKeyVariants(label, isConsumer);
+    const idRaw = String(cells[1] ?? '').replace(/\\([*_`])/g, '$1');
+    const idMatch = idRaw.match(/`([^`]+)`/);
+    if (idMatch?.[1]) {
+      const cleanedId = idMatch[1]
+        .replace(/-(?:<level>|low|medium|high|xhigh|max)$/i, '')
+        .replace(/-preview$/i, '')
+        .trim();
+      registerKeyVariants(cleanedId, isConsumer);
+      if (idMatch[1].trim() !== cleanedId) {
+        registerKeyVariants(idMatch[1].replace(/-(?:<level>)$/i, '').trim(), isConsumer);
+      }
+    }
+    if (canonical && !hostModels.has(canonical)) {
+      hostModels.set(canonical, {
+        key: canonical,
+        displayName: label,
+        consumerActive: isConsumer,
+        enterpriseActive,
+      });
+    }
+  }
+
+  return { models: hostModels, keys, consumerKeys };
+}
+
+export function verifyOfficialEvidence(cleanText, item) {
+  if (!cleanText || typeof cleanText !== 'string' || !item || typeof item !== 'object') return false;
+  const rawQuote = typeof item.evidenceQuote === 'string' ? item.evidenceQuote : '';
+  const normQuote = rawQuote.replace(/\s+/g, ' ').trim().toLowerCase();
+  if (normQuote.length < 6) return false;
+  const normText = cleanText.replace(/\s+/g, ' ').toLowerCase();
+  const stripPipes = (s) => s.replace(/\s*\|\s*/g, ' ').replace(/\s+/g, ' ').trim();
+  const quoteMatched = normText.includes(normQuote) || stripPipes(normText).includes(stripPipes(normQuote));
+  if (!quoteMatched) return false;
+  const nums = [...normQuote.matchAll(/\d+(?:,\d{3})*(?:\.\d+)?/g)]
+    .map((m) => Number.parseFloat(m[0].replace(/,/g, '')))
+    .filter((n) => Number.isFinite(n));
+  if (!Number.isFinite(item.inputPer1M) || !Number.isFinite(item.outputPer1M)) return false;
+  const hasInput = nums.some((n) => ratesClose(n, item.inputPer1M));
+  const hasOutput = nums.some((n) => ratesClose(n, item.outputPer1M));
+  if (!hasInput || !hasOutput) return false;
+  if (Number.isFinite(item.cacheWritePer1M) && item.cacheWritePer1M > 0) {
+    if (!nums.some((n) => ratesClose(n, item.cacheWritePer1M))) return false;
+  }
+  return true;
 }
 
 export function isTrackedCanonicalModel(key, catalog) {
@@ -521,8 +649,11 @@ export function evaluateModelConsensus({
   }
 
   const reasons = [];
+  const officialSelfVerified = Boolean(
+    officialValid && official.confidence === 'high' && official.evidenceVerified === true
+  );
   if (!officialValid) reasons.push('官网未抓到高/中置信度有效价格（仅 LiteLLM 存在偏移）');
-  if (!litellm) reasons.push('LiteLLM 缺少对应通道报价（孤证）');
+  if (!litellm && !officialSelfVerified) reasons.push('LiteLLM 缺少对应通道报价（且官网证据未通过原文核验）');
 
   if (officialValid && litellm) {
     if (!ratesClose(official.inputPer1M, litellm.input) || !ratesClose(official.outputPer1M, litellm.output)) {
@@ -534,14 +665,14 @@ export function evaluateModelConsensus({
       reasons.push(`官网cached($${offCached})与LiteLLM($${ltCached})偏差>1%`);
     } else if (offCached === null && ltCached !== null && !ratesClose(local.cached, ltCached)) {
       reasons.push('官网缺少cached报价无法交叉印证');
-    } else if (offCached !== null && ltCached === null && !ratesClose(local.cached, offCached)) {
+    } else if (offCached !== null && ltCached === null && !officialSelfVerified && !ratesClose(local.cached, offCached)) {
       reasons.push('LiteLLM缺少cached报价无法交叉印证');
     }
 
     if (local.cacheWrite !== undefined && local.cacheWrite > 0) {
       const offCw = Number.isFinite(official.cacheWritePer1M) ? official.cacheWritePer1M : null;
       const ltCw = Number.isFinite(litellm.cacheWrite) ? litellm.cacheWrite : null;
-      if (offCw === null || ltCw === null || !ratesClose(offCw, ltCw)) {
+      if (offCw === null || (ltCw !== null && !ratesClose(offCw, ltCw)) || (ltCw === null && !officialSelfVerified)) {
         reasons.push('本地已配置cacheWrite但双源未能一致印证');
       }
     }
@@ -717,9 +848,11 @@ export function evaluateNewModelStagingCandidate({ id, vendor = 'Upstream', url 
   if (official?.promoValidUntil) {
     reasons.push(`含推广截止日(${official.promoValidUntil})需人工复核`);
   }
-  if (!litellm) {
-    reasons.push('LiteLLM 尚无对应通道报价（需双源共识）');
+  const officialSelfVerified = Boolean(official?.confidence === 'high' && official?.evidenceVerified === true);
+  if (!litellm && !officialSelfVerified) {
+    reasons.push('LiteLLM 尚无对应通道报价（且官网证据未通过原文核验）');
   } else if (
+    litellm &&
     official &&
     Number.isFinite(official.inputPer1M) &&
     Number.isFinite(official.outputPer1M) &&
@@ -736,7 +869,7 @@ export function evaluateNewModelStagingCandidate({ id, vendor = 'Upstream', url 
 
   const offCw = official && Number.isFinite(official.cacheWritePer1M) && official.cacheWritePer1M > 0 ? official.cacheWritePer1M : null;
   const ltCw = litellm && Number.isFinite(litellm.cacheWrite) && litellm.cacheWrite >= 0 ? litellm.cacheWrite : null;
-  if (offCw !== null && (ltCw === null || !ratesClose(offCw, ltCw))) {
+  if (offCw !== null && ((ltCw !== null && !ratesClose(offCw, ltCw)) || (ltCw === null && !officialSelfVerified))) {
     reasons.push('官网含未经 LiteLLM 一致确认的 cacheWrite（或延迟生效条款）');
   }
 
@@ -763,10 +896,11 @@ export function evaluateNewModelStagingCandidate({ id, vendor = 'Upstream', url 
 }
 
 export function applyStagedNewModels(catalog, stagedModels, nowMs = Date.now(), options = {}) {
-  const { bumpVersion = true } = options;
+  const { bumpVersion = true, promoteActiveKeys = null } = options;
   if (!Array.isArray(stagedModels) || stagedModels.length === 0) return false;
   const todayDate = new Date(nowMs).toISOString().slice(0, 10);
   catalog.names ??= {};
+  catalog.capacities ??= {};
   catalog.prices ??= {};
   catalog.aliases ??= {};
   catalog.feedModels ??= [];
@@ -777,6 +911,9 @@ export function applyStagedNewModels(catalog, stagedModels, nowMs = Date.now(), 
     if (!key || Object.hasOwn(catalog.prices, key)) continue;
     const { platform, platformEn } = inferPlatformLabels(candidate.vendor, candidate.url);
     catalog.names[key] = candidate.displayName;
+    if (!Object.hasOwn(catalog.capacities, key)) {
+      catalog.capacities[key] = /^(?:gpt-|o[1-9](?:$|[-_]))/i.test(key) ? 128_000 : 200_000;
+    }
     catalog.prices[key] = {
       model: key,
       input: candidate.proposed.input,
@@ -802,6 +939,9 @@ export function applyStagedNewModels(catalog, stagedModels, nowMs = Date.now(), 
     }
     if (!catalog.feedModels.includes(key)) {
       catalog.feedModels.push(key);
+    }
+    if (promoteActiveKeys?.has(key) && Array.isArray(catalog.activeModels) && !catalog.activeModels.includes(key)) {
+      catalog.activeModels.push(key);
     }
     changed = true;
   }
@@ -960,9 +1100,47 @@ export async function runAutoUpdatePricing(options = {}) {
   const reportPath = options.reportPath ?? DEFAULT_REPORT_PATH;
   const fetchImpl = options.fetchImpl ?? fetch;
   const geminiApiKey = options.geminiApiKey ?? process.env.GEMINI_API_KEY ?? '';
+  const filterByAntigravityHost = Boolean(options.filterByAntigravityHost);
+  const antigravityModelsUrl = options.antigravityModelsUrl ?? ANTIGRAVITY_MODELS_MD_URL;
+  const antigravityEnterpriseUrl = options.antigravityEnterpriseUrl ?? ANTIGRAVITY_ENTERPRISE_MD_URL;
 
   const catalog = JSON.parse(await readFile(catalogPath, 'utf8'));
   const trackedKeys = Object.keys(catalog.prices ?? {}).filter((k) => isTrackedCanonicalModel(k, catalog));
+
+  const probeRows = [];
+  const pageAlerts = [];
+  let antigravityHost = null;
+  if (filterByAntigravityHost) {
+    try {
+      const [modelsRes, enterpriseRes] = await Promise.all([
+        fetchImpl(antigravityModelsUrl, {
+          headers: { 'User-Agent': 'GravityBox-PricingWatch/1.2 (+https://github.com/Enzoo404/gravitybox)' },
+          signal: AbortSignal.timeout(15_000),
+        }),
+        fetchImpl(antigravityEnterpriseUrl, {
+          headers: { 'User-Agent': 'GravityBox-PricingWatch/1.2 (+https://github.com/Enzoo404/gravitybox)' },
+          signal: AbortSignal.timeout(15_000),
+        }).catch(() => null),
+      ]);
+      const modelsMd = modelsRes.ok ? await modelsRes.text() : '';
+      const enterpriseMd = enterpriseRes?.ok ? await enterpriseRes.text() : '';
+      const parsedHost = modelsRes.ok ? parseAntigravityHostModels(modelsMd, enterpriseMd) : null;
+      if (!modelsRes.ok) {
+        pageAlerts.push(`[Antigravity Docs] http_${modelsRes.status}: ${antigravityModelsUrl}`);
+        probeRows.push(`| Antigravity | \`${modelsRes.status}\` | http_${modelsRes.status} | ${antigravityModelsUrl} |`);
+      } else if (!parsedHost || parsedHost.models.size === 0) {
+        pageAlerts.push(`[Antigravity Docs] host_table_empty: ${antigravityModelsUrl}`);
+        probeRows.push(`| Antigravity | \`${modelsRes.status}\` | host_table_empty | ${antigravityModelsUrl} |`);
+      } else {
+        antigravityHost = parsedHost;
+        probeRows.push(`| Antigravity | \`${modelsRes.status}\` | Host Catalog (${parsedHost.models.size} models) | ${antigravityModelsUrl} |`);
+      }
+    } catch (err) {
+      const reason = err?.message ?? String(err);
+      pageAlerts.push(`[Antigravity Docs] ${reason}: ${antigravityModelsUrl}`);
+      probeRows.push(`| Antigravity | \`ERR\` | ${reason.slice(0, 48)} | ${antigravityModelsUrl} |`);
+    }
+  }
 
   // 1. 收集去重官方 sourceUrl 及对应需要追踪的模型
   const sourceTargets = new Map();
@@ -975,10 +1153,9 @@ export async function runAutoUpdatePricing(options = {}) {
   }
 
   // 2. 抓取官网定价页 + 调用 Gemini Flash 结构化提取
-  const probeRows = [];
-  const pageAlerts = [];
   const officialByKey = new Map();
   const discoveredOfficialNewModels = [];
+  const filteredNonHostModels = [];
   const seenNewModels = new Set();
   const knownAliasSet = new Set(
     [
@@ -1042,10 +1219,14 @@ export async function runAutoUpdatePricing(options = {}) {
       probeRows.push(`| ${vendor} | \`${res.status}\` | Parsed (${extracted.models.length} models) | ${url} |`);
 
       for (const item of extracted.models) {
-        const normName = normalizeUpstreamModelKey(item.officialModelName);
+        const enrichedItem = {
+          ...item,
+          evidenceVerified: verifyOfficialEvidence(cleanText, item),
+        };
+        const normName = normalizeUpstreamModelKey(enrichedItem.officialModelName);
         const normVariants = new Set(expandCanonicalVariants(normName));
         const matchedKey =
-          (item.catalogKey && catalog.prices?.[item.catalogKey] ? item.catalogKey : null) ??
+          (enrichedItem.catalogKey && catalog.prices?.[enrichedItem.catalogKey] ? enrichedItem.catalogKey : null) ??
           targetModels.find((m) => {
             const candidateKeys = [m.key, m.displayName, ...(CATALOG_TO_UPSTREAM_ALIASES[m.key] ?? [])];
             return candidateKeys.some((cand) => {
@@ -1056,8 +1237,8 @@ export async function runAutoUpdatePricing(options = {}) {
           null;
 
         if (matchedKey) {
-          if (!officialByKey.has(matchedKey) || item.catalogKey === matchedKey) {
-            officialByKey.set(matchedKey, item);
+          if (!officialByKey.has(matchedKey) || enrichedItem.catalogKey === matchedKey) {
+            officialByKey.set(matchedKey, enrichedItem);
           }
         } else if (
           normName &&
@@ -1067,7 +1248,17 @@ export async function runAutoUpdatePricing(options = {}) {
           !seenNewModels.has(normName)
         ) {
           seenNewModels.add(normName);
-          discoveredOfficialNewModels.push({ vendor, url, item });
+          if (filterByAntigravityHost) {
+            if (!antigravityHost) {
+              continue;
+            }
+            const inHost = [...normVariants].some((v) => antigravityHost.keys.has(v));
+            if (!inHost) {
+              filteredNonHostModels.push(normName);
+              continue;
+            }
+          }
+          discoveredOfficialNewModels.push({ vendor, url, item: enrichedItem });
         }
       }
     } catch (err) {
@@ -1112,7 +1303,7 @@ export async function runAutoUpdatePricing(options = {}) {
     else if (evaluation.status === 'yellow') yellowItems.push(evaluation);
   }
 
-  // 新模型雷达（仅关注现代主流对话模型，避免数百个历史旧模型刷屏；若通过严格双源共识，可预生成标准入库 PR 候选）
+  // 新模型雷达（启用宿主白名单过滤时仅追踪 Antigravity 官方文档已接入的现代模型，忽略纯外部模型）
   const newModelsRadar = [];
   const stagedNewModels = [];
   for (const entry of discoveredOfficialNewModels) {
@@ -1128,6 +1319,9 @@ export async function runAutoUpdatePricing(options = {}) {
     });
     if (staging.stageable) {
       stagedNewModels.push(staging);
+    }
+    if (filterByAntigravityHost && staging.stageable) {
+      continue;
     }
     newModelsRadar.push({
       model: id,
@@ -1146,7 +1340,7 @@ export async function runAutoUpdatePricing(options = {}) {
 
   const expiring = collectExpiringIntervals(catalog, nowMs);
 
-  // 5. 执行增量写入（应用双源共识 greenUpdates，以及通过严格双源共识的全新现代模型草案供 PR 审阅）
+  // 5. 执行增量写入
   let filesModified = false;
   if (writeMode && (greenUpdates.length > 0 || stagedNewModels.length > 0)) {
     const todayDate = new Date(nowMs).toISOString().slice(0, 10);
@@ -1154,7 +1348,10 @@ export async function runAutoUpdatePricing(options = {}) {
       applyVerifiedPriceUpdate(catalog, item.key, item.proposed, nowMs, { bumpVersion: false });
     }
     if (stagedNewModels.length > 0) {
-      applyStagedNewModels(catalog, stagedNewModels, nowMs, { bumpVersion: false });
+      applyStagedNewModels(catalog, stagedNewModels, nowMs, {
+        bumpVersion: false,
+        promoteActiveKeys: filterByAntigravityHost && antigravityHost ? antigravityHost.consumerKeys : null,
+      });
     }
     catalog.pricingVersion = bumpCatalogVersion(catalog.pricingVersion, todayDate);
     catalog.pricingUpdatedAt = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -1165,11 +1362,11 @@ export async function runAutoUpdatePricing(options = {}) {
   }
 
   // 6. 决策分流：no_change / green_auto_merge / yellow_needs_review / fetch_failed
-  // 注：新模型即使双源共识预写入，也保持 yellow_needs_review 走人工 PR 审阅合入，不走 green_auto_merge
   let decision = 'no_change';
-  if (yellowItems.length > 0 || expiring.length > 0 || newModelsRadar.length > 0 || stagedNewModels.length > 0) {
+  const unapprovedNewModels = filterByAntigravityHost ? newModelsRadar.length > 0 : (newModelsRadar.length > 0 || stagedNewModels.length > 0);
+  if (yellowItems.length > 0 || expiring.length > 0 || unapprovedNewModels) {
     decision = 'yellow_needs_review';
-  } else if (greenUpdates.length > 0) {
+  } else if (greenUpdates.length > 0 || (filterByAntigravityHost && stagedNewModels.length > 0)) {
     decision = 'green_auto_merge';
   } else if (pageAlerts.length > 0) {
     decision = 'fetch_failed';
@@ -1188,7 +1385,8 @@ export async function runAutoUpdatePricing(options = {}) {
     `- **Decision**: \`${decision}\``,
     `- **Gemini Flash Extraction**: ${geminiApiKey ? 'enabled' : 'skipped (GEMINI_API_KEY not set)'}`,
     `- **Verified Consensus Updates (Green)**: ${greenUpdates.length}`,
-    `- **Auto-Staged New Models (PR Ready)**: ${stagedNewModels.length}`,
+    `- **Auto-Staged Host Models**: ${stagedNewModels.length}`,
+    ...(filterByAntigravityHost ? [`- **Ignored Non-Antigravity Models**: ${filteredNonHostModels.length}`] : []),
     `- **Needs Review / Divergence / New Models (Yellow)**: ${yellowItems.length + newModelsRadar.length}`,
     `- **Expiring Promotional Intervals (<=14d)**: ${expiring.length}`,
     '',
@@ -1257,6 +1455,8 @@ export async function runAutoUpdatePricing(options = {}) {
     decision,
     filesModified,
     geminiEnabled: Boolean(geminiApiKey),
+    filterByAntigravityHost,
+    filteredNonHostModels,
     greenUpdates,
     stagedNewModels,
     yellowItems,
@@ -1275,7 +1475,8 @@ export async function runAutoUpdatePricing(options = {}) {
 async function main() {
   const args = process.argv.slice(2);
   const write = args.includes('--write');
-  const report = await runAutoUpdatePricing({ write });
+  const filterByAntigravityHost = !args.includes('--no-host-filter');
+  const report = await runAutoUpdatePricing({ write, filterByAntigravityHost });
   console.log(report.summaryMarkdown);
   if (process.env.GITHUB_OUTPUT) {
     const { appendFile } = await import('node:fs/promises');

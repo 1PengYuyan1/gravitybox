@@ -625,7 +625,17 @@ export function familyModelQuotaFromModels(models: NormalizedModel[]): Record<'g
   return result;
 }
 
-export function familyWindowsFromGroups(groups: NormalizedGroup[], nowMs: number): FamilyWindows {
+export function resolveQuotaStaleSeconds(quotaRefreshMinutes?: number | null): number {
+  const mins = typeof quotaRefreshMinutes === 'number' && Number.isFinite(quotaRefreshMinutes) ? Math.floor(quotaRefreshMinutes) : 0;
+  return mins > 15 ? mins * 60 + 120 : 900;
+}
+
+export function familyWindowsFromGroups(
+  groups: NormalizedGroup[],
+  nowMs: number,
+  staleAfterSeconds: number = 900,
+): FamilyWindows {
+  const threshold = Number.isFinite(staleAfterSeconds) && staleAfterSeconds > 0 ? staleAfterSeconds : 900;
   const windows: FamilyWindows = {
     gemini: { fiveHour: null, weekly: null },
     claude: { fiveHour: null, weekly: null },
@@ -638,7 +648,7 @@ export function familyWindowsFromGroups(groups: NormalizedGroup[], nowMs: number
         .filter(group => group.family === family)
         .flatMap(group => group.buckets.filter(bucket => bucket.window === window))
         .map(bucket => ({ ...bucket, stale: bucket.stale ||
-          (bucket.observed_at !== null && nowMs / 1000 - bucket.observed_at > 900) ||
+          (bucket.observed_at !== null && nowMs / 1000 - bucket.observed_at > threshold) ||
           (bucket.reset_time !== null && Date.parse(bucket.reset_time) <= nowMs) }));
       if (candidates.length === 0) continue;
       // 新鲜优先；同 window 多桶取更保守（remaining 更小）的已知值。
@@ -1122,6 +1132,7 @@ export function buildStandaloneModels(
   argonStatus?: ArgonStatus,
   carbonStatus?: ArgonStatus,
   subscriptionTier?: string | null,
+  staleAfterSeconds: number = 900,
 ): StandaloneModelStatus[] {
   const resolvedArgon = argonStatus ?? buildArgonStatus(models, groups, familyWindows, nowMs, subscriptionTier);
   const resolvedCarbon = carbonStatus ?? buildCarbonStatus(models, groups, familyWindows, nowMs, resolvedArgon, subscriptionTier);
@@ -1144,7 +1155,7 @@ export function buildStandaloneModels(
     if (!normKey || seenKeys.has(normKey)) continue;
     seenKeys.add(normKey);
 
-    const groupWindows = familyWindowsFromGroups([{ ...group, family: 'argon' }], nowMs).argon;
+    const groupWindows = familyWindowsFromGroups([{ ...group, family: 'argon' }], nowMs, staleAfterSeconds).argon;
     const matchingModels = models.filter(m =>
       m.family === 'other' &&
       ((m.display_name || '').toLowerCase().includes(rawName.toLowerCase()) ||

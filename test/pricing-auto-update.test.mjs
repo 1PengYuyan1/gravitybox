@@ -13,9 +13,11 @@ import {
   extractCleanPricingText,
   extractPricesWithGemini,
   normalizeUpstreamModelKey,
+  parseAntigravityHostModels,
   parseLiteLlmRates,
   parseOpenRouterRates,
   runAutoUpdatePricing,
+  verifyOfficialEvidence,
 } from '../tools/auto-update-pricing.mjs';
 import { buildPricingFeed } from '../tools/sync-pricing-feed.mjs';
 import * as pricingMod from '../dist/pricing.js';
@@ -862,13 +864,225 @@ test('新模型自动预入库门禁与 PR 草案生成：双源共识自动写 
   assert.equal(updatedCatalog.aliases['Orchestrator (Nova)'], 'gemini-5-nova');
   assert.deepEqual(updatedCatalog.activeModels, ['gemini-4-carbon'], 'activeModels 不得擅自扩大');
   assert.deepEqual(updatedCatalog.feedModels, ['gemini-4-carbon', 'gemini-5-nova']);
+  assert.equal(updatedCatalog.capacities?.['gemini-5-nova'], 200000);
   assert.equal(updatedCatalog.pricingVersion, '2026-11-19');
   assert.deepEqual(buildPricingFeed(updatedCatalog), updatedFeed);
+  assert.deepEqual(updatedFeed.feedModels, ['gemini-4-carbon', 'gemini-5-nova']);
+  assert.equal(updatedFeed.models?.['gemini-5-nova']?.capacityTokens, 200000);
 
   if (typeof pricingMod.localizePricingProvenance === 'function') {
     const enProv = pricingMod.localizePricingProvenance(updatedCatalog.prices['gemini-5-nova'].provenance, 'en');
     assert.equal(/[\u4e00-\u9fff]/.test(enProv?.platform ?? ''), false);
     assert.equal(/[\u4e00-\u9fff]/.test(enProv?.conditions ?? ''), false);
   }
+});
+
+test('官网宿主白名单筛选与自证校验：屏蔽未接入模型的外部噪音，已接入新模型在 LiteLLM 滞后时仍可凭官网原文证据自动合入', async (t) => {
+  // 1) parseAntigravityHostModels 解析 models.md + enterprise.md
+  const sampleModelsMd = `
+## Reasoning model
+| Model | Free & Google AI Plus | Google AI Pro | Google AI Ultra | Enterprise |
+| --- | --- | --- | --- | --- |
+| [Gemini 4 Carbon](/blog/gemini-4-carbon) | ❌ | ❌ | ✅ | ✅ |
+| [Orchestrator (Carbon)](/docs/models#orchestrator) | ❌ | ❌ | ✅ | ❌ |
+| [Gemini 5 Nova](/blog/gemini-5-nova) | ❌ | ✅ | ✅ | ✅ |
+| [Gemini 3.1 Pro](/blog/gemini-3-1-pro) | ❌ | ❌ | ❌ | ✅ |
+`;
+  const sampleEnterpriseMd = `
+## Supported models in Gemini Enterprise
+| Model | CLI / API Identifier | Enterprise |
+| --- | --- | --- |
+| [Gemini 3.1 Pro](/blog/gemini-3-1-pro) | \`gemini-3.1-pro-preview\` | ✅ |
+`;
+  const parsedHost = parseAntigravityHostModels(sampleModelsMd, sampleEnterpriseMd);
+  assert.equal(parsedHost.models.has('gemini-4-carbon'), true);
+  assert.equal(parsedHost.models.has('gemini-5-nova'), true);
+  assert.equal(parsedHost.models.has('orchestrator-carbon'), false);
+  assert.equal(parsedHost.consumerKeys.has('gemini-5-nova'), true);
+  assert.equal(parsedHost.consumerKeys.has('gemini-3.1-pro'), false);
+  assert.equal(parsedHost.keys.has('gemini-3.1-pro-preview'), true);
+
+  // 2) verifyOfficialEvidence 校验原文证据句与数字
+  assert.equal(
+    verifyOfficialEvidence('Gemini 5 Nova | $3.50 | $17.50 | $0.175', {
+      officialModelName: 'Gemini 5 Nova',
+      inputPer1M: 3.5,
+      outputPer1M: 17.5,
+      evidenceQuote: 'Gemini 5 Nova | $3.50 | $17.50',
+    }),
+    true
+  );
+  assert.equal(
+    verifyOfficialEvidence('Gemini 5 Nova | $3.50 | $17.50', {
+      officialModelName: 'Gemini 5 Nova',
+      inputPer1M: 1.0,
+      outputPer1M: 5.0,
+      evidenceQuote: 'Gemini 5 Nova | $3.50 | $17.50',
+    }),
+    false
+  );
+
+  // 3) LiteLLM 缺失时，通过官网原文自证的报价允许 green / stageable；但若 LiteLLM 存在冲突仍拦截
+  const selfVerifiedGreen = evaluateModelConsensus({
+    key: 'gemini-4-carbon',
+    localEntry: { model: 'gemini-4-carbon', input: 2.0, output: 10.0, cached: 0.1 },
+    official: {
+      officialModelName: 'Gemini 4 Carbon',
+      inputPer1M: 1.8,
+      outputPer1M: 9.0,
+      cachedPer1M: 0.09,
+      confidence: 'high',
+      evidenceQuote: 'Gemini 4 Carbon | $1.80 | $9.00',
+      evidenceVerified: true,
+    },
+    litellm: null,
+  });
+  assert.equal(selfVerifiedGreen.status, 'green');
+
+  const conflictBlocked = evaluateModelConsensus({
+    key: 'gemini-4-carbon',
+    localEntry: { model: 'gemini-4-carbon', input: 2.0, output: 10.0, cached: 0.1 },
+    official: {
+      officialModelName: 'Gemini 4 Carbon',
+      inputPer1M: 1.8,
+      outputPer1M: 9.0,
+      cachedPer1M: 0.09,
+      confidence: 'high',
+      evidenceQuote: 'Gemini 4 Carbon | $1.80 | $9.00',
+      evidenceVerified: true,
+    },
+    litellm: { input: 2.5, output: 12.5, cached: 0.25 },
+  });
+  assert.equal(conflictBlocked.status, 'yellow');
+
+  // 4) 端到端 filterByAntigravityHost: true：
+  //    - gpt-6.2-astra / gpt-6.2-sol（未接入 Antigravity）直接过滤，不入表、不开 Issue
+  //    - gemini-5-nova（官网文档已接入，即使 LiteLLM 尚无收录）凭官网原文自证直接写入并走 green_auto_merge
+  const dir = await mkdtemp(join(tmpdir(), 'gb-host-filter-'));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const catalogPath = join(dir, 'model-catalog.json');
+  const feedPath = join(dir, 'pricing-feed.json');
+  const reportPath = join(dir, 'report.json');
+
+  await writeFile(
+    catalogPath,
+    JSON.stringify({
+      schema: 1,
+      names: { 'gemini-4-carbon': 'Gemini 4 Carbon', 'gpt-oss-120b': 'GPT-OSS 120B' },
+      capacities: { 'gemini-4-carbon': 200000, 'gpt-oss-120b': 128000 },
+      prices: {
+        'gemini-4-carbon': {
+          model: 'gemini-4-carbon',
+          input: 2.0,
+          output: 10.0,
+          cached: 0.1,
+          provenance: { sourceUrl: 'https://cloud.google.com/model-garden/pricing?hl=en', verification: 'confirmed' },
+        },
+        'gpt-oss-120b': {
+          model: 'gpt-oss-120b',
+          input: 0.15,
+          output: 0.6,
+          cached: 0.075,
+          provenance: { sourceUrl: 'https://developers.openai.com/api/docs/pricing', verification: 'confirmed' },
+        },
+      },
+      aliases: {},
+      activeModels: ['gemini-4-carbon', 'gpt-oss-120b'],
+      feedModels: ['gemini-4-carbon', 'gpt-oss-120b'],
+      pricingVersion: '2026-11-19',
+      pricingUpdatedAt: '2026-11-19T00:00:00Z',
+    }, null, 2) + '\n',
+    'utf8'
+  );
+
+  const mockFetch = async (url, init) => {
+    const target = String(url);
+    if (target.includes('antigravity.google/docs/models.md')) {
+      return new Response(sampleModelsMd, { status: 200 });
+    }
+    if (target.includes('antigravity.google/docs/enterprise.md')) {
+      return new Response(sampleEnterpriseMd, { status: 200 });
+    }
+    if (target.includes('cloud.google.com')) {
+      return new Response(
+        '<html><body><h1>Google Cloud Vertex AI Model Garden Pricing</h1>' +
+          '<p>Standard pay-as-you-go Global API text token pricing per 1 million tokens in USD for Gemini frontier models and standard endpoints.</p>' +
+          '<table><tr><td>Gemini 4 Carbon</td><td>$2.00</td><td>$10.00</td><td>$0.10</td></tr>' +
+          '<tr><td>Gemini 5 Nova</td><td>$3.50</td><td>$17.50</td><td>$0.175</td></tr></table>' +
+          '<p>Prices apply to standard global pay-as-you-go text generation endpoints in USD per million input, output, and cached tokens.</p></body></html>',
+        { status: 200 }
+      );
+    }
+    if (target.includes('developers.openai.com')) {
+      return new Response(
+        '<html><body><h1>OpenAI API Standard Text Token Pricing</h1>' +
+          '<p>Standard pay-as-you-go API pricing per 1 million tokens in USD for GPT and open-weight models across global endpoints.</p>' +
+          '<table><tr><td>GPT-OSS 120B</td><td>$0.15</td><td>$0.60</td><td>$0.075</td></tr>' +
+          '<tr><td>gpt-6.2-astra</td><td>$8.00</td><td>$40.00</td><td>$0.40</td></tr>' +
+          '<tr><td>gpt-6.2-sol</td><td>$2.00</td><td>$10.00</td><td>$0.10</td></tr></table>' +
+          '<p>All listed prices apply to standard pay-as-you-go text endpoints per 1M tokens in USD.</p></body></html>',
+        { status: 200 }
+      );
+    }
+    if (target.includes('generativelanguage.googleapis.com')) {
+      const promptBody = String(init?.body ?? '');
+      const models = promptBody.includes('cloud.google.com')
+        ? [
+            { catalogKey: 'gemini-4-carbon', officialModelName: 'Gemini 4 Carbon', inputPer1M: 2.0, outputPer1M: 10.0, cachedPer1M: 0.1, confidence: 'high', evidenceQuote: 'Gemini 4 Carbon | $2.00 | $10.00 | $0.10' },
+            { catalogKey: '', officialModelName: 'Gemini 5 Nova', inputPer1M: 3.5, outputPer1M: 17.5, cachedPer1M: 0.175, confidence: 'high', evidenceQuote: 'Gemini 5 Nova | $3.50 | $17.50 | $0.175' },
+          ]
+        : [
+            { catalogKey: 'gpt-oss-120b', officialModelName: 'GPT-OSS 120B', inputPer1M: 0.15, outputPer1M: 0.6, cachedPer1M: 0.075, confidence: 'high', evidenceQuote: 'GPT-OSS 120B | $0.15 | $0.60 | $0.075' },
+            { catalogKey: '', officialModelName: 'gpt-6.2-astra', inputPer1M: 8.0, outputPer1M: 40.0, cachedPer1M: 0.4, confidence: 'high', evidenceQuote: 'gpt-6.2-astra | $8.00 | $40.00 | $0.40' },
+            { catalogKey: '', officialModelName: 'gpt-6.2-sol', inputPer1M: 2.0, outputPer1M: 10.0, cachedPer1M: 0.1, confidence: 'high', evidenceQuote: 'gpt-6.2-sol | $2.00 | $10.00 | $0.10' },
+          ];
+      return new Response(
+        JSON.stringify({ candidates: [{ content: { parts: [{ text: JSON.stringify({ pageParsedOk: true, models }) }] } }] }),
+        { status: 200 }
+      );
+    }
+    if (target.includes('litellm')) {
+      // 模拟 LiteLLM 尚未收录 gemini-5-nova，但收录了无关外部 gpt-6.2-astra
+      return new Response(
+        JSON.stringify({
+          'gemini/gemini-4-carbon': { input_cost_per_token: 2e-6, output_cost_per_token: 10e-6, cache_read_input_token_cost: 0.1e-6 },
+          'openai/gpt-6.2-astra': { input_cost_per_token: 8e-6, output_cost_per_token: 40e-6, cache_read_input_token_cost: 0.4e-6 },
+        }),
+        { status: 200 }
+      );
+    }
+    if (target.includes('openrouter.ai')) {
+      return new Response(JSON.stringify({ data: [] }), { status: 200 });
+    }
+    throw new Error(`Unexpected URL in mockFetch: ${target}`);
+  };
+
+  const report = await runAutoUpdatePricing({
+    write: true,
+    filterByAntigravityHost: true,
+    nowMs: Date.parse('2026-11-19T13:30:00Z'),
+    catalogPath,
+    feedPath,
+    reportPath,
+    geminiApiKey: 'test-fake-key',
+    fetchImpl: mockFetch,
+  });
+
+  assert.equal(report.decision, 'green_auto_merge');
+  assert.equal(report.filesModified, true);
+  assert.deepEqual(report.filteredNonHostModels, ['gpt-6.2-astra', 'gpt-6.2-sol']);
+  assert.deepEqual(report.newModelsRadar, []);
+  assert.equal(report.stagedNewModels.length, 1);
+  assert.equal(report.stagedNewModels[0].catalogKey, 'gemini-5-nova');
+
+  const updatedCatalog = JSON.parse(await readFile(catalogPath, 'utf8'));
+  const updatedFeed = JSON.parse(await readFile(feedPath, 'utf8'));
+  assert.ok(updatedCatalog.prices['gemini-5-nova']);
+  assert.equal(updatedCatalog.prices['gpt-6.2-astra'], undefined);
+  assert.equal(updatedCatalog.prices['gpt-6.2-sol'], undefined);
+  assert.equal(updatedCatalog.activeModels.includes('gemini-5-nova'), true);
+  assert.equal(updatedCatalog.feedModels.includes('gemini-5-nova'), true);
+  assert.equal(updatedCatalog.capacities['gemini-5-nova'], 200000);
+  assert.deepEqual(buildPricingFeed(updatedCatalog), updatedFeed);
 });
 

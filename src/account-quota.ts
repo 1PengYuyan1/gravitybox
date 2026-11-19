@@ -882,14 +882,18 @@ export function resolveEffectiveMonitoredModel(account: Account, monitoredModel 
   return monitoredModel;
 }
 
-export function computeAccountRemaining(account: Account, monitoredModel = 'all'): number | null {
+export function computeAccountRemaining(
+  account: Account,
+  monitoredModel = 'all',
+  options?: { staleAfterSeconds?: number; nowMs?: number },
+): number | null {
   if (account.disabled || account.validation_blocked || account.quota?.is_forbidden) return null;
   const quota = account.quota;
   if (!quota || !Array.isArray(quota.models)) return null;
 
-  const overview = buildAccountQuotaOverview(account);
-  const nowSec = Date.now() / 1000;
-  const FRESH_SECONDS = 900;
+  const overview = buildAccountQuotaOverview(account, options);
+  const nowSec = (options?.nowMs ?? Date.now()) / 1000;
+  const FRESH_SECONDS = typeof options?.staleAfterSeconds === 'number' && options.staleAfterSeconds > 0 ? options.staleAfterSeconds : 900;
 
   const freshFraction = (status: WindowStatus | null | undefined): number | null => {
     if (!status?.known || status.stale || status.remaining === null) return null;
@@ -1192,9 +1196,13 @@ function buildProjectedQuotaGroups(
   return out;
 }
 
-export function buildAccountQuotaOverview(account: Account | AccountSummary | { quota?: QuotaData | null }, options?: { nowMs?: number }): QuotaOverview {
+export function buildAccountQuotaOverview(
+  account: Account | AccountSummary | { quota?: QuotaData | null },
+  options?: { nowMs?: number; staleAfterSeconds?: number },
+): QuotaOverview {
   const nowMs = options?.nowMs ?? Date.now();
   const nowSec = Math.floor(nowMs / 1000);
+  const staleAfterSeconds = typeof options?.staleAfterSeconds === 'number' && options.staleAfterSeconds > 0 ? options.staleAfterSeconds : 900;
   const emptyArgon: ArgonStatus = {
     availability: 'unknown',
     quotaState: 'not_reported',
@@ -1271,7 +1279,7 @@ export function buildAccountQuotaOverview(account: Account | AccountSummary | { 
       const model = normalizedModelFromStored(rawModels[index]!, sourceDefault);
       const observed = model.own_observed_at ?? quota.last_updated;
       model.own_observed_at = observed ?? null;
-      model.own_stale = model.own_stale || (typeof observed === 'number' && nowSec - observed > 900)
+      model.own_stale = model.own_stale || (typeof observed === 'number' && nowSec - observed > staleAfterSeconds)
         || (!!model.own_reset_time && Date.parse(model.own_reset_time) <= nowMs);
       for (const key of ['family_5h', 'family_weekly'] as const) {
         const status = model[key];
@@ -1279,7 +1287,7 @@ export function buildAccountQuotaOverview(account: Account | AccountSummary | { 
         const remaining = normalizeFraction(status.remaining);
         model[key] = { ...status, remaining, known: status.known === true && remaining !== null,
           observedAt: status.observedAt ?? observed ?? null,
-          stale: status.stale || (typeof (status.observedAt ?? observed) === 'number' && nowSec - (status.observedAt ?? observed)! > 900)
+          stale: status.stale || (typeof (status.observedAt ?? observed) === 'number' && nowSec - (status.observedAt ?? observed)! > staleAfterSeconds)
             || (!!status.resetTime && Date.parse(status.resetTime) <= nowMs) };
       }
       models.push(model);
@@ -1289,7 +1297,7 @@ export function buildAccountQuotaOverview(account: Account | AccountSummary | { 
     }
   }
 
-  const familyWindows = familyWindowsFromGroups(groups, nowMs);
+  const familyWindows = familyWindowsFromGroups(groups, nowMs, staleAfterSeconds);
   for (const family of ['gemini', 'claude', 'argon', 'carbon'] as const) {
     const familyModels = models.filter(model => model.family === family);
     if (!familyWindows[family].fiveHour) {
@@ -1307,7 +1315,7 @@ export function buildAccountQuotaOverview(account: Account | AccountSummary | { 
   const legacy = legacyFromFamilyWindows(familyWindows, nowMs);
   const argonStatus = buildArgonStatus(applied, groups, familyWindows, nowMs, quota.subscription_tier);
   const carbonStatus = buildCarbonStatus(applied, groups, familyWindows, nowMs, argonStatus, quota.subscription_tier);
-  const standaloneModels = buildStandaloneModels(applied, groups, familyWindows, nowMs, argonStatus, carbonStatus, quota.subscription_tier);
+  const standaloneModels = buildStandaloneModels(applied, groups, familyWindows, nowMs, argonStatus, carbonStatus, quota.subscription_tier, staleAfterSeconds);
   const argonConverged = argonStatus.mode === 'unified' || argonStatus.mode === 'disabled';
   const carbonConverged = carbonStatus.mode === 'unified' || carbonStatus.mode === 'disabled';
   const hasArgonEvidence = applied.some(m => m.is_argon || m.family === 'argon') || groups.some(g => g.family === 'argon');
@@ -1402,7 +1410,7 @@ export function buildAccountQuotaOverview(account: Account | AccountSummary | { 
     }
   }
   const oldest = oldestBucket !== null && (oldestGroup === null || oldestBucket < oldestGroup) ? oldestBucket : oldestGroup;
-  const isStale = oldest !== null ? nowSec - oldest > 15 * 60 : false;
+  const isStale = oldest !== null ? nowSec - oldest > staleAfterSeconds : false;
   const staleHours = oldestGroup !== null ? Math.max(0, Math.floor((nowSec - oldestGroup) / 3600)) : 0;
 
   const windowOut = (status: WindowStatus | null): QuotaOverviewWindowStatus | null => status

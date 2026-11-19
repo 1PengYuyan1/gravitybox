@@ -1,7 +1,7 @@
 import { ALLOWED_DATA_DIRECTORY_NAMES, applicationChannel, savedApplicationChannel, applicationTarget, detectInstalledChannels, type ApplicationChannel, type ApplicationTarget } from './application-target.js';
 import { GoogleAccountLogin } from './account-oauth.js';
 import { AccountSwitchService } from './account-switch.js';
-import { AccountsManager, cleanAndLocalizeRefreshError, getGoogleClientId, getGoogleClientSecret, mergeSubscriptionTier, type Account, type QuotaData } from './accounts.js';
+import { AccountsManager, accountCredentialReadiness, cleanAndLocalizeRefreshError, getGoogleClientId, getGoogleClientSecret, mergeSubscriptionTier, type Account, type QuotaData } from './accounts.js';
 import { UsageStatsManager } from './usage.js';
 import {
   buildPricingCatalogPayloadSnapshot,
@@ -388,7 +388,7 @@ async function run() {
   const accountLogin = new GoogleAccountLogin((token, signal) => accountsManager.addAccountFromOAuth(token, signal));
   const homeDir = option('--home-dir', process.env.GRAVITYBOX_HOME_DIR || homedir())!;
   const appSupportDir = option('--app-support-dir', process.env.GRAVITYBOX_APP_SUPPORT_DIR || join(homedir(), 'Library', 'Application Support'))!;
-  const switchService = new AccountSwitchService(accountsManager, { stateDir, profile, channel });
+  const switchService = new AccountSwitchService(accountsManager, { stateDir, profile, channel, homeDir, geminiDir });
   const usageManager = new UsageStatsManager({ stateDir, geminiDir });
   cacheMaintenance.setHooks({
     archiveDatabases: dbPaths => usageManager.archiveDatabasesBeforeClear(dbPaths),
@@ -435,14 +435,21 @@ async function run() {
       accountsManager,
     });
 
+  let lastAutoSyncUnpricedSignature = '';
+  let maybeScheduleAutoPricingSync: (reason: 'startup' | 'timer' | 'unpriced' | 'enabled', unpricedKeys?: string[]) => void = () => {};
+
   async function syncActiveOfficialModelsToUsageManager(): Promise<void> {
     try {
-      await buildPricingCatalogPayload();
+      const payload = await buildPricingCatalogPayload();
+      if (payload.unpricedLiveModels.length > 0) {
+        maybeScheduleAutoPricingSync('unpriced', payload.unpricedLiveModels.map((m) => m.key));
+      }
     } catch {}
   }
   const pricePrefs = await readOptionalJson<{ enabled?: boolean }>(join(stateDir, 'pricing-preferences.json'), 'pricing-preferences.json');
   if (pricePrefs) usageManager.setAutoRemotePricingSync(pricePrefs.enabled === true);
   else if (typeof configuredAutoPricingSync === 'boolean') usageManager.setAutoRemotePricingSync(configuredAutoPricingSync);
+  await usageManager.hydratePricingCatalog().catch(() => {});
   const idempotencyStore = new IdempotencyStore();
   let backendLease: ProcessLease | undefined;
 
@@ -531,7 +538,7 @@ async function run() {
   const onStatus = (status: AssistantStatus) => {
     const installState = detectInstalledChannels(channel);
     const oauthClientConfigured = Boolean(getGoogleClientId() && getGoogleClientSecret());
-    const snapshot = { ...status, oauthClientConfigured, applicationChannel: channel, applicationLabel: target.label, accountSwitchSupported: target.supportsAccountSwitch, bothApplicationsInstalled: installState.bothInstalled, availableChannels: installState.channels, taskRevision:statusTasks?.revision??0,runningTasks:statusTasks?.list().filter(t=>t.state==='running').length??0 };
+    const snapshot = { ...status, oauthClientConfigured, applicationChannel: channel, applicationLabel: target.label, accountSwitchSupported: target.supportsAccountSwitch, bothApplicationsInstalled: installState.bothInstalled, availableChannels: installState.channels, pricingRevision: usageManager.getPricingRevision(), taskRevision:statusTasks?.revision??0,runningTasks:statusTasks?.list().filter(t=>t.state==='running').length??0 };
     const {updatedAt,rssMB,...meaningful}=snapshot;const key=JSON.stringify(meaningful);
     if(key===lastStatusKey&&Date.now()-lastStatusWrite<30000)return;
     lastStatusKey=key;lastStatusWrite=Date.now();pendingStatus=snapshot;
@@ -587,6 +594,10 @@ async function run() {
     onStatus,
   });
   const tasks = new Tasks(stateDir, () => onStatus(controller.snapshot()));statusTasks=tasks; await tasks.start();
+  usageManager.setOnPricingUpdated(() => {
+    onStatus(controller.snapshot());
+    void controller.refreshHudForPricingChange().catch(() => {});
+  });
   const cancelRunningDeepScan = () => {
     const deepScan = tasks.list().find(t => t.kind === 'deep-scan' && t.state === 'running');
     if (deepScan) tasks.cancel(deepScan.id);
@@ -613,6 +624,25 @@ async function run() {
   store.on('invalid', message => controller.dictionaryError(String(message)));
   store.on('valid', () => controller.dictionaryError());
   let commandChain = Promise.resolve(); let stopping = false; const ipcMetrics = { statusRequests: 0, taskPayloadReplies: 0 };
+  const startQuotaRefreshTask = () => tasks.begin('quota-refresh', bt('main.task.quota_refresh_title'), async (signal, progress, _commit) => {
+    const result = await accountsManager.refreshAllQuotas(globalThis.fetch, {
+      signal,
+      onAccountUpdated: (_account, done, total) => {
+        progress(done, total);
+      },
+    });
+    const incomplete = result.accounts.filter(a => a.quota?.refresh_state?.complete === false).length;
+    const warnings = result.accounts.filter(a => a.quota_refresh_error || a.quota?.refresh_state?.complete === false).length;
+    const staleAccounts = result.accounts.filter(a => (a.quota?.stale_groups?.length ?? 0) > 0).length;
+    const staleGroups = result.accounts.reduce((total, a) => total + (a.quota?.stale_groups?.length ?? 0), 0);
+    const incompletePart = incomplete ? bt('main.task.quota_refresh_incomplete_part', { count: incomplete }) : '';
+    const stalePart = staleAccounts ? bt('main.task.quota_refresh_stale_part', { accounts: staleAccounts, groups: staleGroups }) : '';
+    return { ok: result.failures.length === 0 && incomplete === 0, partial: (result.failures.length > 0 || incomplete > 0) && result.accounts.length > 0,
+      incomplete, updated: result.accounts.length, failed: result.failures.length, warnings, staleAccounts, staleGroups,
+      message: result.failures.length
+        ? bt('main.task.quota_refresh_failures', { total: result.accounts.length, failed: result.failures.length })
+        : bt('main.task.quota_refresh_ok', { total: result.accounts.length, incompletePart, stalePart }) };
+  });
   async function recommendationPreview(config: any, cached: boolean) {
     const live = await (cached ? probeLiveCached() : accountsManager.probeLiveLanguageServer()).catch(() => null);
     const detectedEmail = live?.email ?? await accountsManager.detectCurrentAntigravityEmail({ liveEmailHint: null }).catch(() => null);
@@ -724,6 +754,7 @@ async function run() {
               oauthClientConfigured: Boolean(getGoogleClientId() && getGoogleClientSecret()),
               applicationChannel: channel, applicationLabel: target.label, accountSwitchSupported: target.supportsAccountSwitch,
               bothApplicationsInstalled: installState.bothInstalled, availableChannels: installState.channels,
+              pricingRevision: usageManager.getPricingRevision(),
               ...(parsed.includeAccounts === false ? {} : { activeAccountEmail, activeFiveHourQuota, activeSubscriptionTier, liveAccountEmail, accountsRevision }),
             },
             ipc: { ...ipcMetrics },
@@ -955,25 +986,7 @@ async function run() {
       if (['maintenance_scan', 'maintenance_history', 'account_recovery_info', 'auto_switch_get', 'usage_snapshot_release', 'usage_events', 'usage_summary', 'usage_ledger_review', 'api_pricing_get', 'pricing_sync_status', 'quota_refresh', 'quota_refresh_start'].includes(command) || isReadOnlyAutoSwitch) {
         (async () => {
           if (command === 'quota_refresh_start') {
-            const taskId = tasks.begin('quota-refresh', bt('main.task.quota_refresh_title'), async (signal, progress, _commit) => {
-              const result = await accountsManager.refreshAllQuotas(globalThis.fetch, {
-                signal,
-                onAccountUpdated: (_account, done, total) => {
-                  progress(done, total);
-                },
-              });
-              const incomplete = result.accounts.filter(a => a.quota?.refresh_state?.complete === false).length;
-              const warnings = result.accounts.filter(a => a.quota_refresh_error || a.quota?.refresh_state?.complete === false).length;
-              const staleAccounts = result.accounts.filter(a => (a.quota?.stale_groups?.length ?? 0) > 0).length;
-              const staleGroups = result.accounts.reduce((total, a) => total + (a.quota?.stale_groups?.length ?? 0), 0);
-              const incompletePart = incomplete ? bt('main.task.quota_refresh_incomplete_part', { count: incomplete }) : '';
-              const stalePart = staleAccounts ? bt('main.task.quota_refresh_stale_part', { accounts: staleAccounts, groups: staleGroups }) : '';
-              return { ok: result.failures.length === 0 && incomplete === 0, partial: (result.failures.length > 0 || incomplete > 0) && result.accounts.length > 0,
-                incomplete, updated: result.accounts.length, failed: result.failures.length, warnings, staleAccounts, staleGroups,
-                message: result.failures.length
-                  ? bt('main.task.quota_refresh_failures', { total: result.accounts.length, failed: result.failures.length })
-                  : bt('main.task.quota_refresh_ok', { total: result.accounts.length, incompletePart, stalePart }) };
-            });
+            const taskId = startQuotaRefreshTask();
             reply({ ok: true, taskId });
             return;
           }
@@ -1049,7 +1062,7 @@ async function run() {
           if(command==='api_pricing_revalue_preview'){reply({ok:true,preview:await usageManager.previewRevalueHistory(parsed.mode === 'unpriced_only' ? 'unpriced_only' : 'force_all')});return;}
           if(command==='api_pricing_revalue'){const mode = parsed.mode === 'unpriced_only' ? 'unpriced_only' : 'force_all';reply({ok:true,...await usageManager.revalueHistory(parsed.confirm===true, { mode, previewId: typeof parsed.previewId === 'string' ? parsed.previewId : undefined })});return;}
           if(command==='api_pricing_revalue_rollback'){reply({ok:true,...await usageManager.restoreRevalueHistory(String(parsed.previewId ?? ''),parsed.confirm===true)});return;}
-          if(command==='pricing_sync_set'){await atomicJson(join(stateDir, 'pricing-preferences.json'), {enabled:parsed.enabled===true});usageManager.setAutoRemotePricingSync(parsed.enabled===true);reply({ok:true});return;}
+          if(command==='pricing_sync_set'){await atomicJson(join(stateDir, 'pricing-preferences.json'), {enabled:parsed.enabled===true});usageManager.setAutoRemotePricingSync(parsed.enabled===true);if(parsed.enabled===true)maybeScheduleAutoPricingSync('enabled');reply({ok:true});return;}
           if(command==='pricing_sync_check'){
             if(parsed.feedUrl!==undefined&&typeof parsed.feedUrl!=='string')throw new Error(bt('main.pricing_feed_invalid'));
             const res=await usageManager.syncRemotePricing(parsed.feedUrl,true);
@@ -1066,6 +1079,23 @@ async function run() {
           if (command === 'account_save_current') {
             const acc = await accountsManager.saveCurrentAccount({ homeDir, appSupportDir });
             reply({ ok: true, account: projectAccountForIpcNormalized(acc) });
+            return;
+          }
+          if (command === 'account_import_json') {
+            const res = await accountsManager.importAccountsFromJson(parsed.paths ?? parsed.files);
+            await syncActiveAccountToUsageManager(true).catch(() => {});
+            reply({
+              ok: true,
+              imported: res.imported,
+              updated: res.updated,
+              skipped: res.skipped,
+              expiredWithoutRefreshConfig: res.expiredWithoutRefreshConfig,
+            });
+            return;
+          }
+          if (command === 'account_export_backup') {
+            const res = await accountsManager.exportAccountsBackup(String(parsed.path ?? ''), parsed.confirmed === true);
+            reply({ ok: true, path: res.path, count: res.count });
             return;
           }
           if (command === 'account_upsert') {
@@ -1189,7 +1219,7 @@ async function run() {
           }
           else if (command === 'toggle') {if(!fixture)throw new Error(bt('main.shortcut_removed'));await controller.toggleLanguage();}
           else if (command === 'reload') await store.reload();
-          else if (command === 'stop') { stopping = true; server.close(); await accountLogin.close(); await tasks.stop(); store.close(); await controller.stop(); }
+          else if (command === 'stop') { stopping = true; clearTimeout(startupPricingSyncTimer); clearInterval(periodicPricingSyncTimer); clearTimeout(startupQuotaRefreshTimer); clearInterval(periodicQuotaRefreshTimer); server.close(); await accountLogin.close(); await tasks.stop(); store.close(); await controller.stop(); }
           else throw new Error(bt('main.unknown_command'));
           await writeChain; await cacheChain.catch(() => {});
           reply({ ok: true, status: controller.snapshot() });
@@ -1198,6 +1228,76 @@ async function run() {
       });
     });
   });
+  let autoPricingSyncInFlight: Promise<void> | null = null;
+  maybeScheduleAutoPricingSync = (reason, unpricedKeys) => {
+    if (stopping || !usageManager.isAutoRemotePricingSyncEnabled()) return;
+    if (process.env.GRAVITYBOX_DISABLE_AUTO_PRICING_NETWORK === '1') return;
+    if (autoPricingSyncInFlight) return;
+    autoPricingSyncInFlight = (async () => {
+      try {
+        let forceForNewUnpriced = false;
+        if (reason === 'unpriced' && Array.isArray(unpricedKeys) && unpricedKeys.length > 0) {
+          const sig = [...new Set(unpricedKeys)].sort().join(',');
+          const elapsedSinceCheck = Date.now() - usageManager.getLastPricingCheckAt();
+          if (sig !== lastAutoSyncUnpricedSignature && elapsedSinceCheck >= 300_000) {
+            lastAutoSyncUnpricedSignature = sig;
+            forceForNewUnpriced = true;
+          }
+        }
+        if (!forceForNewUnpriced && !(await usageManager.isAutoPricingSyncDue())) {
+          return;
+        }
+        await usageManager.syncRemotePricing(undefined, forceForNewUnpriced);
+      } catch {}
+    })().finally(() => {
+      autoPricingSyncInFlight = null;
+    });
+  };
+  const startupPricingSyncTimer = setTimeout(() => maybeScheduleAutoPricingSync('startup'), 3_000);
+  startupPricingSyncTimer.unref();
+  const periodicPricingSyncTimer = setInterval(() => maybeScheduleAutoPricingSync('timer'), 3_600_000);
+  periodicPricingSyncTimer.unref();
+  let autoQuotaRefreshCheckInFlight = false;
+  let lastAutoQuotaRefreshStartAt = 0;
+  const maybeScheduleAutoQuotaRefresh = () => {
+    if (stopping || fixture || process.env.GRAVITYBOX_DISABLE_AUTO_QUOTA_REFRESH === '1') return;
+    if (autoQuotaRefreshCheckInFlight) return;
+    const minutes = accountsManager.getConfiguredQuotaRefreshMinutes();
+    if (![5, 10, 15, 30, 60].includes(minutes)) return;
+    if (Date.now() - lastAutoQuotaRefreshStartAt < 60_000) return;
+    if (tasks.list().some(t => t.state === 'running')) return;
+    autoQuotaRefreshCheckInFlight = true;
+    void (async () => {
+      try {
+        const index = await accountsManager.loadIndex();
+        const enabledSummaries = index.accounts.filter(acc => !acc.disabled);
+        if (enabledSummaries.length === 0) return;
+        const nowSec = Date.now() / 1000;
+        const intervalSec = minutes * 60;
+        let hasOverdueAccount = false;
+        for (const summary of enabledSummaries) {
+          const saved = await accountsManager.getAccount(summary.id).catch(() => null);
+          if (!saved || saved.disabled || saved.validation_blocked) continue;
+          if (accountCredentialReadiness(saved, nowSec).state === 'needs_authorization') continue;
+          const lastUpdated = saved.quota?.last_updated ?? 0;
+          if (!lastUpdated || nowSec - lastUpdated >= intervalSec) {
+            hasOverdueAccount = true;
+            break;
+          }
+        }
+        if (!hasOverdueAccount || stopping) return;
+        if (tasks.list().some(t => t.state === 'running')) return;
+        lastAutoQuotaRefreshStartAt = Date.now();
+        startQuotaRefreshTask();
+      } catch {}
+    })().finally(() => {
+      autoQuotaRefreshCheckInFlight = false;
+    });
+  };
+  const startupQuotaRefreshTimer = setTimeout(() => maybeScheduleAutoQuotaRefresh(), 5_000);
+  startupQuotaRefreshTimer.unref();
+  const periodicQuotaRefreshTimer = setInterval(() => maybeScheduleAutoQuotaRefresh(), 30_000);
+  periodicQuotaRefreshTimer.unref();
   server.maxConnections = 64;
   const previousUmask = process.umask(0o177);
   try {
@@ -1208,6 +1308,10 @@ async function run() {
   await chmod(socketPath, 0o600);
   const stop = async (code = 0) => {
     if (stopping) return; stopping = true;
+    clearTimeout(startupPricingSyncTimer);
+    clearInterval(periodicPricingSyncTimer);
+    clearTimeout(startupQuotaRefreshTimer);
+    clearInterval(periodicQuotaRefreshTimer);
     server.close();
     await commandChain.catch(() => {});
     await accountLogin.close(); await tasks.stop(); store.close(); await controller.stop(); await writeChain; await cacheChain.catch(() => {}); await unlink(socketPath).catch(() => {}); await backendLease?.release(); process.exit(code);

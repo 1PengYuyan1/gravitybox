@@ -555,7 +555,7 @@ final class DashboardPage: NSObject {
             ?? (report["byModel"] as? [[String: Any]])
             ?? (report["models"] as? [[String: Any]])
             ?? []
-        let models = rawModels.filter {
+        let models = ModelUsageFold.foldThinkingVariants(rawModels).filter {
             let t = intVal($0, "totalTokens", fallback: intVal($0, "total_tokens"))
             let r = intVal($0, "requestCount", fallback: intVal($0, "request_count"))
             return t > 0 || r > 0

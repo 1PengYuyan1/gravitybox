@@ -8,7 +8,7 @@ import { aggregateLedger, ledgerEventPage } from './usage-aggregate.js';
 import { revalueLedger } from './usage-revalue.js';
 import { resetAndRegisterRemoteModelMetadata } from './model-catalog.js';
 import { PRICING_METADATA } from './pricing.js';
-import { compareDatedFeedVersion } from './usage-pricing.js';
+import { compareFeedFreshness } from './usage-pricing.js';
 import { bt, setActiveLocale } from './i18n.js';
 export function validLedgerEvent(event: unknown): event is LedgerEvent {
     if (!event || typeof event !== 'object')
@@ -80,9 +80,18 @@ function syncWorkerRemoteMetadata(ledgerPath: string): void {
         }
         const parsed = JSON.parse(readFileSync(remotePath, 'utf8'));
         const remoteVer = typeof parsed?.feedVersion === 'string' ? parsed.feedVersion.trim() : '';
-        const verCmp = compareDatedFeedVersion(remoteVer, PRICING_METADATA.version);
+        const remoteUpdatedAt = typeof parsed?.feedUpdatedAt === 'string'
+          ? parsed.feedUpdatedAt.trim()
+          : (typeof parsed?.updatedAt === 'string' ? parsed.updatedAt.trim() : '');
+        const verCmp = compareFeedFreshness(
+          { version: remoteVer, updatedAt: remoteUpdatedAt },
+          { version: PRICING_METADATA.version, updatedAt: PRICING_METADATA.updatedAt }
+        );
         const isOlderDatedFeed = verCmp !== null && verCmp < 0;
-        resetAndRegisterRemoteModelMetadata(parsed, { onlyNewEntries: isOlderDatedFeed });
+        resetAndRegisterRemoteModelMetadata(parsed, {
+          onlyNewEntries: isOlderDatedFeed,
+          authoritativeSnapshot: !isOlderDatedFeed,
+        });
         cachedWorkerRemoteMeta = {
             path: remotePath,
             dev: stat.dev,

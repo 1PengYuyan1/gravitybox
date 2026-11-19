@@ -956,6 +956,10 @@ export class Controller {
     const reportFilename = this.t('deep_scan.report_filename');
     deep.state=deep.nativeMenus.state==='read'&&!deep.plugins.limited?'complete':'partial';report.deep=deep;signal.throwIfAborted();onCommit?.();const directory=join(this.options.stateDir!,'reports');await atomicJson(join(directory,'coverage.json'),report,signal);await atomicJson(join(directory,'deep-scan.json'),deep,signal);await atomicText(join(directory,reportFilename),deepMarkdown(deep),signal);this.coverage=report;this.publish();return{ok:deep.state==='complete',partial:true,message:this.t('controller.scan.summary', { count: deep.plugins.entries.length, menuMessage: deep.nativeMenus.message })};
   }
+  async refreshHudForPricingChange(): Promise<void> {
+    if (!this.hudEnabled || this.stopped) return;
+    await this.hudBridge.refreshAllForPricingChange();
+  }
   async stop() {
     this.stopped = true; this.closeProfileWatchers(); clearTimeout(this.reconnection); clearTimeout(this.targetTimer);
     this.hudBridge.dispose();

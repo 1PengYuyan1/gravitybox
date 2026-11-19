@@ -11,6 +11,9 @@ final class AccountsPage: NSObject {
     let policySubtitleLabel = text("", size: 11, color: Design.secondary)
     let configButton = button(L10n.t("accounts.smart_switch.config_btn"), target: nil, action: #selector(showPolicySettings))
     let toggleCollapseAllButton = button(L10n.t("accounts.collapse_all"), target: nil, action: #selector(toggleCollapseAllAccounts))
+    let exportBackupButton = button(L10n.t("accounts.export_btn", fallback: "导出备份…"), target: nil, action: #selector(exportAccountsBackup))
+    var exportConfirmHook: (() -> Bool)?
+    var exportSavePanelHook: ((String) -> URL?)?
     let policyBox: NSBox
     let recommendationDivider = divider()
     let cardsStack = NSStackView()
@@ -134,7 +137,17 @@ final class AccountsPage: NSObject {
         toggleCollapseAllButton.toolTip = nil
         toggleCollapseAllButton.setAccessibilityLabel(isAllCollapsedMode ? L10n.t("accounts.a11y.expand_all") : L10n.t("accounts.a11y.collapse_all"))
 
-        let headerActions = horizontal([toggleCollapseAllButton, refreshQuotaBtn, saveCurrentBtn], spacing: 8)
+        exportBackupButton.image = NSImage(
+            systemSymbolName: "square.and.arrow.up",
+            accessibilityDescription: nil
+        )?.withSymbolConfiguration(NSImage.SymbolConfiguration(pointSize: 10.5, weight: .semibold))
+        exportBackupButton.image?.isTemplate = true
+        exportBackupButton.imagePosition = .imageLeading
+        exportBackupButton.title = L10n.t("accounts.export_btn", fallback: "导出备份…")
+        exportBackupButton.toolTip = nil
+        exportBackupButton.setAccessibilityLabel(L10n.t("accounts.a11y.export_backup", fallback: "导出全部账号备份为 JSON 文件"))
+
+        let headerActions = horizontal([toggleCollapseAllButton, exportBackupButton, refreshQuotaBtn, saveCurrentBtn], spacing: 8)
         headerActions.detachesHiddenViews = true
         let root = pageStack(title: L10n.t("accounts.title"), actions: headerActions)
         root.spacing = Design.Spacing.page
@@ -253,6 +266,7 @@ final class AccountsPage: NSObject {
         super.init()
 
         toggleCollapseAllButton.target = self
+        exportBackupButton.target = self
         saveCurrentBtn.target = self
         refreshQuotaBtn.target = self
         rollbackButton.target = self
@@ -293,9 +307,19 @@ final class AccountsPage: NSObject {
         let validIds = Set(accounts.compactMap { $0["id"] as? String }.filter { !$0.isEmpty })
         guard !validIds.isEmpty else {
             toggleCollapseAllButton.isHidden = true
+            exportBackupButton.isHidden = true
             return
         }
         toggleCollapseAllButton.isHidden = false
+        exportBackupButton.isHidden = false
+        let exportTitle = L10n.t("accounts.export_btn", fallback: "导出备份…")
+        if exportBackupButton.title != exportTitle {
+            exportBackupButton.title = exportTitle
+        }
+        exportBackupButton.setAccessibilityLabel(L10n.t("accounts.a11y.export_backup", fallback: "导出全部账号备份为 JSON 文件"))
+        exportBackupButton.toolTip = nil
+        exportBackupButton.invalidateIntrinsicContentSize()
+
         let allCollapsed = validIds.isSubset(of: collapsedAccountIds)
         isAllCollapsedMode = allCollapsed
         let title = allCollapsed ? L10n.t("accounts.expand_all") : L10n.t("accounts.collapse_all")
@@ -644,7 +668,7 @@ final class AccountsPage: NSObject {
         if !isCollapsed,
            let quota = item["quota"] as? [String: Any], let stamp = quota["last_updated"] as? Double, stamp > 0 {
             let dateStr = Self.dateFormatter.string(from: Date(timeIntervalSince1970: stamp))
-            let isStale = (Date().timeIntervalSince1970 - stamp) > 15 * 60
+            let isStale = (Date().timeIntervalSince1970 - stamp) > app.quotaStaleThresholdSeconds
             let updateText = isStale ? L10n.t("accounts.updated_at_stale", ["time": dateStr]) : L10n.t("accounts.updated_at", ["time": dateStr])
             card.updateLabel.stringValue = updateText
             card.updateLabel.textColor = isStale ? accessibleWarningColor() : .secondaryLabelColor
@@ -701,6 +725,7 @@ final class AccountsPage: NSObject {
                 ], inset: 16)
                 cardsStack.addArrangedSubview(emptyCard)
                 fillWidth(emptyCard, in: cardsStack)
+                syncCollapseHeaderButtonState()
                 return
             }
         }
@@ -1107,6 +1132,79 @@ final class AccountsPage: NSObject {
         sheet.show(in: window) { [weak self] in self?.addAccountSheet = nil }
     }
 
+    private static let backupFileDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd"
+        return f
+    }()
+
+    @objc func exportAccountsBackup() {
+        guard !accounts.isEmpty else { return }
+        if let confirmHook = exportConfirmHook {
+            guard confirmHook() else { return }
+            presentExportSavePanel()
+            return
+        }
+        guard let window = app.window, window.activeSheetWindow == nil else { return }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.t("accounts.export.confirm_title", fallback: "导出未加密的账号凭据备份？")
+        alert.informativeText = L10n.t("accounts.export.confirm_body", fallback: "导出的 JSON 文件包含未加密的 OAuth 登录凭据（access_token 与 refresh_token）。请妥善保管在安全的本地位置，切勿上传至公开网盘或分享给他人。")
+        alert.addButton(withTitle: L10n.t("accounts.export.confirm_action", fallback: "继续导出…"))
+        alert.addButton(withTitle: L10n.t("common.cancel", fallback: "取消"))
+        alert.beginSheetModal(for: window) { [weak self] resp in
+            guard let self, resp == .alertFirstButtonReturn else { return }
+            DispatchQueue.main.async {
+                self.presentExportSavePanel()
+            }
+        }
+    }
+
+    private func presentExportSavePanel() {
+        let dateTag = Self.backupFileDateFormatter.string(from: Date())
+        let defaultFileName = "gravitybox-accounts-backup-\(dateTag).json"
+        if let saveHook = exportSavePanelHook {
+            guard let url = saveHook(defaultFileName) else { return }
+            executeExportBackup(to: url)
+            return
+        }
+        let panel = NSSavePanel()
+        panel.title = L10n.t("accounts.export.panel_title", fallback: "导出账号备份")
+        panel.nameFieldStringValue = defaultFileName
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        panel.allowedFileTypes = ["json"]
+        let handleSave: (NSApplication.ModalResponse) -> Void = { [weak self] resp in
+            guard let self, resp == .OK, let url = panel.url else { return }
+            self.executeExportBackup(to: url)
+        }
+        if let window = app.window, window.activeSheetWindow == nil {
+            panel.beginSheetModal(for: window, completionHandler: handleSave)
+        } else {
+            handleSave(panel.runModal())
+        }
+    }
+
+    private func executeExportBackup(to url: URL) {
+        exportBackupButton.isEnabled = false
+        app.bridge.send([
+            "command": "account_export_backup",
+            "path": url.path,
+            "confirmed": true
+        ]) { [weak self] response in
+            guard let self else { return }
+            self.exportBackupButton.isEnabled = true
+            switch response {
+            case .success(let value):
+                let count = intVal(value, "count", fallback: self.accounts.count)
+                self.app.showMessage(L10n.t("accounts.export.success", ["count": count, "name": url.lastPathComponent], fallback: "已导出 \(count) 个账号备份至 \(url.lastPathComponent)"))
+            case .failure(let error):
+                self.app.showMessage(L10n.t("accounts.export.failed", ["error": error.localizedDescription], fallback: "导出账号备份失败：\(error.localizedDescription)"), error: true)
+            }
+        }
+    }
+
     @objc func rollbackSwitch() {
         guard let window = app.window, window.activeSheetWindow == nil else { return }
         let alert = NSAlert(); alert.messageText = L10n.t("accounts.rollback.confirm_title")
@@ -1233,6 +1331,10 @@ final class AccountsPage: NSObject {
         surface.addSubview(stack)
         pin(stack, to: surface, inset: 20)
 
+        #if NATIVE_UI_TEST
+        Assistant.configureHeadlessWindowIfNeeded(window)
+        Assistant.configureHeadlessWindowIfNeeded(sheet)
+        #endif
         window.beginSheet(sheet) { [weak self] resp in
             if let obs = handler.observer { NotificationCenter.default.removeObserver(obs) }
             withExtendedLifetime(handler) {}

@@ -2636,6 +2636,10 @@ export class ConversationMetricsEngine {
     this.pricingCachePath = cleanStateDir ? join(cleanStateDir, 'api_pricing.json') : null;
   }
 
+  public invalidatePricingCache(): void {
+    this.cachedPricingTable = null;
+  }
+
   private async resolveEffectivePricingTable(): Promise<Record<string, ApiPricingEntry>> {
     if (!this.remotePricingCachePath || !this.pricingCachePath) {
       return DEFAULT_API_PRICES;

@@ -10,6 +10,7 @@ import { createModelQueryMatcher, formatLocalDate, isUnpricedZeroSentinel, type 
 import { UsageLedger, type LedgerEvent } from './usage-ledger.js';
 import {
   DEFAULT_PRICING_FEED_URLS,
+  PRICING_METADATA,
   calculateEstimatedUsd,
   canonicalActivePricingKeys,
   resolveContextTierPricing,
@@ -137,9 +138,15 @@ export class UsageStatsManager {
   private nextAutoSyncAt = 0;
   private syncStateLoaded = false;
   private syncStatePromise?: Promise<void>;
+  private pricingSyncInFlight?: Promise<{ synced: boolean; unchanged?: boolean; error?: string; count?: number; sourceUrl?: string; version?: string; updatedAt?: string; healedCount?: number }>;
   private lastSyncError: string | null = null;
   private lastSyncedSourceUrl = '';
   private lastSyncedVersion = '';
+  private lastSyncedUpdatedAt = '';
+  private lastSyncedEtag = '';
+  private lastSyncedSha256 = '';
+  private pricingRevisionSeq = 0;
+  private onPricingUpdatedHook?: (info: { version?: string; healedCount?: number }) => void;
   private activeOfficialModels: string[] | null = null;
   private activeUnpricedOfficialModels: string[] | null = null;
 
@@ -173,6 +180,22 @@ export class UsageStatsManager {
   }
 
   setAutoRemotePricingSync(enabled: boolean) { this.autoRemotePricingSync = enabled; }
+  isAutoRemotePricingSyncEnabled(): boolean { return this.autoRemotePricingSync; }
+  async isAutoPricingSyncDue(now = Date.now()): Promise<boolean> {
+    await this.ensureSyncStateLoaded();
+    return now >= this.nextAutoSyncAt;
+  }
+  getLastPricingCheckAt(): number { return Math.max(this.lastCheckAt, this.lastRemoteSyncAt); }
+  setOnPricingUpdated(hook: ((info: { version?: string; healedCount?: number }) => void) | undefined) {
+    this.onPricingUpdatedHook = hook;
+  }
+  getPricingRevision(): string {
+    return `${this.lastSyncedVersion || PRICING_METADATA.version}|${this.lastSyncedUpdatedAt || PRICING_METADATA.updatedAt}|${this.lastSyncedSha256}|${this.pricingRevisionSeq}`;
+  }
+  async hydratePricingCatalog(): Promise<void> {
+    await this.ensureSyncStateLoaded();
+    await this.getRawPricingCatalog();
+  }
 
   /** 动态更新当前官方 Antigravity 包含模型列表（含可选未计价实时模型列表），用于价格基准展示过滤与状态计数。 */
   setActiveOfficialModels(
@@ -927,6 +950,9 @@ export class UsageStatsManager {
       lastSyncError: this.lastSyncError,
       lastSyncedSourceUrl: this.lastSyncedSourceUrl,
       lastSyncedVersion: this.lastSyncedVersion,
+      lastSyncedUpdatedAt: this.lastSyncedUpdatedAt,
+      lastSyncedEtag: this.lastSyncedEtag,
+      lastSyncedSha256: this.lastSyncedSha256,
     };
   }
 
@@ -939,6 +965,9 @@ export class UsageStatsManager {
     this.lastSyncError = next.lastSyncError;
     this.lastSyncedSourceUrl = next.lastSyncedSourceUrl;
     this.lastSyncedVersion = next.lastSyncedVersion;
+    this.lastSyncedUpdatedAt = next.lastSyncedUpdatedAt ?? '';
+    this.lastSyncedEtag = next.lastSyncedEtag ?? '';
+    this.lastSyncedSha256 = next.lastSyncedSha256 ?? '';
   }
 
   private async ensureSyncStateLoaded(): Promise<void> {
@@ -956,38 +985,63 @@ export class UsageStatsManager {
     await this.syncStatePromise;
   }
 
-  async syncRemotePricing(feedUrl?: string, force = false): Promise<{ synced: boolean; error?: string; count?: number; sourceUrl?: string; version?: string; healedCount?: number }> {
-    await this.ensureSyncStateLoaded();
-    const candidateUrls = selectRemotePricingCandidateUrls({
-      feedUrl,
-      customRemoteUrlConfigured: this.customRemoteUrlConfigured,
-      remotePricingUrl: this.remotePricingUrl,
-      fallbackPricingUrls: this.fallbackPricingUrls,
-    });
-    const now = Date.now();
-    if (!force && now < this.nextAutoSyncAt) {
-      return { synced: false, error: bt('usage.err.sync_rate_limited') };
+  async syncRemotePricing(feedUrl?: string, force = false): Promise<{ synced: boolean; unchanged?: boolean; error?: string; count?: number; sourceUrl?: string; version?: string; updatedAt?: string; healedCount?: number }> {
+    if (this.pricingSyncInFlight) {
+      if (!force && !feedUrl) {
+        return this.pricingSyncInFlight;
+      }
+      await this.pricingSyncInFlight.catch(() => {});
     }
-    const snapshot = this.pricingSyncStateSnapshot();
-    const result = await executeRemotePricingSync({
-      candidateUrls,
-      remotePricingCachePath: this.remotePricingCachePath,
-      pricingSyncStatePath: this.pricingSyncStatePath,
-      state: snapshot,
-      now,
-    });
-    this.applyPricingSyncState(snapshot);
-    this.syncStateLoaded = true;
-    if (!result.synced) {
-      return result;
-    }
-    this.cachedSummariesByAccount.clear();
-    this.lastAggregationKeysByAccount.clear();
-    let healedCount = 0;
+    const run = (async () => {
+      await this.ensureSyncStateLoaded();
+      const candidateUrls = selectRemotePricingCandidateUrls({
+        feedUrl,
+        customRemoteUrlConfigured: this.customRemoteUrlConfigured,
+        remotePricingUrl: this.remotePricingUrl,
+        fallbackPricingUrls: this.fallbackPricingUrls,
+      });
+      const now = Date.now();
+      if (!force && now < this.nextAutoSyncAt) {
+        return { synced: false, error: bt('usage.err.sync_rate_limited') };
+      }
+      const snapshot = this.pricingSyncStateSnapshot();
+      const result = await executeRemotePricingSync({
+        candidateUrls,
+        remotePricingCachePath: this.remotePricingCachePath,
+        pricingSyncStatePath: this.pricingSyncStatePath,
+        state: snapshot,
+        now,
+        force,
+      });
+      this.applyPricingSyncState(snapshot);
+      this.syncStateLoaded = true;
+      if (!result.synced) {
+        return result;
+      }
+      if (result.unchanged) {
+        return { ...result, healedCount: 0 };
+      }
+      this.cachedSummariesByAccount.clear();
+      this.lastAggregationKeysByAccount.clear();
+      this.snapshots.clear();
+      let healedCount = 0;
+      try {
+        healedCount = await this.autoHealUnpricedHistory();
+      } catch {}
+      this.pricingRevisionSeq += 1;
+      try {
+        this.onPricingUpdatedHook?.({ version: result.version, healedCount });
+      } catch {}
+      return { ...result, healedCount };
+    })();
+    this.pricingSyncInFlight = run;
     try {
-      healedCount = await this.autoHealUnpricedHistory();
-    } catch {}
-    return { ...result, healedCount };
+      return await run;
+    } finally {
+      if (this.pricingSyncInFlight === run) {
+        this.pricingSyncInFlight = undefined;
+      }
+    }
   }
 
   async getPricingSyncStatus(): Promise<{
@@ -1031,6 +1085,10 @@ export class UsageStatsManager {
     this.cachedSummariesByAccount.clear();
     this.lastAggregationKeysByAccount.clear();
     this.snapshots.clear();
+    this.pricingRevisionSeq += 1;
+    try {
+      this.onPricingUpdatedHook?.({});
+    } catch {}
   }
 
   /**
@@ -1353,7 +1411,7 @@ export class UsageStatsManager {
     }
 
     await this.loadUsageLedger();
-    if (this.autoRemotePricingSync) {
+    if (this.autoRemotePricingSync && Date.now() >= this.nextAutoSyncAt) {
       void this.syncRemotePricing().catch(() => {});
     }
     if (this.largeLedger && !this.ledgerUnavailable) {

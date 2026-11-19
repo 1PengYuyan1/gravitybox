@@ -1,8 +1,9 @@
 import { applicationTarget, type ApplicationTarget } from './application-target.js';
 import { bt } from './i18n.js';
 import { inspectBundle } from './discovery.js';
+import { readFileSync, statSync } from 'node:fs';
 import { lstat, mkdir, readFile, readdir, unlink } from 'node:fs/promises';
-import { join } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -16,6 +17,7 @@ import { decodeTopicRow } from './account-state.js';
 import {
   MockKeychainAdapter,
   SystemKeychainAdapter,
+  buildGoOauthPayload,
   syncAccountToKeychain,
   type KeychainAdapter,
 } from './account-keychain.js';
@@ -38,6 +40,7 @@ import {
   mergeGroupsWithPrevious,
   mergeModelsWithPrevious,
   normalizeStoredGroups,
+  resolveQuotaStaleSeconds,
 } from './quota.js';
 import {
   CodedAccountError,
@@ -93,6 +96,7 @@ import {
 export {
   MockKeychainAdapter,
   SystemKeychainAdapter,
+  buildGoOauthPayload,
   syncAccountToKeychain,
   type KeychainAdapter,
   CloudQuotaAuthorityError,
@@ -122,6 +126,7 @@ export {
   quotaSnapshotForRevision,
   refreshResetDescription,
   resolveEffectiveMonitoredModel,
+  resolveQuotaStaleSeconds,
   sanitizeJsonString,
   type Account,
   type AccountIndex,
@@ -163,6 +168,7 @@ export class AccountsManager {
   private providerContextCache: { value: CloudProviderContext; expiresAt: number } | null = null;
   private inFlightProviderContext: Promise<CloudProviderContext | null> | null = null;
   private indexCache: { mtimeMs: number; size: number; index: AccountIndex } | null = null;
+  private configStaleCache: { mtimeMs: number; size: number; refreshMinutes: number; staleSeconds: number } | null = null;
   private accountCache = new Map<string, { mtimeMs: number; size: number; account: Account; digest: string; revision: string }>();
   private accountFileDigests = new WeakMap<Account, string>();
   private refreshSaveMeta = new WeakMap<Account, { expectedRefreshToken: string; isRefreshUpdate: boolean }>();
@@ -190,8 +196,38 @@ export class AccountsManager {
     this.desktopEmailCache = null;
     this.vscdbEmailCache = null;
     this.indexCache = null;
+    this.configStaleCache = null;
     this.accountCache.clear();
     this.providerContextCache = null;
+  }
+
+  public getConfiguredQuotaRefreshMinutes(): number {
+    return this.readConfiguredQuotaRefreshSettings().refreshMinutes;
+  }
+
+  public getConfiguredQuotaStaleSeconds(): number {
+    return this.readConfiguredQuotaRefreshSettings().staleSeconds;
+  }
+
+  private readConfiguredQuotaRefreshSettings(): { refreshMinutes: number; staleSeconds: number } {
+    const configPath = join(this.stateDir, 'config.json');
+    try {
+      const st = statSync(configPath);
+      if (this.configStaleCache && this.configStaleCache.mtimeMs === st.mtimeMs && this.configStaleCache.size === st.size) {
+        return this.configStaleCache;
+      }
+      const parsed = JSON.parse(readFileSync(configPath, 'utf8'));
+      const rawMins = typeof parsed?.quotaRefreshMinutes === 'number' && Number.isFinite(parsed.quotaRefreshMinutes)
+        ? Math.floor(parsed.quotaRefreshMinutes)
+        : 0;
+      const staleSeconds = resolveQuotaStaleSeconds(rawMins);
+      const next = { mtimeMs: st.mtimeMs, size: st.size, refreshMinutes: rawMins, staleSeconds };
+      this.configStaleCache = next;
+      return next;
+    } catch {
+      this.configStaleCache = null;
+      return { refreshMinutes: 0, staleSeconds: 900 };
+    }
   }
 
   public setTarget(target: ApplicationTarget): void {
@@ -611,11 +647,30 @@ export class AccountsManager {
     return (await this.updateAccount(id, current => { current.name = name.trim() || current.email.split('@')[0] || current.email; })).account;
   }
 
+  private static parseExplicitExpiryTimestamp(rawExpiryTs: unknown, rawExpiryIso: unknown): number | undefined {
+    if (typeof rawExpiryTs === 'number' && Number.isFinite(rawExpiryTs) && rawExpiryTs > 0) {
+      return rawExpiryTs > 1e11 ? Math.floor(rawExpiryTs / 1000) : Math.floor(rawExpiryTs);
+    }
+    if (typeof rawExpiryTs === 'string' && /^\d+(\.\d+)?$/.test(rawExpiryTs.trim())) {
+      const num = Number(rawExpiryTs.trim());
+      if (Number.isFinite(num) && num > 0) {
+        return num > 1e11 ? Math.floor(num / 1000) : Math.floor(num);
+      }
+    }
+    if (typeof rawExpiryIso === 'string' && rawExpiryIso.trim()) {
+      const ms = Date.parse(rawExpiryIso.trim());
+      if (Number.isFinite(ms) && ms > 0) {
+        return Math.floor(ms / 1000);
+      }
+    }
+    return undefined;
+  }
+
   async upsertAccount(data: any): Promise<Account> {
     await this.init();
     return this.withWriteLock(async () => {
       const index = await this.loadIndex();
-      const email = String(data.email || '').trim();
+      const email = String(data.email ?? data.token?.email ?? data.id_token_email ?? '').trim();
       const existingSummary = index.accounts.find(
         a => (email && a.email.toLowerCase() === email.toLowerCase()) || (data.id && a.id === data.id)
       );
@@ -625,17 +680,29 @@ export class AccountsManager {
       const now = Math.floor(Date.now() / 1000);
       const refreshToken = data.refreshToken ?? data.refresh_token ?? data.token?.refresh_token ?? data.token?.refreshToken;
       const accessToken = data.accessToken ?? data.access_token ?? data.token?.access_token ?? data.token?.accessToken;
-      const expiresIn = data.expiresIn ?? data.expires_in ?? data.token?.expires_in;
+      const rawExpiresIn = data.expiresIn ?? data.expires_in ?? data.token?.expires_in ?? data.token?.expiresIn;
+      const expiresIn = typeof rawExpiresIn === 'number' && Number.isFinite(rawExpiresIn) ? Math.floor(rawExpiresIn) : undefined;
+      const explicitExpiryTs = AccountsManager.parseExplicitExpiryTimestamp(
+        data.expiryTimestamp ?? data.expiry_timestamp ?? data.token?.expiry_timestamp ?? data.token?.expiryTimestamp,
+        data.expiry ?? data.token?.expiry
+      );
       const customLabel = data.custom_label !== undefined ? data.custom_label : data.customLabel;
       const name = data.name;
-      const projectId = data.projectId !== undefined ? data.projectId : data.project_id;
-      const oauthClientKey = data.oauthClientKey !== undefined ? data.oauthClientKey : data.oauth_client_key;
-      const isGcpTos = data.isGcpTos !== undefined ? data.isGcpTos : data.is_gcp_tos;
-      const idToken = data.idToken !== undefined ? data.idToken : data.id_token;
+      const projectId = data.projectId !== undefined ? data.projectId : (data.project_id !== undefined ? data.project_id : (data.token?.project_id !== undefined ? data.token.project_id : data.token?.projectId));
+      const oauthClientKey = data.oauthClientKey !== undefined ? data.oauthClientKey : (data.oauth_client_key !== undefined ? data.oauth_client_key : (data.token?.oauth_client_key !== undefined ? data.token.oauth_client_key : data.token?.oauthClientKey));
+      const isGcpTos = data.isGcpTos !== undefined ? data.isGcpTos : (data.is_gcp_tos !== undefined ? data.is_gcp_tos : (data.token?.is_gcp_tos !== undefined ? data.token.is_gcp_tos : data.token?.isGcpTos));
+      const idToken = data.idToken !== undefined ? data.idToken : (data.id_token !== undefined ? data.id_token : (data.token?.id_token !== undefined ? data.token.id_token : data.token?.idToken));
+      const tokenType = data.token_type ?? data.tokenType ?? data.token?.token_type ?? data.token?.tokenType;
 
       if (existingSummary) {
         const existing = (await this.getAccount(existingSummary.id))!;
         const hasNewCreds = Boolean(refreshToken || (accessToken && accessToken !== 'pending_refresh'));
+        const resolvedExpiryTs = explicitExpiryTs !== undefined
+          ? explicitExpiryTs
+          : (expiresIn !== undefined ? now + expiresIn : existing.token.expiry_timestamp);
+        const resolvedExpiresIn = explicitExpiryTs !== undefined
+          ? (expiresIn ?? Math.max(0, explicitExpiryTs - now))
+          : (expiresIn ?? existing.token.expires_in);
         account = {
           ...existing,
           name: name !== undefined ? name : existing.name,
@@ -655,11 +722,13 @@ export class AccountsManager {
             ...existing.token,
             refresh_token: refreshToken || existing.token.refresh_token,
             access_token: accessToken ?? existing.token.access_token,
-            expires_in: expiresIn ?? existing.token.expires_in,
-            expiry_timestamp: expiresIn ? now + expiresIn : existing.token.expiry_timestamp,
+            expires_in: resolvedExpiresIn,
+            expiry_timestamp: resolvedExpiryTs,
+            token_type: typeof tokenType === 'string' && tokenType ? tokenType : (existing.token.token_type || 'Bearer'),
+            email: email || existing.token.email || existing.email,
             project_id: projectId !== undefined ? projectId : existing.token.project_id,
             oauth_client_key: oauthClientKey !== undefined ? oauthClientKey : existing.token.oauth_client_key,
-            is_gcp_tos: isGcpTos !== undefined ? isGcpTos : existing.token.is_gcp_tos,
+            is_gcp_tos: isGcpTos !== undefined ? Boolean(isGcpTos) : existing.token.is_gcp_tos,
             id_token: idToken !== undefined ? idToken : existing.token.id_token,
           },
         };
@@ -667,7 +736,12 @@ export class AccountsManager {
         if (!refreshToken) throw new CodedAccountError('missing_refresh_token', bt('accounts.err.missing_refresh_token'));
         if (!email) throw new CodedAccountError('missing_email', bt('accounts.err.missing_email'));
         const id = data.id || randomUUID();
-        const exp = expiresIn ?? 3600;
+        const resolvedExpiryTs = explicitExpiryTs !== undefined
+          ? explicitExpiryTs
+          : now + (expiresIn ?? 3600);
+        const exp = explicitExpiryTs !== undefined
+          ? (expiresIn ?? Math.max(0, explicitExpiryTs - now))
+          : (expiresIn ?? 3600);
         account = {
           id,
           email,
@@ -676,27 +750,422 @@ export class AccountsManager {
             access_token: accessToken ?? 'pending_refresh',
             refresh_token: refreshToken,
             expires_in: exp,
-            expiry_timestamp: now + exp,
-            token_type: 'Bearer',
+            expiry_timestamp: resolvedExpiryTs,
+            token_type: typeof tokenType === 'string' && tokenType ? tokenType : 'Bearer',
             email,
             project_id: projectId ?? null,
             oauth_client_key: oauthClientKey ?? null,
-            is_gcp_tos: isGcpTos ?? false,
+            is_gcp_tos: Boolean(isGcpTos ?? false),
             id_token: idToken ?? null,
           },
           device_profile: generateDeviceProfile(),
           quota: null,
           disabled: false,
-          protected_models: [],
+          protected_models: Array.isArray(data.protected_models) ? data.protected_models.filter((m: unknown): m is string => typeof m === 'string') : [],
           validation_blocked: false,
-          created_at: now,
-          last_used: now,
+          created_at: typeof data.created_at === 'number' && Number.isFinite(data.created_at) ? Math.floor(data.created_at) : now,
+          last_used: typeof data.last_used === 'number' && Number.isFinite(data.last_used) ? Math.floor(data.last_used) : now,
           custom_label: customLabel ?? null,
         };
       }
 
       await this.saveAccount(account);
       return account;
+    });
+  }
+
+  private static extractCandidatesFromParsedJson(parsed: unknown): { items: any[]; isIndexOnly: boolean } {
+    if (Array.isArray(parsed)) {
+      return { items: parsed, isIndexOnly: false };
+    }
+    if (parsed && typeof parsed === 'object') {
+      const obj = parsed as Record<string, unknown>;
+      if (Array.isArray(obj.accounts)) {
+        const items = obj.accounts;
+        const hasAnyCredentials = items.some((item: any) =>
+          Boolean(item && typeof item === 'object' && (item.refresh_token || item.refreshToken || item.token?.refresh_token || item.token?.refreshToken))
+        );
+        if (items.length > 0 && !hasAnyCredentials && ('current_account_id' in obj || obj.version === '2.0')) {
+          return { items: [], isIndexOnly: true };
+        }
+        return { items, isIndexOnly: false };
+      }
+      return { items: [obj], isIndexOnly: false };
+    }
+    return { items: [], isIndexOnly: false };
+  }
+
+  /**
+   * 批量从 JSON 文件或目录导入账号（单锁批量事务，仅按标准化 email 去重，隔离外部 id 碰撞）
+   */
+  async importAccountsFromJson(rawPaths: unknown): Promise<{
+    imported: number;
+    updated: number;
+    skipped: Array<{ source: string; reason: string }>;
+    expiredWithoutRefreshConfig: number;
+  }> {
+    if (!Array.isArray(rawPaths) || rawPaths.length === 0) {
+      throw new Error(bt('accounts.import.err.no_paths'));
+    }
+    const inputPaths = Array.from(new Set(
+      rawPaths.filter((p): p is string => typeof p === 'string' && p.trim().length > 0).map(p => resolve(p.trim()))
+    ));
+    if (inputPaths.length === 0) {
+      throw new Error(bt('accounts.import.err.no_paths'));
+    }
+
+    const MAX_FILE_BYTES = 2 * 1024 * 1024;
+    const MAX_ACCOUNTS_PER_IMPORT = 200;
+    const uid = process.getuid?.();
+    const skipped: Array<{ source: string; reason: string }> = [];
+    const candidateFiles: string[] = [];
+    const seenFiles = new Set<string>();
+
+    for (const inputPath of inputPaths) {
+      const st = await lstat(inputPath).catch(() => null);
+      if (!st) {
+        skipped.push({ source: inputPath, reason: bt('accounts.import.err.not_found') });
+        continue;
+      }
+      if (st.isSymbolicLink() || (uid !== undefined && st.uid !== uid)) {
+        skipped.push({ source: inputPath, reason: bt('accounts.import.err.unsafe_file') });
+        continue;
+      }
+      if (st.isDirectory()) {
+        const entries = await readdir(inputPath, { withFileTypes: true }).catch(() => null);
+        if (!entries) {
+          skipped.push({ source: inputPath, reason: bt('accounts.import.err.unreadable') });
+          continue;
+        }
+        const jsonEntries = entries
+          .filter(e => e.name.toLowerCase().endsWith('.json') && e.name !== 'accounts.json' && e.name !== 'accounts-deleted.json' && e.name !== 'auto_switch.json')
+          .sort((a, b) => a.name.localeCompare(b.name));
+        for (const entry of jsonEntries) {
+          const childPath = join(inputPath, entry.name);
+          if (seenFiles.has(childPath)) continue;
+          const childSt = await lstat(childPath).catch(() => null);
+          if (!childSt || !childSt.isFile() || childSt.isSymbolicLink() || (uid !== undefined && childSt.uid !== uid)) {
+            skipped.push({ source: childPath, reason: bt('accounts.import.err.unsafe_file') });
+            continue;
+          }
+          if (childSt.size > MAX_FILE_BYTES) {
+            skipped.push({ source: childPath, reason: bt('accounts.import.err.file_too_large') });
+            continue;
+          }
+          seenFiles.add(childPath);
+          candidateFiles.push(childPath);
+        }
+      } else if (st.isFile()) {
+        if (st.size > MAX_FILE_BYTES) {
+          skipped.push({ source: inputPath, reason: bt('accounts.import.err.file_too_large') });
+          continue;
+        }
+        if (!seenFiles.has(inputPath)) {
+          seenFiles.add(inputPath);
+          candidateFiles.push(inputPath);
+        }
+      } else {
+        skipped.push({ source: inputPath, reason: bt('accounts.import.err.unsafe_file') });
+      }
+    }
+
+    const rawRecords: Array<{ source: string; data: any }> = [];
+    for (const filePath of candidateFiles) {
+      let rawBuf: Buffer;
+      try {
+        rawBuf = await readFile(filePath);
+      } catch {
+        skipped.push({ source: filePath, reason: bt('accounts.import.err.unreadable') });
+        continue;
+      }
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(sanitizeJsonString(rawBuf));
+      } catch {
+        skipped.push({ source: filePath, reason: bt('accounts.import.err.invalid_json') });
+        continue;
+      }
+      const extracted = AccountsManager.extractCandidatesFromParsedJson(parsed);
+      if (extracted.isIndexOnly) {
+        skipped.push({ source: filePath, reason: bt('accounts.import.err.index_file') });
+        continue;
+      }
+      if (extracted.items.length === 0) {
+        skipped.push({ source: filePath, reason: bt('accounts.import.err.empty_records') });
+        continue;
+      }
+      for (let i = 0; i < extracted.items.length; i++) {
+        if (rawRecords.length >= MAX_ACCOUNTS_PER_IMPORT) {
+          skipped.push({ source: `${filePath}#${i + 1}`, reason: bt('accounts.import.err.limit_exceeded', { max: MAX_ACCOUNTS_PER_IMPORT }) });
+          continue;
+        }
+        rawRecords.push({
+          source: extracted.items.length > 1 ? `${filePath}#${i + 1}` : filePath,
+          data: extracted.items[i],
+        });
+      }
+    }
+
+    await this.init();
+    return this.withWriteLock(async () => {
+      const index = await this.loadIndex();
+      const now = Math.floor(Date.now() / 1000);
+      const oauthConfigured = Boolean(getGoogleClientId() && getGoogleClientSecret());
+      let imported = 0;
+      let updated = 0;
+      let expiredWithoutRefreshConfig = 0;
+      const clearedEmails = new Set<string>();
+      const clearedIds = new Set<string>();
+      const touchedEmailStatus = new Map<string, boolean>();
+
+      for (const { source, data } of rawRecords) {
+        if (!data || typeof data !== 'object') {
+          skipped.push({ source, reason: bt('accounts.import.err.invalid_record') });
+          continue;
+        }
+        const email = String(data.email ?? data.token?.email ?? data.id_token_email ?? '').trim().toLowerCase();
+        if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email) || email.endsWith('@antigravity.user')) {
+          skipped.push({ source, reason: bt('accounts.import.err.invalid_email') });
+          continue;
+        }
+        const rawRefresh = data.refreshToken ?? data.refresh_token ?? data.token?.refresh_token ?? data.token?.refreshToken;
+        const refreshToken = typeof rawRefresh === 'string' ? rawRefresh.trim() : '';
+        if (!refreshToken || refreshToken.length > 8192 || /[\r\n\x00]/.test(refreshToken)) {
+          skipped.push({ source, reason: bt('accounts.import.err.missing_refresh_token') });
+          continue;
+        }
+        const rawAccess = data.accessToken ?? data.access_token ?? data.token?.access_token ?? data.token?.accessToken;
+        const accessToken = typeof rawAccess === 'string' && rawAccess.trim() ? rawAccess.trim() : 'pending_refresh';
+        const rawExpiresIn = data.expiresIn ?? data.expires_in ?? data.token?.expires_in ?? data.token?.expiresIn;
+        const expiresIn = typeof rawExpiresIn === 'number' && Number.isFinite(rawExpiresIn) && rawExpiresIn >= 0 ? Math.floor(rawExpiresIn) : undefined;
+        const explicitExpiryTs = AccountsManager.parseExplicitExpiryTimestamp(
+          data.expiryTimestamp ?? data.expiry_timestamp ?? data.token?.expiry_timestamp ?? data.token?.expiryTimestamp,
+          data.expiry ?? data.token?.expiry
+        );
+        const customLabel = data.custom_label !== undefined ? data.custom_label : data.customLabel;
+        const name = typeof data.name === 'string' ? data.name.trim() || null : (data.name === null ? null : undefined);
+        const projectId = data.projectId !== undefined ? data.projectId : (data.project_id !== undefined ? data.project_id : (data.token?.project_id !== undefined ? data.token.project_id : data.token?.projectId));
+        const oauthClientKey = data.oauthClientKey !== undefined ? data.oauthClientKey : (data.oauth_client_key !== undefined ? data.oauth_client_key : (data.token?.oauth_client_key !== undefined ? data.token.oauth_client_key : data.token?.oauthClientKey));
+        const isGcpTos = data.isGcpTos !== undefined ? data.isGcpTos : (data.is_gcp_tos !== undefined ? data.is_gcp_tos : (data.token?.is_gcp_tos !== undefined ? data.token.is_gcp_tos : data.token?.isGcpTos));
+        const idToken = data.idToken !== undefined ? data.idToken : (data.id_token !== undefined ? data.id_token : (data.token?.id_token !== undefined ? data.token.id_token : data.token?.idToken));
+        const tokenType = data.token_type ?? data.tokenType ?? data.token?.token_type ?? data.token?.tokenType;
+
+        const emailKey = email.toLowerCase();
+        // 严格仅按标准化小写 email 匹配现有账号，绝不按外部 JSON 里的 id 匹配覆盖其他邮箱
+        const existingIdx = index.accounts.findIndex(a => a.email.toLowerCase() === emailKey);
+        const existingSummary = existingIdx >= 0 ? index.accounts[existingIdx] : undefined;
+        const existing = existingSummary ? await this.getAccount(existingSummary.id).catch(() => null) : null;
+
+        let toSave: Account;
+        if (existing && existingSummary) {
+          const resolvedExpiryTs = explicitExpiryTs !== undefined
+            ? explicitExpiryTs
+            : (expiresIn !== undefined ? now + expiresIn : existing.token.expiry_timestamp);
+          const resolvedExpiresIn = explicitExpiryTs !== undefined
+            ? Math.max(0, explicitExpiryTs - now)
+            : (expiresIn ?? existing.token.expires_in);
+          toSave = {
+            ...existing,
+            email: existing.email || email,
+            name: name !== undefined ? name : existing.name,
+            custom_label: customLabel !== undefined ? customLabel : existing.custom_label,
+            disabled: false,
+            disabled_reason: null,
+            disabled_at: null,
+            quota_refresh_error: null,
+            quota_refresh_error_code: null,
+            validation_blocked: false,
+            validation_blocked_until: null,
+            validation_blocked_reason: null,
+            validation_url: null,
+            ...(Array.isArray(data.protected_models) ? {
+              protected_models: data.protected_models.filter((m: unknown): m is string => typeof m === 'string'),
+            } : {}),
+            token: {
+              ...existing.token,
+              refresh_token: refreshToken,
+              access_token: rawAccess !== undefined ? accessToken : existing.token.access_token,
+              expires_in: resolvedExpiresIn,
+              expiry_timestamp: resolvedExpiryTs,
+              token_type: typeof tokenType === 'string' && tokenType ? tokenType : (existing.token.token_type || 'Bearer'),
+              email: email,
+              project_id: projectId !== undefined ? projectId : existing.token.project_id,
+              oauth_client_key: oauthClientKey !== undefined ? oauthClientKey : existing.token.oauth_client_key,
+              is_gcp_tos: isGcpTos !== undefined ? Boolean(isGcpTos) : existing.token.is_gcp_tos,
+              id_token: idToken !== undefined ? idToken : existing.token.id_token,
+            },
+          };
+          updated += 1;
+        } else {
+          // 新增账号始终由 GravityBox 自行生成本地 UUID，杜绝外部 id 碰撞
+          const id = randomUUID();
+          const resolvedExpiryTs = explicitExpiryTs !== undefined
+            ? explicitExpiryTs
+            : (expiresIn !== undefined ? now + expiresIn : (accessToken === 'pending_refresh' ? 0 : now + 3600));
+          const exp = explicitExpiryTs !== undefined
+            ? Math.max(0, explicitExpiryTs - now)
+            : (expiresIn ?? (accessToken === 'pending_refresh' ? 0 : 3600));
+          toSave = {
+            id,
+            email,
+            name: name ?? null,
+            token: {
+              access_token: accessToken,
+              refresh_token: refreshToken,
+              expires_in: exp,
+              expiry_timestamp: resolvedExpiryTs,
+              token_type: typeof tokenType === 'string' && tokenType ? tokenType : 'Bearer',
+              email,
+              project_id: projectId ?? null,
+              oauth_client_key: oauthClientKey ?? null,
+              is_gcp_tos: Boolean(isGcpTos ?? false),
+              id_token: idToken ?? null,
+            },
+            device_profile: generateDeviceProfile(),
+            quota: null,
+            disabled: false,
+            protected_models: Array.isArray(data.protected_models) ? data.protected_models.filter((m: unknown): m is string => typeof m === 'string') : [],
+            validation_blocked: false,
+            created_at: typeof data.created_at === 'number' && Number.isFinite(data.created_at) && data.created_at > 0 ? Math.floor(data.created_at) : now,
+            last_used: typeof data.last_used === 'number' && Number.isFinite(data.last_used) && data.last_used > 0 ? Math.floor(data.last_used) : now,
+            custom_label: customLabel ?? null,
+          };
+          imported += 1;
+        }
+
+        const accountPath = join(this.accountsDir, `${toSave.id}.json`);
+        await atomicJson(accountPath, toSave);
+        this.accountCache.delete(toSave.id);
+        clearedEmails.add(emailKey);
+        clearedIds.add(toSave.id);
+
+        const isExpiredOrMissingAccess =
+          !toSave.token.access_token ||
+          toSave.token.access_token === 'pending_refresh' ||
+          !Number.isFinite(toSave.token.expiry_timestamp) ||
+          toSave.token.expiry_timestamp <= now + 60;
+        touchedEmailStatus.set(emailKey, !oauthConfigured && isExpiredOrMissingAccess);
+
+        const summary: AccountSummary = {
+          id: toSave.id,
+          email: toSave.email,
+          name: toSave.name,
+          disabled: toSave.disabled,
+          disabled_reason: toSave.disabled_reason,
+          disabled_at: toSave.disabled_at,
+          protected_models: toSave.protected_models ?? [],
+          created_at: toSave.created_at,
+          last_used: toSave.last_used,
+          custom_label: toSave.custom_label,
+          quota: toSave.quota,
+          quota_refresh_error: toSave.quota_refresh_error,
+          revision: computeAccountRevision(toSave),
+          quota_last_updated: toSave.quota?.last_updated ?? 0,
+        };
+        if (existingIdx >= 0) {
+          index.accounts[existingIdx] = summary;
+        } else {
+          index.accounts.push(summary);
+        }
+        if (!index.current_account_id) {
+          index.current_account_id = toSave.id;
+        }
+      }
+
+      if (imported + updated > 0) {
+        if (clearedEmails.size > 0 || clearedIds.size > 0) {
+          const tombstones = await this.loadTombstones();
+          if (tombstones.length > 0) {
+            const nextTombstones = tombstones.filter(item => !clearedIds.has(item.id) && !clearedEmails.has(item.email.toLowerCase()));
+            if (nextTombstones.length !== tombstones.length) {
+              await atomicJson(this.tombstonesPath, nextTombstones);
+            }
+          }
+        }
+        await atomicJson(this.indexPath, index);
+        this.indexCache = null;
+      }
+
+      for (const isExpiredNoOAuth of touchedEmailStatus.values()) {
+        if (isExpiredNoOAuth) expiredWithoutRefreshConfig += 1;
+      }
+
+      return {
+        imported,
+        updated,
+        skipped,
+        expiredWithoutRefreshConfig,
+      };
+    });
+  }
+
+  /**
+   * 导出全量账号备份 JSON（强制 confirmed === true，由后端直接以 0600 权限原子落盘，IPC 零凭据返回）
+   */
+  async exportAccountsBackup(targetPath: string, confirmed: boolean): Promise<{ path: string; count: number }> {
+    if (confirmed !== true) {
+      throw new Error(bt('accounts.export.err.confirm_required'));
+    }
+    const cleanPath = typeof targetPath === 'string' ? targetPath.trim() : '';
+    if (!cleanPath) {
+      throw new Error(bt('accounts.export.err.invalid_path'));
+    }
+    const resolvedPath = resolve(cleanPath);
+    const uid = process.getuid?.();
+    const parentDir = dirname(resolvedPath);
+    const parentInfo = await lstat(parentDir).catch(() => null);
+    if (!parentInfo || !parentInfo.isDirectory() || parentInfo.isSymbolicLink() || (uid !== undefined && parentInfo.uid !== uid)) {
+      throw new Error(bt('accounts.export.err.invalid_parent'));
+    }
+    const existingInfo = await lstat(resolvedPath).catch((err: NodeJS.ErrnoException) => {
+      if (err?.code === 'ENOENT') return null;
+      throw err;
+    });
+    if (existingInfo && (!existingInfo.isFile() || existingInfo.isSymbolicLink() || (uid !== undefined && existingInfo.uid !== uid))) {
+      throw new Error(bt('files.refuse_non_user_file'));
+    }
+
+    await this.init();
+    return this.withWriteLock(async () => {
+      const index = await this.loadIndex();
+      const exportedAccounts: Array<Record<string, unknown>> = [];
+      for (const summary of index.accounts) {
+        const acc = await this.getAccount(summary.id);
+        if (!acc || !acc.token?.refresh_token) continue;
+        exportedAccounts.push({
+          email: acc.email,
+          name: acc.name ?? null,
+          custom_label: acc.custom_label ?? null,
+          protected_models: acc.protected_models ?? [],
+          created_at: acc.created_at,
+          last_used: acc.last_used,
+          token: {
+            access_token: acc.token.access_token,
+            refresh_token: acc.token.refresh_token,
+            token_type: acc.token.token_type || 'Bearer',
+            expires_in: acc.token.expires_in,
+            expiry_timestamp: acc.token.expiry_timestamp,
+            email: acc.token.email ?? acc.email,
+            project_id: acc.token.project_id ?? null,
+            oauth_client_key: acc.token.oauth_client_key ?? null,
+            is_gcp_tos: Boolean(acc.token.is_gcp_tos),
+            id_token: acc.token.id_token ?? null,
+          },
+        });
+      }
+      if (exportedAccounts.length === 0) {
+        throw new Error(bt('accounts.export.err.no_accounts'));
+      }
+      const exportedIso = new Date().toISOString();
+      const payload = {
+        schema: 'gravitybox.accounts.backup',
+        version: '1.0',
+        exportedAt: exportedIso,
+        exported_at: exportedIso,
+        accounts: exportedAccounts,
+      };
+      await atomicJson(resolvedPath, payload);
+      return { path: resolvedPath, count: exportedAccounts.length };
     });
   }
 
@@ -958,7 +1427,9 @@ export class AccountsManager {
    * 提取账号指定模型的可用额度百分比（结合 5 小时与周额度进行双窗口熔合与硬拦截）
    */
   getAccountRemaining(account: Account, monitoredModel = 'all'): number | null {
-    return computeAccountRemaining(account, monitoredModel);
+    return computeAccountRemaining(account, monitoredModel, {
+      staleAfterSeconds: this.getConfiguredQuotaStaleSeconds(),
+    });
   }
 
   private subscriptionTierRank(account: Account | AccountSummary | null | undefined): number {
@@ -1150,18 +1621,19 @@ export class AccountsManager {
           const json = JSON.parse(raw);
           const t = json.token || json;
           if (t?.refresh_token) {
+            const explicitTs = AccountsManager.parseExplicitExpiryTimestamp(t.expiry_timestamp, t.expiry);
             extractedToken = {
               access_token: t.access_token || '',
               refresh_token: t.refresh_token,
-              expires_in: t.expires_in || 3600,
-              expiry_timestamp: t.expiry_timestamp || Math.floor(Date.now() / 1000) + 3600,
+              expires_in: t.expires_in ?? 3600,
+              expiry_timestamp: explicitTs ?? (Math.floor(Date.now() / 1000) + (Number(t.expires_in) || 3600)),
               token_type: t.token_type || 'Bearer',
-              email: t.email || null,
+              email: t.email || json.id_token_email || null,
               project_id: t.project_id || null,
-              is_gcp_tos: t.is_gcp_tos || false,
+              is_gcp_tos: Boolean(t.is_gcp_tos),
               id_token: t.id_token || null,
             };
-            extractedEmail = t.email || null;
+            extractedEmail = t.email || json.id_token_email || null;
             return;
           }
         } catch {}
@@ -1181,15 +1653,16 @@ export class AccountsManager {
           const raw = Buffer.from(pass.slice('go-keyring-base64:'.length), 'base64').toString('utf8');
           const parsed = JSON.parse(raw);
           if (parsed?.token?.refresh_token) {
+            const explicitTs = AccountsManager.parseExplicitExpiryTimestamp(parsed.token.expiry_timestamp, parsed.token.expiry);
             extractedToken = {
               access_token: parsed.token.access_token || '',
               refresh_token: parsed.token.refresh_token,
-              expires_in: parsed.token.expires_in || 3600,
-              expiry_timestamp: parsed.token.expiry_timestamp || (Number.isFinite(Date.parse(parsed.token.expiry)) ? Math.floor(Date.parse(parsed.token.expiry) / 1000) : Math.floor(Date.now() / 1000) + 3600),
+              expires_in: parsed.token.expires_in ?? 3600,
+              expiry_timestamp: explicitTs ?? (Math.floor(Date.now() / 1000) + (Number(parsed.token.expires_in) || 3600)),
               token_type: parsed.token.token_type || 'Bearer',
               email: parsed.token.email || parsed.id_token_email || null,
               project_id: parsed.token.project_id || null,
-              is_gcp_tos: parsed.token.is_gcp_tos || false,
+              is_gcp_tos: Boolean(parsed.token.is_gcp_tos),
               id_token: parsed.token.id_token || null,
             };
             extractedEmail = parsed.token.email || parsed.id_token_email || null;
@@ -1299,7 +1772,8 @@ export class AccountsManager {
       name: extractedName || undefined,
       refreshToken: extractedToken.refresh_token,
       accessToken: extractedToken.access_token,
-      expiresIn: Math.max(60, extractedToken.expiry_timestamp - Math.floor(Date.now() / 1000)),
+      expiryTimestamp: extractedToken.expiry_timestamp,
+      expiresIn: Math.max(0, extractedToken.expiry_timestamp - Math.floor(Date.now() / 1000)),
       projectId: extractedToken.project_id || undefined,
       isGcpTos: extractedToken.is_gcp_tos,
       idToken: extractedToken.id_token || undefined,
@@ -1324,12 +1798,13 @@ export class AccountsManager {
         const missingWindows = groups.flatMap(g =>
           g.buckets.filter(b => b.stale).map(b => ({ family: g.family, window: b.window }))
         );
+        const staleSeconds = this.getConfiguredQuotaStaleSeconds();
         const baseState = this.getAccountQuotaOverview({ quota: { ...liveQuota, subscription_tier: resolvedTier } }).refreshState;
         account.quota = {
           ...liveQuota,
           subscription_tier: resolvedTier,
           source: 'live',
-          models: applyFamilyWindows(models, familyWindowsFromGroups(groups, Date.now())).map(modelQuotaFromNormalized),
+          models: applyFamilyWindows(models, familyWindowsFromGroups(groups, Date.now(), staleSeconds)).map(modelQuotaFromNormalized),
           quota_groups: groups.map(groupToQuotaGroup),
           ...(staleGroups.length ? { stale_groups: staleGroups } : {}),
           refresh_state: {
@@ -1354,8 +1829,14 @@ export class AccountsManager {
   /**
    * 获取账号额度综合概览（包含 3 分组 5 桶详细百分比、相对倒计时、套餐与 13 模型明细）
    */
-  getAccountQuotaOverview(account: Account | AccountSummary | { quota?: QuotaData | null }, options?: { nowMs?: number }): QuotaOverview {
-    return buildAccountQuotaOverview(account, options);
+  getAccountQuotaOverview(
+    account: Account | AccountSummary | { quota?: QuotaData | null },
+    options?: { nowMs?: number; staleAfterSeconds?: number },
+  ): QuotaOverview {
+    return buildAccountQuotaOverview(account, {
+      ...options,
+      staleAfterSeconds: options?.staleAfterSeconds ?? this.getConfiguredQuotaStaleSeconds(),
+    });
   }
 
   /**
@@ -1497,8 +1978,9 @@ export class AccountsManager {
         (old?.models ?? []).map(model => normalizedModelFromStored(model)));
       const missingWindows = groups.flatMap(group => group.buckets.filter(bucket => bucket.stale)
         .map(bucket => ({ family: group.family, window: bucket.window })));
+      const staleSeconds = this.getConfiguredQuotaStaleSeconds();
       account.quota = { ...freshWithTier, source: 'live',
-        models: applyFamilyWindows(models, familyWindowsFromGroups(groups, Date.now())).map(modelQuotaFromNormalized),
+        models: applyFamilyWindows(models, familyWindowsFromGroups(groups, Date.now(), staleSeconds)).map(modelQuotaFromNormalized),
         quota_groups: groups.map(groupToQuotaGroup),
         ...(staleGroups.length ? { stale_groups: staleGroups } : {}),
         refresh_state: { ...freshState, complete: freshState.complete && staleGroups.length === 0,

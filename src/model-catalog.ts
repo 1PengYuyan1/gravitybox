@@ -39,10 +39,13 @@ export const MODEL_PRICE_ALIASES = catalog.aliases as Record<string, string>;
 export const FEED_MODEL_KEYS = Object.freeze(Array.isArray(catalog.feedModels) ? [...catalog.feedModels] : []) as readonly string[];
 export const ACTIVE_MODEL_KEYS = Object.freeze(Array.isArray(catalog.activeModels) ? [...catalog.activeModels] : [...FEED_MODEL_KEYS]) as readonly string[];
 export const CATALOG_PRICING_VERSION = typeof catalog.pricingVersion === 'string' ? catalog.pricingVersion : '';
+export const CATALOG_PRICING_UPDATED_AT = typeof catalog.pricingUpdatedAt === 'string' ? catalog.pricingUpdatedAt : '';
 
 const remoteAliases: Record<string, string> = Object.create(null);
 const remoteModelSpecs: Record<string, RemoteModelMetadataSpec> = Object.create(null);
 let remoteActiveModelKeys: readonly string[] | null = null;
+let remoteFeedModelKeys: readonly string[] | null = null;
+let remoteAliasesTakeover = false;
 
 function isSafeCatalogKey(raw: unknown): raw is string {
   return typeof raw === 'string' && raw.length > 0 && raw.length <= 128 && !FORBIDDEN_KEYS.has(raw);
@@ -52,16 +55,17 @@ export function sanitizeRemoteModelMetadata(raw: unknown): {
   aliases?: Record<string, string>;
   models?: Record<string, RemoteModelMetadataSpec>;
   activeModels?: string[];
+  feedModels?: string[];
 } {
   if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
   const source = raw as Record<string, unknown>;
   let aliasesOut: Record<string, string> | undefined;
   if (source.aliases && typeof source.aliases === 'object' && !Array.isArray(source.aliases)) {
+    aliasesOut = {};
     for (const [aliasKey, targetVal] of Object.entries(source.aliases as Record<string, unknown>)) {
       const cleanAlias = aliasKey.trim();
       const cleanTarget = typeof targetVal === 'string' ? targetVal.trim() : '';
       if (!isSafeCatalogKey(cleanAlias) || !isSafeCatalogKey(cleanTarget)) continue;
-      aliasesOut ??= {};
       aliasesOut[cleanAlias] = cleanTarget;
     }
   }
@@ -100,20 +104,36 @@ export function sanitizeRemoteModelMetadata(raw: unknown): {
       activeModelsOut.push(cleanKey);
     }
   }
+  let feedModelsOut: string[] | undefined;
+  if (Array.isArray(source.feedModels)) {
+    const seen = new Set<string>();
+    for (const item of source.feedModels) {
+      const cleanKey = typeof item === 'string' ? item.trim() : '';
+      if (!isSafeCatalogKey(cleanKey) || seen.has(cleanKey)) continue;
+      seen.add(cleanKey);
+      feedModelsOut ??= [];
+      feedModelsOut.push(cleanKey);
+    }
+  }
   return {
-    ...(aliasesOut ? { aliases: aliasesOut } : {}),
+    ...(aliasesOut !== undefined ? { aliases: aliasesOut } : {}),
     ...(modelsOut ? { models: modelsOut } : {}),
     ...(activeModelsOut ? { activeModels: activeModelsOut } : {}),
+    ...(feedModelsOut ? { feedModels: feedModelsOut } : {}),
   };
 }
 
 export function registerRemoteModelMetadata(
   raw: unknown,
-  options?: { onlyNewEntries?: boolean }
+  options?: { onlyNewEntries?: boolean; authoritativeSnapshot?: boolean }
 ): void {
   const sanitized = sanitizeRemoteModelMetadata(raw);
   const onlyNew = options?.onlyNewEntries === true;
+  const authoritative = options?.authoritativeSnapshot === true && !onlyNew;
   if (sanitized.aliases) {
+    if (authoritative) {
+      remoteAliasesTakeover = true;
+    }
     for (const [aliasKey, target] of Object.entries(sanitized.aliases)) {
       if (onlyNew && Object.hasOwn(MODEL_PRICE_ALIASES, aliasKey)) continue;
       remoteAliases[aliasKey] = target;
@@ -132,11 +152,14 @@ export function registerRemoteModelMetadata(
   if (sanitized.activeModels && sanitized.activeModels.length > 0 && !onlyNew) {
     remoteActiveModelKeys = Object.freeze([...sanitized.activeModels]);
   }
+  if (sanitized.feedModels && sanitized.feedModels.length > 0 && !onlyNew) {
+    remoteFeedModelKeys = Object.freeze([...sanitized.feedModels]);
+  }
 }
 
 export function resetAndRegisterRemoteModelMetadata(
   raw: unknown,
-  options?: { onlyNewEntries?: boolean }
+  options?: { onlyNewEntries?: boolean; authoritativeSnapshot?: boolean }
 ): void {
   for (const key of Object.keys(remoteAliases)) {
     delete remoteAliases[key];
@@ -145,6 +168,8 @@ export function resetAndRegisterRemoteModelMetadata(
     delete remoteModelSpecs[key];
   }
   remoteActiveModelKeys = null;
+  remoteFeedModelKeys = null;
+  remoteAliasesTakeover = false;
   registerRemoteModelMetadata(raw, options);
 }
 
@@ -152,11 +177,17 @@ export function getEffectiveActiveModelKeys(): readonly string[] {
   return remoteActiveModelKeys ?? ACTIVE_MODEL_KEYS;
 }
 
+export function getEffectiveFeedModelKeys(): readonly string[] {
+  return remoteFeedModelKeys ?? FEED_MODEL_KEYS;
+}
+
 export function getEffectiveModelAliasKeys(): string[] {
+  const aliasKeys = remoteAliasesTakeover
+    ? Object.keys(remoteAliases)
+    : [...Object.keys(MODEL_PRICE_ALIASES), ...Object.keys(remoteAliases)];
   return Array.from(new Set([
     ...Object.keys(MODEL_NAMES),
-    ...Object.keys(MODEL_PRICE_ALIASES),
-    ...Object.keys(remoteAliases),
+    ...aliasKeys,
     ...Object.keys(remoteModelSpecs),
   ]));
 }
@@ -169,9 +200,10 @@ export function getEffectiveModelDisplayName(key: string): string {
 export function getEffectiveModelPriceAlias(key: string): string | undefined {
   if (!key || FORBIDDEN_KEYS.has(key)) return undefined;
   if (Object.hasOwn(remoteAliases, key)) return remoteAliases[key];
-  if (Object.hasOwn(MODEL_PRICE_ALIASES, key)) return MODEL_PRICE_ALIASES[key];
   const lower = key.toLowerCase();
   if (Object.hasOwn(remoteAliases, lower)) return remoteAliases[lower];
+  if (remoteAliasesTakeover) return undefined;
+  if (Object.hasOwn(MODEL_PRICE_ALIASES, key)) return MODEL_PRICE_ALIASES[key];
   if (Object.hasOwn(MODEL_PRICE_ALIASES, lower)) return MODEL_PRICE_ALIASES[lower];
   return undefined;
 }

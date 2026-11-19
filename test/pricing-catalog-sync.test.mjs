@@ -207,8 +207,12 @@ test('PRO 套餐：gemini-4-carbon-disabled 归类为 tier_locked；account_clou
   assert.equal(Object.keys(livePro.prices).length, 8);
   assert.equal(livePro.modelCatalogState['gemini-4-carbon']?.availability, 'tier_locked');
   assert.equal(livePro.modelCatalogState['gemini-4-carbon']?.activeTier, 'PRO');
+  assert.equal(livePro.modelCatalogState['gemini-4-carbon']?.hostOrder, 0);
   assert.equal(livePro.modelCatalogState['gemini-4-argon']?.availability, 'available');
+  assert.equal(livePro.modelCatalogState['gemini-4-argon']?.hostOrder, 1);
   assert.equal(livePro.modelCatalogState['gemini-4-neon']?.availability, 'available');
+  assert.equal(livePro.modelCatalogState['gemini-4-neon']?.hostOrder, 2);
+  assert.equal(livePro.modelCatalogState['gpt-oss-120b']?.hostOrder, 7);
 
   const cloudPro = resolvePricingCatalogSnapshot({
     rawPricingTable: DEFAULT_API_PRICES,
@@ -228,6 +232,7 @@ test('PRO 套餐：gemini-4-carbon-disabled 归类为 tier_locked；account_clou
   });
   assert.equal(cloudPro.modelCatalogState['gemini-4-carbon']?.availability, 'tier_locked');
   assert.equal(cloudPro.modelCatalogState['gemini-4-carbon']?.activeTier, 'PRO');
+  assert.equal(cloudPro.modelCatalogState['gemini-4-carbon']?.hostOrder, undefined);
   assert.equal(cloudPro.modelCatalogState['gemini-4-argon']?.availability, 'available');
   assert.equal(cloudPro.modelCatalogState['gemini-4-neon']?.availability, 'available');
 });
@@ -793,4 +798,282 @@ test('已定价历史 Flash-Lite（2.5/3.5）在 live 正常计价、在云端�
   assert.deepEqual(activeCloudFoldSnap.unpricedLiveModels, [
     { key: 'gemini-4-hydrogen-sonar', displayName: 'gemini-4-hydrogen-sonar', disabled: false },
   ]);
+});
+
+test('远端完整目录热更新：全权接管公开 feedModels/aliases/activeModels/capacityTokens 并保留内部兜底条目', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'gb-remote-takeover-'));
+  t.after(async () => {
+    resetAndRegisterRemoteModelMetadata({});
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  const {
+    executeRemotePricingSync,
+    loadRawPricingTable,
+    loadPricingSyncState,
+    compareFeedFreshness,
+  } = await import('../dist/usage-pricing.js');
+  const { getEffectiveFeedModelKeys, getEffectiveModelPriceAlias, getEffectiveModelDisplayName } = await import('../dist/model-catalog.js');
+  const { resolveModelCapacity } = await import('../dist/hud.js');
+
+  assert.equal(compareFeedFreshness(
+    { version: '2026-11-19-r2', updatedAt: '2026-11-19T08:00:00Z' },
+    { version: '2026-11-19-r2', updatedAt: '2026-11-19T05:00:00Z' }
+  ), 1);
+  assert.equal(compareFeedFreshness(
+    { version: '2026-11-19-r2', updatedAt: '2026-11-19T04:00:00Z' },
+    { version: '2026-11-19-r2', updatedAt: '2026-11-19T05:00:00Z' }
+  ), -1);
+
+  const remoteCachePath = join(dir, 'remote_pricing.json');
+  const customCachePath = join(dir, 'api_pricing.json');
+  const syncStatePath = join(dir, 'pricing-sync-status.json');
+
+  // 1) 兼容老格式缓存（无 feedModels / feedUpdatedAt / sha256）
+  await writeFile(remoteCachePath, JSON.stringify({
+    version: 1,
+    syncedAt: '2026-11-18T00:00:00Z',
+    sourceUrl: 'https://raw.githubusercontent.com/Enzoo404/gravitybox/main/assets/pricing-feed.json',
+    feedVersion: '2026-11-18',
+    prices: { 'legacy-only-model': { model: 'legacy-only-model', input: 1, output: 2, cached: 0.1 } },
+  }));
+  await writeFile(syncStatePath, JSON.stringify({
+    lastCheckAt: Date.parse('2026-11-18T00:00:00Z'),
+    lastCheckSuccess: true,
+    lastSyncError: null,
+  }));
+
+  const state = {
+    lastRemoteSyncAt: 0,
+    lastSyncSuccess: false,
+    lastCheckAt: 0,
+    lastCheckSuccess: false,
+    nextAutoSyncAt: 0,
+    lastSyncError: null,
+    lastSyncedSourceUrl: '',
+    lastSyncedVersion: '',
+    lastSyncedUpdatedAt: '',
+    lastSyncedEtag: '',
+    lastSyncedSha256: '',
+  };
+  await loadPricingSyncState(remoteCachePath, syncStatePath, state);
+  assert.equal(state.lastSyncedVersion, '2026-11-18');
+  assert.equal(state.lastSyncSuccess, true);
+
+  // 2) 远端全权接管快照：新增 gemini-5-omega、新增别名 M999、移除旧别名 M681、下线公开 gpt-4o-mini
+  const feedV2 = {
+    version: '2026-11-20',
+    schema: 1,
+    updatedAt: '2026-11-20T06:00:00Z',
+    aliases: {
+      'MODEL_PLACEHOLDER_M999': 'gemini-5-omega',
+    },
+    activeModels: ['gemini-4-carbon', 'gemini-5-omega'],
+    feedModels: ['gemini-4-carbon', 'gemini-5-omega', 'gemini-3.8-flash'],
+    models: {
+      'gemini-4-carbon': { displayName: 'Gemini 4 Carbon', capacityTokens: 200000 },
+      'gemini-5-omega': { displayName: 'Gemini 5 Omega', capacityTokens: 512000 },
+      'gemini-3.8-flash': { displayName: 'Gemini 3.8 Flash', capacityTokens: 200000 },
+    },
+    prices: {
+      'gemini-4-carbon': { model: 'gemini-4-carbon', input: 2.0, output: 10.0, cached: 0.1 },
+      'gemini-5-omega': { model: 'gemini-5-omega', input: 1.8, output: 9.0, cached: 0.18 },
+      'gemini-3.8-flash': { model: 'gemini-3.8-flash', input: 0.75, output: 3.75, cached: 0.075 },
+    },
+  };
+  const staleFeedV1 = {
+    version: '2026-11-19-r2',
+    schema: 1,
+    updatedAt: '2026-11-19T05:00:00Z',
+    prices: { 'gemini-4-carbon': { model: 'gemini-4-carbon', input: 2.0, output: 10.0, cached: 0.1 } },
+  };
+  let mode = 'normal';
+  let hits = { stale: 0, main: 0, ghApi: 0 };
+  const srv = createServer((req, res) => {
+    if (req.url === '/stale-cdn') {
+      hits.stale += 1;
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(staleFeedV1));
+      return;
+    }
+    if (req.url === '/gh-api') {
+      hits.ghApi += 1;
+      const body = JSON.stringify(feedV2);
+      res.writeHead(200, { 'Content-Type': 'application/json', ETag: '"etag-v2"' });
+      res.end(JSON.stringify({ encoding: 'base64', content: Buffer.from(body, 'utf8').toString('base64') }));
+      return;
+    }
+    hits.main += 1;
+    if (mode === '304' && req.headers['if-none-match'] === '"etag-v2"') {
+      res.writeHead(304, { ETag: '"etag-v2"' });
+      res.end();
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json', ETag: '"etag-v2"' });
+    res.end(JSON.stringify(feedV2));
+  });
+  await new Promise((resolve) => srv.listen(0, '127.0.0.1', resolve));
+  const port = srv.address().port;
+
+  try {
+    // 2a) 先通过 GitHub Contents API base64 包络同步 feedV2
+    const sync1 = await executeRemotePricingSync({
+      candidateUrls: [`http://127.0.0.1:${port}/gh-api`],
+      remotePricingCachePath: remoteCachePath,
+      pricingSyncStatePath: syncStatePath,
+      state,
+      now: Date.parse('2026-11-20T06:10:00Z'),
+    });
+    assert.equal(sync1.synced, true);
+    assert.equal(sync1.unchanged, false);
+    assert.equal(sync1.version, '2026-11-20');
+    assert.equal(state.lastSyncedEtag, '"etag-v2"');
+
+    // 验证远端全权接管
+    assert.deepEqual([...getEffectiveFeedModelKeys()], ['gemini-4-carbon', 'gemini-5-omega', 'gemini-3.8-flash']);
+    assert.deepEqual([...getEffectiveActiveModelKeys()], ['gemini-4-carbon', 'gemini-5-omega']);
+    assert.equal(getEffectiveModelPriceAlias('MODEL_PLACEHOLDER_M999'), 'gemini-5-omega');
+    assert.equal(getEffectiveModelPriceAlias('MODEL_PLACEHOLDER_M681'), undefined, '被远端撤回的内置别名必须失效');
+    assert.equal(getEffectiveModelDisplayName('gemini-5-omega'), 'Gemini 5 Omega');
+    assert.equal(resolveModelCapacity('MODEL_PLACEHOLDER_M999').capacityTokens, 512000);
+
+    const { merged, publicKeys } = await loadRawPricingTable(remoteCachePath, customCachePath);
+    assert.ok(merged['gemini-5-omega']);
+    assert.ok(merged['gemini-3.8-flash-control'], '内置内部衍生条目必须继续兜底保留');
+    assert.equal(merged['gpt-4o-mini'], undefined, '被远端移除出 feedModels 的旧公开模型应退出公开表');
+    assert.equal(publicKeys.has('gpt-4o-mini'), false);
+    assert.ok(publicKeys.has('gemini-5-omega'));
+
+    const snap = resolvePricingCatalogSnapshot({
+      rawPricingTable: merged,
+      publicPricingKeys: publicKeys,
+    });
+    assert.deepEqual(Object.keys(snap.prices).sort(), ['gemini-4-carbon', 'gemini-5-omega']);
+    assert.deepEqual(Object.keys(snap.retiredPrices), ['gemini-3.8-flash']);
+
+    // 2b) 命中陈旧 CDN 镜像时应拒绝并自动回退到后续最新源；同时验证 SHA-256 去重返回 unchanged: true
+    const sync2 = await executeRemotePricingSync({
+      candidateUrls: [`http://127.0.0.1:${port}/stale-cdn`, `http://127.0.0.1:${port}/main`],
+      remotePricingCachePath: remoteCachePath,
+      pricingSyncStatePath: syncStatePath,
+      state,
+      now: Date.parse('2026-11-20T07:00:00Z'),
+    });
+    assert.equal(sync2.synced, true);
+    assert.equal(sync2.unchanged, true);
+    assert.equal(hits.stale, 1);
+    assert.equal(hits.main, 1);
+
+    // 2c) 命中 ETag 304 Not Modified 时直接返回 unchanged: true
+    mode = '304';
+    const sync3 = await executeRemotePricingSync({
+      candidateUrls: [`http://127.0.0.1:${port}/main`],
+      remotePricingCachePath: remoteCachePath,
+      pricingSyncStatePath: syncStatePath,
+      state,
+      now: Date.parse('2026-11-20T08:00:00Z'),
+    });
+    assert.equal(sync3.synced, true);
+    assert.equal(sync3.unchanged, true);
+  } finally {
+    await new Promise((resolve) => srv.close(resolve));
+  }
+});
+
+test('main.js 后端启动预热 remote_pricing.json、默认关闭静默外联，并在同步更新后推进 pricingRevision', async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), 'gb-pricing-rev-'));
+  t.after(() => rm(dir, { recursive: true, force: true, maxRetries: 10, retryDelay: 50 }));
+
+  const appDir = join(dir, 'MockAntigravity.app');
+  await mkdir(join(appDir, 'Contents'), { recursive: true });
+  await mkdir(join(dir, '词典'), { recursive: true });
+  await mkdir(join(dir, 'profile'), { recursive: true });
+  await mkdir(join(dir, 'home'), { recursive: true });
+  await mkdir(join(dir, 'appsupport'), { recursive: true });
+  await mkdir(join(dir, 'gemini'), { recursive: true });
+  await writeFile(
+    join(appDir, 'Contents', 'Info.plist'),
+    '<?xml version="1.0" encoding="UTF-8"?><plist version="1.0"><dict><key>CFBundleShortVersionString</key><string>2.34.0</string></dict></plist>'
+  );
+
+  // 预先写入一份较新的 remote_pricing.json，验证冷启动即完成模型元数据预热
+  await writeFile(join(dir, 'remote_pricing.json'), JSON.stringify({
+    version: 1,
+    syncedAt: '2026-11-20T00:00:00Z',
+    sourceUrl: 'http://127.0.0.1:1/feed.json',
+    feedVersion: '2026-11-20',
+    feedUpdatedAt: '2026-11-20T00:00:00Z',
+    aliases: { 'MODEL_PLACEHOLDER_M888': 'gemini-5-aurora' },
+    activeModels: ['gemini-4-carbon', 'gemini-5-aurora'],
+    feedModels: ['gemini-4-carbon', 'gemini-5-aurora'],
+    models: {
+      'gemini-4-carbon': { displayName: 'Gemini 4 Carbon', capacityTokens: 200000 },
+      'gemini-5-aurora': { displayName: 'Gemini 5 Aurora', capacityTokens: 256000 },
+    },
+    prices: {
+      'gemini-4-carbon': { model: 'gemini-4-carbon', input: 2.0, output: 10.0, cached: 0.1 },
+      'gemini-5-aurora': { model: 'gemini-5-aurora', input: 1.5, output: 7.5, cached: 0.15 },
+    },
+  }));
+
+  const updatedFeed = {
+    version: '2026-11-21',
+    schema: 1,
+    updatedAt: '2026-11-21T00:00:00Z',
+    aliases: { 'MODEL_PLACEHOLDER_M888': 'gemini-5-aurora' },
+    activeModels: ['gemini-4-carbon', 'gemini-5-aurora'],
+    feedModels: ['gemini-4-carbon', 'gemini-5-aurora'],
+    models: {
+      'gemini-4-carbon': { displayName: 'Gemini 4 Carbon', capacityTokens: 200000 },
+      'gemini-5-aurora': { displayName: 'Gemini 5 Aurora', capacityTokens: 256000 },
+    },
+    prices: {
+      'gemini-4-carbon': { model: 'gemini-4-carbon', input: 1.8, output: 9.0, cached: 0.09 },
+      'gemini-5-aurora': { model: 'gemini-5-aurora', input: 1.5, output: 7.5, cached: 0.15 },
+    },
+  };
+  let requestCount = 0;
+  const feedServer = createServer((_req, res) => {
+    requestCount += 1;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify(updatedFeed));
+  });
+  await new Promise((resolve) => feedServer.listen(0, '127.0.0.1', resolve));
+  const port = feedServer.address().port;
+
+  const backend = await startBackend(dir, appDir);
+  try {
+    const status1 = await rpc(dir, { command: 'status', includeTasks: false });
+    assert.equal(status1.ok, true);
+    assert.match(status1.status.pricingRevision, /^2026-11-20\|/);
+    assert.equal(requestCount, 0, '默认关闭自动同步时不得静默发起外部请求');
+
+    const syncRes = await rpc(dir, { command: 'pricing_sync_check', feedUrl: `http://127.0.0.1:${port}/feed.json` });
+    assert.equal(syncRes.ok, true);
+    assert.equal(syncRes.synced, true);
+    assert.equal(syncRes.prices['gemini-4-carbon']?.input, 1.8);
+    assert.equal(syncRes.prices['gemini-5-aurora']?.input, 1.5);
+
+    const status2 = await rpc(dir, { command: 'status', includeTasks: false });
+    assert.equal(status2.ok, true);
+    assert.match(status2.status.pricingRevision, /^2026-11-21\|/);
+    assert.notEqual(status2.status.pricingRevision, status1.status.pricingRevision);
+
+    // 再次拉取相同内容（SHA-256 一致）时 pricingRevision 保持稳定不抖动
+    const syncRepeat = await rpc(dir, { command: 'pricing_sync_check', feedUrl: `http://127.0.0.1:${port}/feed.json` });
+    assert.equal(syncRepeat.ok, true);
+    assert.equal(syncRepeat.synced, true);
+    assert.equal(syncRepeat.unchanged, true);
+    const status3 = await rpc(dir, { command: 'status', includeTasks: false });
+    assert.equal(status3.status.pricingRevision, status2.status.pricingRevision);
+
+    await rpc(dir, { command: 'stop' });
+    await new Promise((resolve) => {
+      if (backend.child.exitCode !== null) resolve();
+      else backend.child.once('exit', resolve);
+    });
+  } finally {
+    if (backend.child.exitCode === null) backend.child.kill('SIGTERM');
+    await new Promise((resolve) => feedServer.close(resolve));
+  }
 });

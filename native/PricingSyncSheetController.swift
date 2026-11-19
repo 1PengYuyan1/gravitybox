@@ -149,15 +149,16 @@ private final class RetiredToggleButton: NSButton {
 
 final class PricingSyncSheetController: NSObject, NSWindowDelegate {
     private unowned let app: Assistant
-    let sheet = SheetWindow(contentRect: NSRect(x: 0, y: 0, width: 580, height: 492), styleMask: [.titled], backing: .buffered, defer: false)
+    let sheet = SheetWindow(contentRect: NSRect(x: 0, y: 0, width: 648, height: 512), styleMask: [.titled], backing: .buffered, defer: false)
     private let statusIconBox = NSBox()
     private let statusIconView = NSImageView()
     private let titleLabel = text(L10n.t("pricing_sheet.title"), size: 16, weight: .semibold, color: .labelColor)
     let subtitleLabel = text("", size: 11, color: Design.secondary, wrap: true)
     let summaryPill = pillBadge("", color: Design.blue)
     let historicalNoteLabel = text(L10n.t("pricing_sheet.note"), size: 11, color: Design.secondary, wrap: true)
-    private let listStack = NSStackView()
-    private let listScroll = NSScrollView()
+    let listStack = NSStackView()
+    let listScroll = NSScrollView()
+    let listCard = DesignCardBox()
     let recheckBtn = InlineRefreshButton(L10n.t("pricing_sheet.recheck"), width: 96, target: nil, action: #selector(recheck))
     let closeBtn = button(L10n.t("pricing_sheet.done"), target: nil, action: #selector(closeSheet))
     private var checking = false
@@ -256,11 +257,24 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         listScroll.borderType = .noBorder
         listScroll.documentView = docWrapper
         listScroll.translatesAutoresizingMaskIntoConstraints = false
-        listScroll.heightAnchor.constraint(equalToConstant: 300).isActive = true
+        let minScrollHeight = listScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 300)
+        minScrollHeight.isActive = true
+        listScroll.setContentHuggingPriority(.defaultLow, for: .vertical)
+        listScroll.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
         docWrapper.widthAnchor.constraint(equalTo: listScroll.contentView.widthAnchor).isActive = true
 
-        let listCard = group([listScroll], inset: 10)
+        listCard.boxType = .custom
         listCard.cornerRadius = Design.Radius.medium
+        listCard.borderWidth = 0.5
+        listCard.borderColor = Design.border
+        listCard.fillColor = Design.card
+        listCard.contentViewMargins = .zero
+        listCard.shadow = Design.cardShadow()
+        listCard.translatesAutoresizingMaskIntoConstraints = false
+        listCard.setContentHuggingPriority(.defaultLow, for: .vertical)
+        listCard.setContentCompressionResistancePriority(.defaultLow, for: .vertical)
+        listCard.addSubview(listScroll)
+        pin(listScroll, to: listCard, inset: 10)
 
         recheckBtn.target = self
         closeBtn.target = self
@@ -269,6 +283,10 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
 
         let footerRow = horizontal([flexibleSpace(), recheckBtn, closeBtn], spacing: 8)
         footerRow.alignment = .centerY
+        for rigid in [headerRow, historicalNoteLabel, footerRow] {
+            rigid.setContentHuggingPriority(.required, for: .vertical)
+            rigid.setContentCompressionResistancePriority(.required, for: .vertical)
+        }
 
         let root = vertical([headerRow, listCard, historicalNoteLabel, divider(), footerRow], spacing: 12)
         for child in root.arrangedSubviews { fillWidth(child, in: root) }
@@ -329,6 +347,100 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         }
     }
 
+    private static func hostOrder(for key: String, catalogState: [String: [String: Any]]) -> Int? {
+        if let n = catalogState[key]?["hostOrder"] as? NSNumber {
+            return n.intValue
+        }
+        return nil
+    }
+
+    private static let modelVersionRegex = try? NSRegularExpression(
+        pattern: "(?:gemini|gpt|opus|sonnet|haiku|claude)-(\\d+)(?:[.-](\\d+))?|^o(\\d+)(?:$|[-_])",
+        options: [.caseInsensitive]
+    )
+
+    private static func modelSortTuple(_ key: String) -> (brandRank: Int, major: Int, minor: Int, seriesRank: Int) {
+        let lower = key.lowercased()
+        let isOpenAI = lower.hasPrefix("gpt-") || lower.range(of: "^o[1-9](?:$|[-_])", options: .regularExpression) != nil
+        let brandRank: Int
+        if lower.hasPrefix("gemini-") {
+            brandRank = 0
+        } else if lower.hasPrefix("claude-") {
+            brandRank = 1
+        } else if isOpenAI {
+            brandRank = 2
+        } else {
+            brandRank = 3
+        }
+
+        var major = 0
+        var minor = 0
+        if let regex = modelVersionRegex {
+            let range = NSRange(lower.startIndex..<lower.endIndex, in: lower)
+            if let m = regex.firstMatch(in: lower, range: range) {
+                for g in [1, 3] {
+                    if m.range(at: g).location != NSNotFound, let r = Range(m.range(at: g), in: lower), let v = Int(lower[r]) {
+                        major = v
+                        break
+                    }
+                }
+                if m.range(at: 2).location != NSNotFound, let r = Range(m.range(at: 2), in: lower), let v = Int(lower[r]) {
+                    minor = v
+                }
+            }
+        }
+
+        let seriesRank: Int
+        if brandRank == 0 {
+            if lower.contains("neon") { seriesRank = 0 }
+            else if lower.contains("argon") { seriesRank = 1 }
+            else if lower.contains("hydrogen") { seriesRank = 2 }
+            else if lower.contains("carbon") { seriesRank = 3 }
+            else if lower.contains("pro") { seriesRank = 4 }
+            else if lower.contains("flash-lite") { seriesRank = 6 }
+            else if lower.contains("flash") { seriesRank = 5 }
+            else { seriesRank = 7 }
+        } else if brandRank == 1 {
+            if lower.contains("opus") { seriesRank = 0 }
+            else if lower.contains("sonnet") { seriesRank = 1 }
+            else if lower.contains("haiku") { seriesRank = 2 }
+            else { seriesRank = 3 }
+        } else if brandRank == 2 {
+            if lower.contains("mini") || lower.contains("nano") || lower.contains("oss") { seriesRank = 2 }
+            else { seriesRank = 0 }
+        } else {
+            seriesRank = 0
+        }
+
+        return (brandRank, major, minor, seriesRank)
+    }
+
+    private static func compareFamilyAndVersion(_ lhs: String, _ rhs: String) -> Bool {
+        let a = modelSortTuple(lhs)
+        let b = modelSortTuple(rhs)
+        if a.brandRank != b.brandRank { return a.brandRank < b.brandRank }
+        if a.major != b.major { return a.major > b.major }
+        if a.minor != b.minor { return a.minor > b.minor }
+        if a.seriesRank != b.seriesRank { return a.seriesRank < b.seriesRank }
+        return lhs.localizedStandardCompare(rhs) == .orderedAscending
+    }
+
+    private static func sortCurrentPlanKeys(_ keys: [String], catalogState: [String: [String: Any]]) -> [String] {
+        keys.sorted { lhs, rhs in
+            let hoL = hostOrder(for: lhs, catalogState: catalogState)
+            let hoR = hostOrder(for: rhs, catalogState: catalogState)
+            if let l = hoL, let r = hoR {
+                return l != r ? l < r : compareFamilyAndVersion(lhs, rhs)
+            }
+            if hoL != nil { return true }
+            if hoR != nil { return false }
+            let lr = availabilityRank(catalogState[lhs]?["availability"] as? String)
+            let rr = availabilityRank(catalogState[rhs]?["availability"] as? String)
+            if lr != rr { return lr < rr }
+            return compareFamilyAndVersion(lhs, rhs)
+        }
+    }
+
     private func makeRigidBadge(_ title: String, color: NSColor) -> PillBadge {
         let badge = pillBadge(title, color: color)
         badge.setContentHuggingPriority(.required, for: .horizontal)
@@ -336,24 +448,40 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         return badge
     }
 
+    private func makeSectionHeader(_ title: String, topSpacing: CGFloat) -> NSView {
+        let lbl = text(title, size: 11, weight: .semibold, color: Design.secondary)
+        lbl.setContentCompressionResistancePriority(.required, for: .horizontal)
+        let box = NSView()
+        box.translatesAutoresizingMaskIntoConstraints = false
+        box.addSubview(lbl)
+        lbl.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            lbl.leadingAnchor.constraint(equalTo: box.leadingAnchor, constant: 2),
+            lbl.trailingAnchor.constraint(lessThanOrEqualTo: box.trailingAnchor),
+            lbl.topAnchor.constraint(equalTo: box.topAnchor, constant: topSpacing),
+            lbl.bottomAnchor.constraint(equalTo: box.bottomAnchor, constant: -1)
+        ])
+        return box
+    }
+
     private func makeTitleViews(key: String, displayName: String?) -> [NSView] {
         let trimmedName = (displayName ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         if !trimmedName.isEmpty && trimmedName.lowercased() != key.lowercased() {
-            let nameLbl = text(trimmedName, size: 12.5, weight: .semibold, color: .labelColor)
+            let nameLbl = text(trimmedName, size: 13, weight: .semibold, color: .labelColor)
             nameLbl.lineBreakMode = .byTruncatingTail
-            nameLbl.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-            nameLbl.setContentCompressionResistancePriority(NSLayoutConstraint.Priority(500), for: .horizontal)
+            nameLbl.setContentHuggingPriority(.required, for: .horizontal)
+            nameLbl.setContentCompressionResistancePriority(.required, for: .horizontal)
 
-            let keyLbl = text(key, size: 10.5, color: Design.secondary)
+            let keyLbl = text(key, size: 11, color: Design.secondary)
             keyLbl.lineBreakMode = .byTruncatingMiddle
             keyLbl.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-            keyLbl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            keyLbl.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
             return [nameLbl, keyLbl]
         }
-        let modelTitle = text(key, size: 12.5, weight: .semibold, color: .labelColor)
+        let modelTitle = text(key, size: 13, weight: .semibold, color: .labelColor)
         modelTitle.lineBreakMode = .byTruncatingMiddle
         modelTitle.setContentHuggingPriority(.defaultHigh, for: .horizontal)
-        modelTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        modelTitle.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
         return [modelTitle]
     }
 
@@ -374,10 +502,10 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         card.addSubview(body)
         body.translatesAutoresizingMaskIntoConstraints = false
         NSLayoutConstraint.activate([
-            body.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 11),
-            body.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -11),
-            body.topAnchor.constraint(equalTo: card.topAnchor, constant: 8),
-            body.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -8)
+            body.leadingAnchor.constraint(equalTo: card.leadingAnchor, constant: 12),
+            body.trailingAnchor.constraint(equalTo: card.trailingAnchor, constant: -12),
+            body.topAnchor.constraint(equalTo: card.topAnchor, constant: 9),
+            body.bottomAnchor.constraint(equalTo: card.bottomAnchor, constant: -9)
         ])
         return card
     }
@@ -388,6 +516,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         rawState: String,
         displayName: String?,
         availabilityBadge: (title: String, color: NSColor)?,
+        isRetiredSection: Bool = false,
         alpha: CGFloat = 1.0
     ) -> (card: DesignCardBox, summaryLine: String) {
         let inputRate = doubleVal(entry, "input")
@@ -399,6 +528,22 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         case "user": (L10n.t("pricing_sheet.state.user"), .systemPurple)
         case "expired": (L10n.t("pricing_sheet.state.expired"), accessibleWarningColor())
         default: (L10n.t("pricing_sheet.state.historical"), Design.inactivePill)
+        }
+
+        // 每张卡片最多只保留 1 枚高信号胶囊：常规当前套餐可用模型（含已核对与参考估算）零胶囊降噪，参考估算统一放第二行元信息。
+        let visualPill: (title: String, color: NSColor)?
+        var showedHistoricalInline = false
+        if isRetiredSection {
+            if rawState == "user" || rawState == "expired" {
+                visualPill = (stateTitle, stateTint)
+            } else {
+                visualPill = (availabilityBadge?.title ?? stateTitle, availabilityBadge?.color ?? stateTint)
+            }
+        } else if rawState == "user" || rawState == "expired" {
+            visualPill = (stateTitle, stateTint)
+        } else {
+            visualPill = availabilityBadge
+            showedHistoricalInline = (rawState == "historical")
         }
 
         let prov = entry["provenance"] as? [String: Any] ?? [:]
@@ -414,19 +559,20 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         }
         let dateText = dateParts.joined(separator: " \u{00B7} ")
 
-        var topViews = makeTitleViews(key: key, displayName: displayName)
-        topViews.append(makeRigidBadge(stateTitle, color: stateTint))
-        if let av = availabilityBadge {
-            topViews.append(makeRigidBadge(av.title, color: av.color))
+        var rowMetaParts: [String] = []
+        if showedHistoricalInline {
+            rowMetaParts.append(stateTitle)
         }
-        let dateLbl = text(dateText, size: 10.5, color: Design.secondary)
-        dateLbl.setContentHuggingPriority(.required, for: .horizontal)
-        dateLbl.setContentCompressionResistancePriority(.required, for: .horizontal)
-        dateLbl.isHidden = dateText.isEmpty
-        topViews.append(flexibleSpace())
-        topViews.append(dateLbl)
+        rowMetaParts.append(contentsOf: dateParts)
+        let rowMetaText = rowMetaParts.joined(separator: " \u{00B7} ")
 
-        let topRow = horizontal(topViews, spacing: 6)
+        var topViews = makeTitleViews(key: key, displayName: displayName)
+        topViews.append(flexibleSpace())
+        if let pill = visualPill {
+            topViews.append(makeRigidBadge(pill.title, color: pill.color))
+        }
+
+        let topRow = horizontal(topViews, spacing: 8)
         topRow.alignment = .centerY
         topRow.detachesHiddenViews = true
 
@@ -440,20 +586,35 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         rateParts.append(L10n.t("pricing_sheet.rate.output", ["rate": Self.fmtRate(outputRate)]))
         let rateLabel = text(rateParts.joined(separator: " \u{00B7} "), size: 11.5, weight: .medium, color: .labelColor)
         rateLabel.font = .monospacedDigitSystemFont(ofSize: 11.5, weight: .medium)
-        rateLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        rateLabel.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
 
-        let bottomRow: NSView
+        var trailingMetaViews: [NSView] = []
+        if !rowMetaText.isEmpty {
+            let metaLbl = text(rowMetaText, size: 10.5, color: Design.secondary)
+            metaLbl.lineBreakMode = .byTruncatingMiddle
+            metaLbl.setContentHuggingPriority(.required, for: .horizontal)
+            metaLbl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            trailingMetaViews.append(metaLbl)
+        }
         if let url = URL(string: sourceUrl), url.scheme?.lowercased() == "https", url.host != nil {
             let linkBtn = SourceLinkButton(title: L10n.t("pricing_sheet.source_link"), sourceURL: url, target: self, action: #selector(openSourceURL(_:)))
             linkBtn.setContentHuggingPriority(.required, for: .horizontal)
-            let row = horizontal([rateLabel, flexibleSpace(), linkBtn], spacing: 8)
+            linkBtn.setContentCompressionResistancePriority(.required, for: .horizontal)
+            trailingMetaViews.append(linkBtn)
+        }
+
+        let bottomRow: NSView
+        if !trailingMetaViews.isEmpty {
+            let metaGroup = horizontal(trailingMetaViews, spacing: 8)
+            metaGroup.alignment = .centerY
+            let row = horizontal([rateLabel, flexibleSpace(), metaGroup], spacing: 8)
             row.alignment = .centerY
             bottomRow = row
         } else {
             bottomRow = rateLabel
         }
 
-        let cardBody = vertical([topRow, bottomRow], spacing: 4)
+        let cardBody = vertical([topRow, bottomRow], spacing: 5)
         for r in cardBody.arrangedSubviews { fillWidth(r, in: cardBody) }
         let card = makeCardBox(body: cardBody, alpha: alpha)
 
@@ -803,17 +964,13 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         }
 
         for group in groupedUnpriced {
-            let unpricedBadgeTitle = L10n.t("pricing_sheet.availability.unpriced_live")
+            let unpricedBadgeTitle = group.disabled
+                ? L10n.t("pricing_sheet.availability.unpriced_locked")
+                : L10n.t("pricing_sheet.availability.unpriced_live")
             var topViews = makeTitleViews(key: group.key, displayName: group.displayName)
-            topViews.append(makeRigidBadge(unpricedBadgeTitle, color: accessibleWarningColor()))
-            var summarySuffix = ""
-            if group.disabled {
-                let lockedTitle = L10n.t("pricing_sheet.availability.tier_locked")
-                topViews.append(makeRigidBadge(lockedTitle, color: accessibleWarningColor()))
-                summarySuffix = " [\(lockedTitle)]"
-            }
             topViews.append(flexibleSpace())
-            let topRow = horizontal(topViews, spacing: 6)
+            topViews.append(makeRigidBadge(unpricedBadgeTitle, color: accessibleWarningColor()))
+            let topRow = horizontal(topViews, spacing: 8)
             topRow.alignment = .centerY
 
             var cardRows: [NSView] = [topRow]
@@ -826,56 +983,70 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
                 )
                 cardRows.append(variantsLabel)
             }
-            let cardBody = vertical(cardRows, spacing: 4)
+            let cardBody = vertical(cardRows, spacing: 5)
             for r in cardBody.arrangedSubviews { fillWidth(r, in: cardBody) }
             let card = makeCardBox(body: cardBody)
             listStack.addArrangedSubview(card)
             fillWidth(card, in: listStack)
             let variantsSummary = group.variants.isEmpty ? "" : " (\(group.variants.joined(separator: ", ")))"
-            summaryLines.append("\(group.key) [\(unpricedBadgeTitle)]\(summarySuffix)\(variantsSummary)")
+            summaryLines.append("\(group.key) [\(unpricedBadgeTitle)]\(variantsSummary)")
         }
 
-        let sortedKeys = prices.keys.sorted { lhs, rhs in
-            let lr = Self.availabilityRank(modelCatalogState[lhs]?["availability"] as? String)
-            let rr = Self.availabilityRank(modelCatalogState[rhs]?["availability"] as? String)
-            if lr != rr { return lr < rr }
-            return lhs < rhs
-        }
-        for key in sortedKeys {
-            guard let entry = prices[key] else { continue }
-            let meta = modelCatalogState[key]
-            let availability = meta?["availability"] as? String ?? "available"
-            let displayName = meta?["displayName"] as? String
-            let avBadge: (title: String, color: NSColor)?
-            switch availability {
-            case "tier_locked":
-                avBadge = (L10n.t("pricing_sheet.availability.tier_locked"), accessibleWarningColor())
-            case "other_tier_only":
-                let tiers = (meta?["availableInTiers"] as? [String] ?? [])
-                    .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
-                    .filter { !$0.isEmpty }
-                let title = tiers.isEmpty
-                    ? L10n.t("pricing_sheet.availability.other_tier")
-                    : L10n.t("pricing_sheet.availability.other_tier_named", ["tiers": tiers.joined(separator: "/")])
-                avBadge = (title, Design.inactivePill)
-            default:
-                avBadge = nil
+        let currentPlanKeys = Self.sortCurrentPlanKeys(
+            prices.keys.filter { (modelCatalogState[$0]?["availability"] as? String ?? "available") != "other_tier_only" },
+            catalogState: modelCatalogState
+        )
+        let otherPlanKeys = prices.keys
+            .filter { (modelCatalogState[$0]?["availability"] as? String) == "other_tier_only" }
+            .sorted { Self.compareFamilyAndVersion($0, $1) }
+
+        let appendPriceSection: ([String], String?) -> Void = { keys, sectionTitle in
+            guard !keys.isEmpty else { return }
+            if let sectionTitle {
+                let header = self.makeSectionHeader(sectionTitle, topSpacing: self.listStack.arrangedSubviews.isEmpty ? 0 : 4)
+                self.listStack.addArrangedSubview(header)
+                fillWidth(header, in: self.listStack)
             }
-            let built = buildPriceCard(
-                key: key,
-                entry: entry,
-                rawState: pricingStatus[key] ?? "historical",
-                displayName: displayName,
-                availabilityBadge: avBadge
-            )
-            listStack.addArrangedSubview(built.card)
-            fillWidth(built.card, in: listStack)
-            summaryLines.append(built.summaryLine)
+            for key in keys {
+                guard let entry = prices[key] else { continue }
+                let meta = modelCatalogState[key]
+                let availability = meta?["availability"] as? String ?? "available"
+                let displayName = meta?["displayName"] as? String
+                let avBadge: (title: String, color: NSColor)?
+                switch availability {
+                case "tier_locked":
+                    avBadge = (L10n.t("pricing_sheet.availability.tier_locked"), accessibleWarningColor())
+                case "other_tier_only":
+                    let tiers = (meta?["availableInTiers"] as? [String] ?? [])
+                        .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                        .filter { !$0.isEmpty }
+                    let title = tiers.isEmpty
+                        ? L10n.t("pricing_sheet.availability.other_tier")
+                        : L10n.t("pricing_sheet.availability.other_tier_named", ["tiers": tiers.joined(separator: "/")])
+                    avBadge = (title, Design.inactivePill)
+                default:
+                    avBadge = nil
+                }
+                let built = self.buildPriceCard(
+                    key: key,
+                    entry: entry,
+                    rawState: pricingStatus[key] ?? "historical",
+                    displayName: displayName,
+                    availabilityBadge: avBadge
+                )
+                self.listStack.addArrangedSubview(built.card)
+                fillWidth(built.card, in: self.listStack)
+                summaryLines.append(built.summaryLine)
+            }
         }
+
+        let showSectionHeaders = !otherPlanKeys.isEmpty || (!groupedUnpriced.isEmpty && !currentPlanKeys.isEmpty)
+        appendPriceSection(currentPlanKeys, showSectionHeaders ? L10n.t("pricing_sheet.section.current") : nil)
+        appendPriceSection(otherPlanKeys, !otherPlanKeys.isEmpty ? L10n.t("pricing_sheet.section.other_tier") : nil)
 
         var retiredSummary: [String] = []
         if !retiredPrices.isEmpty {
-            if !groupedUnpriced.isEmpty || !sortedKeys.isEmpty {
+            if !groupedUnpriced.isEmpty || !currentPlanKeys.isEmpty || !otherPlanKeys.isEmpty {
                 let sep = divider()
                 listStack.addArrangedSubview(sep)
                 fillWidth(sep, in: listStack)
@@ -897,7 +1068,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             retiredListStack = retiredStack
 
             let retiredBadgeTitle = L10n.t("pricing_sheet.availability.retired")
-            for key in retiredPrices.keys.sorted() {
+            for key in retiredPrices.keys.sorted(by: { Self.compareFamilyAndVersion($0, $1) }) {
                 guard let entry = retiredPrices[key] else { continue }
                 let displayName = modelCatalogState[key]?["displayName"] as? String
                 let built = buildPriceCard(
@@ -906,6 +1077,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
                     rawState: pricingStatus[key] ?? "historical",
                     displayName: displayName,
                     availabilityBadge: (retiredBadgeTitle, Design.inactivePill),
+                    isRetiredSection: true,
                     alpha: 0.88
                 )
                 retiredStack.addArrangedSubview(built.card)
@@ -917,7 +1089,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         }
         renderedRetiredSummaryLines = retiredSummary
 
-        if groupedUnpriced.isEmpty && sortedKeys.isEmpty && retiredPrices.isEmpty {
+        if groupedUnpriced.isEmpty && currentPlanKeys.isEmpty && otherPlanKeys.isEmpty && retiredPrices.isEmpty {
             let emptyLabel = text(L10n.t("pricing_sheet.empty"), size: 12, color: Design.secondary)
             listStack.addArrangedSubview(emptyLabel)
         }
@@ -931,6 +1103,21 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
 
     @objc private func openSourceURL(_ sender: SourceLinkButton) {
         NSWorkspace.shared.open(sender.sourceURL)
+    }
+
+    func reloadFromBackend() {
+        guard !checking else { return }
+        app.bridge.send(["command": "api_pricing_get"]) { [weak self] result in
+            guard let self, self.sheet.isVisible else { return }
+            if case .success(var payload) = result {
+                let status = payload["status"] as? [String: Any]
+                let statusSynced = status?["lastSyncSuccess"] as? Bool
+                if payload["synced"] == nil {
+                    payload["synced"] = statusSynced ?? (self.lastPayload?["synced"] as? Bool ?? true)
+                }
+                self.apply(payload: payload)
+            }
+        }
     }
 
     @objc func recheck() {

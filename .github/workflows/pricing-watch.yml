@@ -143,6 +143,7 @@ jobs:
             if gh pr merge "$PR_URL" --squash --delete-branch; then
               echo "Auto-merged immediately into ${{ github.ref_name }}."
               echo "merged=true" >> "$GITHUB_OUTPUT"
+              curl -fsSL -X POST "https://purge.jsdelivr.net/gh/${{ github.repository }}@main/assets/pricing-feed.json" >/dev/null 2>&1 || true
             elif gh pr merge "$PR_URL" --auto --squash --delete-branch; then
               echo "Enabled auto-merge pending required status checks."
               echo "merged=auto_queued" >> "$GITHUB_OUTPUT"

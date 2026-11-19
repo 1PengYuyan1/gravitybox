@@ -249,3 +249,131 @@ enum InterfaceText {
         return String(format: "$%.2f", locale: Locale(identifier: "en_US_POSIX"), value)
     }
 }
+
+enum ModelUsageFold {
+    private static let thinkingSuffixRegex = try? NSRegularExpression(
+        pattern: "(?:-(?:extra-high|extra-low|xhigh|high|medium|low|thinking|max))+$",
+        options: [.caseInsensitive]
+    )
+
+    private static func intField(_ dict: [String: Any], _ key: String, fallback: Int = 0) -> Int {
+        if let n = dict[key] as? NSNumber { return n.intValue }
+        if let s = dict[key] as? String, let v = Int(s) { return v }
+        return fallback
+    }
+
+    private static func doubleField(_ dict: [String: Any], _ key: String, fallback: Double = 0) -> Double {
+        if let n = dict[key] as? NSNumber { return n.doubleValue }
+        if let s = dict[key] as? String, let v = Double(s) { return v }
+        return fallback
+    }
+
+    static func baseModelKey(for rawModel: String) -> String {
+        let trimmed = rawModel.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty,
+              trimmed != "未知模型",
+              trimmed.caseInsensitiveCompare("Unknown Model") != .orderedSame,
+              let regex = thinkingSuffixRegex else {
+            return trimmed
+        }
+        let range = NSRange(location: 0, length: (trimmed as NSString).length)
+        let stripped = regex.stringByReplacingMatches(in: trimmed, options: [], range: range, withTemplate: "")
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return stripped.isEmpty ? trimmed : stripped
+    }
+
+    static func foldThinkingVariants(_ rows: [[String: Any]]) -> [[String: Any]] {
+        guard rows.count > 1 else {
+            return rows.map { item in
+                guard let raw = item["model"] as? String else { return item }
+                let folded = baseModelKey(for: raw)
+                guard folded != raw else { return item }
+                var copy = item
+                copy["model"] = folded
+                return copy
+            }
+        }
+        var order: [String] = []
+        var buckets: [String: (row: [String: Any], total: Int, input: Int, output: Int, cached: Int, cacheWrite: Int, req: Int, usd: Double, unpriced: Int, anyPriced: Bool, allPriced: Bool, anyExpired: Bool)] = [:]
+        for item in rows {
+            let raw = (item["model"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let folded = baseModelKey(for: raw)
+            let key = folded.isEmpty ? "__empty__:\(order.count)" : folded.lowercased()
+            let t = intField(item, "totalTokens", fallback: intField(item, "total_tokens"))
+            let inp = intField(item, "promptTokens", fallback: intField(item, "input_tokens"))
+            let outp = intField(item, "candidatesTokens", fallback: intField(item, "output_tokens"))
+            let cac = intField(item, "cachedTokens", fallback: intField(item, "cached_tokens"))
+            let cw = intField(item, "cacheWriteTokens", fallback: intField(item, "cache_write_tokens"))
+            let req = intField(item, "requestCount", fallback: intField(item, "request_count"))
+            let usd = doubleField(item, "estimatedUsd", fallback: doubleField(item, "estimated_usd"))
+            let unpriced = intField(item, "unpricedTokens", fallback: intField(item, "unpriced_tokens"))
+            let itemPartial = (item["partiallyPriced"] as? Bool) ?? false
+            let itemPriced = (item["priced"] as? Bool) ?? (usd > 0 || (unpriced == 0 && t > 0 && item["priced"] == nil))
+            let effectivePriced = itemPriced || itemPartial
+            let itemExpired = (item["pricingStatus"] as? String ?? "") == "expired"
+
+            if var existing = buckets[key] {
+                existing.total += t
+                existing.input += inp
+                existing.output += outp
+                existing.cached += cac
+                existing.cacheWrite += cw
+                existing.req += req
+                existing.usd += usd
+                existing.unpriced += unpriced
+                existing.anyPriced = existing.anyPriced || effectivePriced
+                existing.allPriced = existing.allPriced && itemPriced && !itemPartial
+                existing.anyExpired = existing.anyExpired || itemExpired
+                if raw.caseInsensitiveCompare(folded) == .orderedSame {
+                    existing.row["model"] = raw
+                }
+                buckets[key] = existing
+            } else {
+                order.append(key)
+                var seed = item
+                if !folded.isEmpty { seed["model"] = folded }
+                buckets[key] = (
+                    row: seed,
+                    total: t,
+                    input: inp,
+                    output: outp,
+                    cached: cac,
+                    cacheWrite: cw,
+                    req: req,
+                    usd: usd,
+                    unpriced: unpriced,
+                    anyPriced: effectivePriced,
+                    allPriced: itemPriced && !itemPartial,
+                    anyExpired: itemExpired
+                )
+            }
+        }
+
+        return order.compactMap { key in
+            guard let b = buckets[key] else { return nil }
+            var out = b.row
+            out["totalTokens"] = b.total
+            out["total_tokens"] = b.total
+            out["promptTokens"] = b.input
+            out["input_tokens"] = b.input
+            out["candidatesTokens"] = b.output
+            out["output_tokens"] = b.output
+            out["cachedTokens"] = b.cached
+            out["cached_tokens"] = b.cached
+            out["cacheWriteTokens"] = b.cacheWrite
+            out["cache_write_tokens"] = b.cacheWrite
+            out["requestCount"] = b.req
+            out["request_count"] = b.req
+            out["estimatedUsd"] = b.usd
+            out["estimated_usd"] = b.usd
+            out["unpricedTokens"] = b.unpriced
+            out["unpriced_tokens"] = b.unpriced
+            let isPartial = b.anyPriced && (!b.allPriced || b.unpriced > 0)
+            let isFullPriced = b.allPriced && b.unpriced == 0
+            out["priced"] = isFullPriced
+            out["partiallyPriced"] = isPartial
+            if b.anyExpired { out["pricingStatus"] = "expired" }
+            return out
+        }
+    }
+}

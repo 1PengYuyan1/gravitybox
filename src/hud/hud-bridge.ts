@@ -398,6 +398,14 @@ export class CdpHudBridge implements ICdpHudBridge {
     );
   }
 
+  /**
+   * 价格基准同步后使 HUD 定价缓存失效，并立即重推所有活跃分栏的度量快照
+   */
+  public async refreshAllForPricingChange(): Promise<void> {
+    this.engine.invalidatePricingCache();
+    await this.refreshAllForLocaleChange();
+  }
+
   public onClientEvent(handler: (event: HudClientEvent) => void): void {
     this.clientEventHandlers.add(handler);
   }

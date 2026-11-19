@@ -25,6 +25,24 @@ extension NSWindow {
     }
 }
 
+#if NATIVE_UI_TEST
+extension Assistant {
+    /// 非交互原生 UI 测试默认静默全透明运行，禁止任何窗口、Sheet 或 Popover 出现在桌面屏幕；
+    /// 仅当显式传入 `--interactive` 时才正常展示窗口。
+    static var headlessOffscreenUI: Bool = !CommandLine.arguments.contains("--interactive")
+
+    static func configureHeadlessWindowIfNeeded(_ window: NSWindow) {
+        guard headlessOffscreenUI else { return }
+        window.alphaValue = 0
+        window.hasShadow = false
+        window.ignoresMouseEvents = true
+        window.animationBehavior = .none
+        window.sharingType = .none
+        window.collectionBehavior.insert([.transient, .ignoresCycle, .stationary])
+    }
+}
+#endif
+
 final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate, NSTableViewDataSource, NSTableViewDelegate {
     var names: [String] {
         [
@@ -111,6 +129,11 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
     var taskRows: [[String: Any]] = []
     var reachable = false
     var quotaRefreshTimer: Timer?
+    var lastAutoQuotaRefreshTriggerAt: Date = .distantPast
+    var quotaStaleThresholdSeconds: TimeInterval {
+        let minutes = configuration?.value.quotaRefreshMinutes ?? 0
+        return minutes > 15 ? TimeInterval(minutes * 60 + 120) : TimeInterval(15 * 60)
+    }
     var autoUpdateTimer: Timer?
     lazy var updateManager = AppUpdateManager(app: self)
     var timer: Timer?
@@ -125,6 +148,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
     private var presentedError: String?
     var lastAccountListFetchAt: Date = .distantPast
     var lastFetchedAccountsRevision = ""
+    var lastObservedPricingRevision = ""
     var lastFetchedLiveEmail = ""
     var accountListInFlight = false
     var accountListPendingRefetch = false
@@ -426,6 +450,10 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
         completionHandler: ((NSApplication.ModalResponse) -> Void)? = nil
     ) {
         retainSheetController(controller, for: sheetWindow)
+        #if NATIVE_UI_TEST
+        Assistant.configureHeadlessWindowIfNeeded(parent)
+        Assistant.configureHeadlessWindowIfNeeded(sheetWindow)
+        #endif
         parent.beginSheet(sheetWindow) { [weak self, weak sheetWindow] response in
             if let sheetWindow {
                 self?.releaseSheetController(for: sheetWindow)
@@ -617,11 +645,20 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
                 backing: .buffered,
                 defer: false
             )
+            #if NATIVE_UI_TEST
+            Assistant.configureHeadlessWindowIfNeeded(window)
+            #endif
             window.titlebarAppearsTransparent = true
             window.isReleasedWhenClosed = false
             window.delegate = self
             window.minSize = NSSize(width: 880, height: 580)
+            #if NATIVE_UI_TEST
+            if !Assistant.headlessOffscreenUI {
+                window.setFrameAutosaveName("GravityBox.MainWindow.v08")
+            }
+            #else
             window.setFrameAutosaveName("GravityBox.MainWindow.v08")
+            #endif
             window.toolbar = nil
             window.titleVisibility = .hidden
             window.title = "GravityBox"
@@ -769,18 +806,34 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
             sidebar.selectRowIndexes(IndexSet(integer: currentPage), byExtendingSelection: false)
             navigate(currentPage)
             updateNavigationAppearance()
+            #if NATIVE_UI_TEST
+            let restored = Assistant.headlessOffscreenUI ? false : window.setFrameUsingName("GravityBox.MainWindow.v08")
+            #else
             let restored = window.setFrameUsingName("GravityBox.MainWindow.v08")
+            #endif
             if window.frame.width < window.minSize.width || window.frame.height < window.minSize.height {
                 var clampedFrame = window.frame
                 clampedFrame.size.width = max(clampedFrame.size.width, window.minSize.width)
                 clampedFrame.size.height = max(clampedFrame.size.height, window.minSize.height)
                 window.setFrame(clampedFrame, display: false)
             }
+            #if NATIVE_UI_TEST
+            if Assistant.headlessOffscreenUI {
+                window.setFrameOrigin(NSPoint(x: -24000, y: -24000))
+            } else {
+                let visible = NSScreen.screens.contains {
+                    $0.visibleFrame.intersection(window.frame).width >= 120 &&
+                    $0.visibleFrame.intersection(window.frame).height >= 100
+                }
+                if !restored || !visible { window.center() }
+            }
+            #else
             let visible = NSScreen.screens.contains {
                 $0.visibleFrame.intersection(window.frame).width >= 120 &&
                 $0.visibleFrame.intersection(window.frame).height >= 100
             }
             if !restored || !visible { window.center() }
+            #endif
         }
         #if !NATIVE_UI_TEST
         window?.makeKeyAndOrderFront(nil)
@@ -1028,13 +1081,63 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
             content.layer?.transform = CATransform3DIdentity
         }
     }
+    func oldestEnabledAccountQuotaTimestamp() -> TimeInterval? {
+        var oldest: TimeInterval? = nil
+        var hasEligible = false
+        for acc in cachedAccounts {
+            if acc["disabled"] as? Bool == true { continue }
+            if acc["validation_blocked"] as? Bool == true { continue }
+            if let readiness = acc["credentialReadiness"] as? [String: Any],
+               readiness["state"] as? String == "needs_authorization" { continue }
+            hasEligible = true
+            let quota = acc["quota"] as? [String: Any]
+            let stamp = QuotaPresentation.number(quota?["last_updated"])
+                ?? QuotaPresentation.number(acc["quota_last_updated"])
+                ?? 0
+            if stamp <= 0 {
+                return 0
+            }
+            if let currentOldest = oldest {
+                if stamp < currentOldest { oldest = stamp }
+            } else {
+                oldest = stamp
+            }
+        }
+        return hasEligible ? oldest : nil
+    }
+    func checkAndTriggerOverdueQuotaRefreshIfNeeded() {
+        guard !quitting, reachable, !quotaRefreshing, pendingAccountTaskId == nil,
+              let minutes = configuration?.value.quotaRefreshMinutes,
+              [5, 10, 15, 30, 60].contains(minutes) else { return }
+        guard Date().timeIntervalSince(lastAutoQuotaRefreshTriggerAt) >= 60.0 else { return }
+        if cachedAccounts.isEmpty {
+            if !accountListInFlight && Date().timeIntervalSince(lastAccountListFetchAt) >= 15.0 {
+                fetchAccountList(notifyPage: false)
+            }
+            return
+        }
+        guard let oldest = oldestEnabledAccountQuotaTimestamp() else { return }
+        let age = oldest > 0 ? Date().timeIntervalSince1970 - oldest : .infinity
+        if age >= TimeInterval(minutes * 60) {
+            lastAutoQuotaRefreshTriggerAt = Date()
+            refreshAccountQuotas()
+        }
+    }
     func configureQuotaRefreshTimer() {
         quotaRefreshTimer?.invalidate(); quotaRefreshTimer = nil
+        guard let configuration, !quitting else { return }
         let minutes = configuration.value.quotaRefreshMinutes
-        guard [5, 10, 15, 30, 60].contains(minutes), !quitting else { return }
-        quotaRefreshTimer = Timer.scheduledTimer(withTimeInterval: TimeInterval(minutes * 60), repeats: true) { [weak self] _ in
-            guard let self, self.reachable, self.pendingAccountTaskId == nil else { return }; self.refreshAccountQuotas()
+        guard [5, 10, 15, 30, 60].contains(minutes) else { return }
+        let interval = TimeInterval(minutes * 60)
+        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
+            guard let self, self.reachable, !self.quotaRefreshing, self.pendingAccountTaskId == nil else { return }
+            self.lastAutoQuotaRefreshTriggerAt = Date()
+            self.refreshAccountQuotas()
         }
+        timer.tolerance = min(15.0, interval * 0.05)
+        RunLoop.main.add(timer, forMode: .common)
+        quotaRefreshTimer = timer
+        checkAndTriggerOverdueQuotaRefreshIfNeeded()
     }
     func configureRefreshTimer(){
         guard !quitting else { return }
@@ -1111,6 +1214,8 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
                         self.overview?.update(force: true)
                     }
                 }
+                self.checkAndTriggerOverdueQuotaRefreshIfNeeded()
+                self.handlePricingRevisionIfChanged()
             case .failure:
                 self.reachable = false
                 self.failPendingQuotaRefresh(L10n.t("assistant.service_disconnected_keep_quota", fallback: "本机服务连接中断，保留上次配额"))
@@ -1130,6 +1235,23 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
             }
         }
     }
+
+    func handlePricingRevisionIfChanged() {
+        let incoming = statusValue.pricingRevision
+        guard !incoming.isEmpty else { return }
+        if lastObservedPricingRevision.isEmpty {
+            lastObservedPricingRevision = incoming
+            return
+        }
+        guard incoming != lastObservedPricingRevision else { return }
+        lastObservedPricingRevision = incoming
+        invalidateUsageReportCache()
+        overview?.fetch()
+        if let sheet = preferencesController?.pricingSheet, sheet.sheet.isVisible {
+            sheet.reloadFromBackend()
+        }
+    }
+
     func updateServiceFootnote() {
         let isConnected = reachable
         serviceFootnoteLabel.superview?.isHidden = isConnected
@@ -1204,6 +1326,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
                     self.reachable = true
                     self.recoveryAttempts = 0
                     self.statusValue = self.mergeStatusSnapshot(raw, previous: self.statusValue)
+                    self.handlePricingRevisionIfChanged()
                     self.updateViews()
                     if !wasReachable || (taskChanged && (self.pendingAccountTaskId != nil || self.quotaRefreshing)) {
                         self.refresh()
@@ -1224,6 +1347,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
         if raw["activeFiveHourQuota"] == nil { merged.activeFiveHourQuota = previous.activeFiveHourQuota }
         if raw["activeSubscriptionTier"] == nil { merged.activeSubscriptionTier = previous.activeSubscriptionTier }
         if raw["accountsRevision"] == nil { merged.accountsRevision = previous.accountsRevision }
+        if raw["pricingRevision"] == nil { merged.pricingRevision = previous.pricingRevision }
         if raw["liveAccountEmail"] == nil { merged.liveAccountEmail = previous.liveAccountEmail }
         if raw["oauthClientConfigured"] == nil { merged.oauthClientConfigured = previous.oauthClientConfigured }
         if let target = pendingTranslationTarget {
@@ -1259,7 +1383,10 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
         }
         var parent = rootWindow
         while let sheet = parent.activeSheetWindow { parent = sheet }
-        #if !NATIVE_UI_TEST
+        #if NATIVE_UI_TEST
+        Assistant.configureHeadlessWindowIfNeeded(parent)
+        Assistant.configureHeadlessWindowIfNeeded(alert.window)
+        #else
         NSApp.activate(ignoringOtherApps: true)
         #endif
         alert.beginSheetModal(for: parent, completionHandler: completion)

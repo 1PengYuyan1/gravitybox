@@ -358,7 +358,7 @@ final class UsagePage: NSObject {
 
         self.updateReadStatus(summary)
 
-        let priceRows = value["byModel"] as? [[String: Any]] ?? []
+        let priceRows = ModelUsageFold.foldThinkingVariants(value["byModel"] as? [[String: Any]] ?? [])
         let outdated = priceRows.filter { ($0["pricingStatus"] as? String ?? "") == "expired" }.count
         var costNotes: [String] = []
         if unpricedCount > 0 {
@@ -375,7 +375,7 @@ final class UsagePage: NSObject {
             self.usdDetail.textColor = .secondaryLabelColor
             self.usdDetail.isHidden = true
         }
-        let rows = (value["byModel"] as? [[String: Any]]) ?? (value["models"] as? [[String: Any]]) ?? []
+        let rows = ModelUsageFold.foldThinkingVariants((value["byModel"] as? [[String: Any]]) ?? (value["models"] as? [[String: Any]]) ?? [])
         self.modelRows = rows
         let scroll = self.view as? NSScrollView
         let preservedOrigin = self.restoreScroll ? self.app.usageScrollOrigin : (scroll?.contentView.bounds.origin ?? .zero)
@@ -445,7 +445,7 @@ final class UsagePage: NSObject {
         let signpost = PerformanceSignpost.begin("UsageChartsAndBreakdown")
         defer { PerformanceSignpost.end("UsageChartsAndBreakdown", signpost) }
         if let rows = (value["byModel"] as? [[String: Any]]) ?? (value["models"] as? [[String: Any]]) {
-            self.modelRows = rows
+            self.modelRows = ModelUsageFold.foldThinkingVariants(rows)
         }
         // 1. 更新趋势柱状图
         if segIdx == 0 {

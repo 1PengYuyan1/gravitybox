@@ -25,6 +25,7 @@ struct LiveStatus {
     var activeFiveHourQuota: Int? = nil
     var activeSubscriptionTier = "FREE"
     var accountsRevision = ""
+    var pricingRevision = ""
     var liveAccountEmail = ""
     var oauthClientConfigured = false
 
@@ -52,6 +53,7 @@ struct LiveStatus {
         activeFiveHourQuota = raw["activeFiveHourQuota"] as? Int
         activeSubscriptionTier = raw["activeSubscriptionTier"] as? String ?? "FREE"
         accountsRevision = (raw["accountsRevision"] as? String) ?? "\(raw["accountsRevision"] ?? "")"
+        pricingRevision = raw["pricingRevision"] as? String ?? ""
         liveAccountEmail = raw["liveAccountEmail"] as? String ?? ""
         oauthClientConfigured = raw["oauthClientConfigured"] as? Bool ?? false
         if let errors = raw["errors"] as? [String], !errors.isEmpty {

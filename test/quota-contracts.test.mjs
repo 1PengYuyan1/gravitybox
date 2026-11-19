@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
-import { AccountsManager, formatResetCountdown, refreshResetDescription, accountCredentialReadiness, generateDeviceProfile, MockKeychainAdapter, syncAccountToKeychain } from "../dist/accounts.js";
+import { AccountsManager, formatResetCountdown, refreshResetDescription, accountCredentialReadiness, generateDeviceProfile, MockKeychainAdapter, syncAccountToKeychain, resolveQuotaStaleSeconds } from "../dist/accounts.js";
 import { buildDashboardAggregate } from "../dist/main.js";
 import { normalizeIndependentArgonQuota } from "../dist/quota.js";
 
@@ -1076,6 +1076,82 @@ test('live RetrieveUserQuotaSummary 失败返回空分组时自动回退云端�
       getPricingTable: async () => ({}),
     });
     assert.deepEqual(agg.accounts.stale_groups, [], '完整 live 数据合并后不得残留旧 stale_groups');
+  } finally {
+    await rm(dir, { recursive: true, force: true }).catch(() => {});
+  }
+});
+
+test('动态配额过期阈值：30/60 分钟自动刷新下在周期窗口内不误判为过期，且智能切换正常采纳', async () => {
+  const dir = await mkdtemp(join(tmpdir(), 'gb-dynamic-stale-'));
+  const mgr = new AccountsManager(dir);
+  try {
+    assert.equal(resolveQuotaStaleSeconds(0), 900);
+    assert.equal(resolveQuotaStaleSeconds(5), 900);
+    assert.equal(resolveQuotaStaleSeconds(15), 900);
+    assert.equal(resolveQuotaStaleSeconds(30), 1920);
+    assert.equal(resolveQuotaStaleSeconds(60), 3720);
+
+    const nowMs = Date.now();
+    // 采样距今 23 分钟（1380 秒）：在默认 15m (900s) 下应为 stale，在 30m (1920s) 下应为 fresh
+    const sampled23mAgoMs = nowMs - 23 * 60 * 1000;
+    const resetIso = new Date(nowMs + 4 * 3600 * 1000).toISOString();
+    const account = await mgr.upsertAccount({
+      email: 'standby-30m@example.test',
+      refreshToken: 'tok-refresh-30m',
+      accessToken: 'tok-access-30m',
+      expiresIn: 3600,
+    });
+    account.quota = {
+      models: [
+        { name: 'gemini-3.8-flash', percentage: 88, percentage_known: true, reset_time: resetIso },
+        { name: 'claude-opus-4-6', percentage: 88, percentage_known: true, reset_time: resetIso },
+      ],
+      quota_groups: [
+        {
+          display_name: 'Gemini',
+          buckets: [
+            { bucket_id: 'gemini-5h', window: '5h', remaining_fraction: 0.88, remaining_fraction_known: true, reset_time: resetIso },
+            { bucket_id: 'gemini-week', window: 'weekly', remaining_fraction: 0.88, remaining_fraction_known: true, reset_time: resetIso },
+          ],
+        },
+        {
+          display_name: 'Claude/GPT',
+          buckets: [
+            { bucket_id: 'claude-week', window: 'weekly', remaining_fraction: 0.88, remaining_fraction_known: true, reset_time: resetIso },
+          ],
+        },
+      ],
+      last_updated: Math.floor(sampled23mAgoMs / 1000),
+      is_forbidden: false,
+      model_forwarding_rules: {},
+      subscription_tier: 'PRO',
+      source: 'cloud',
+    };
+    await mgr.saveAccount(account);
+
+    // 1. 默认无 config.json (0 / <=15m) -> 900s 阈值，23 分钟数据判定为 stale
+    const defaultOverview = mgr.getAccountQuotaOverview(account, { nowMs });
+    assert.equal(defaultOverview.isStale, true);
+    assert.equal(defaultOverview.familyWindows.gemini.fiveHour?.stale, true);
+    assert.equal(mgr.getAccountRemaining(account, 'gemini'), null);
+
+    // 2. 配置 quotaRefreshMinutes = 30 -> 1920s 阈值（32 分钟），23 分钟数据保持 fresh
+    await writeFile(join(dir, 'config.json'), JSON.stringify({ schema: 2, quotaRefreshMinutes: 30 }), 'utf8');
+    mgr.invalidateRuntimeCaches();
+    assert.equal(mgr.getConfiguredQuotaRefreshMinutes(), 30);
+    assert.equal(mgr.getConfiguredQuotaStaleSeconds(), 1920);
+
+    const overview30m = mgr.getAccountQuotaOverview(account, { nowMs });
+    assert.equal(overview30m.isStale, false);
+    assert.equal(overview30m.familyWindows.gemini.fiveHour?.stale, false);
+    assert.equal(overview30m.geminiFiveHourRemaining, 88);
+    assert.equal(mgr.getAccountRemaining(account, 'gemini'), 88);
+
+    // 3. 超过 32 分钟（如 35 分钟 = 2100 秒）后，在 30m 档位下也应如实标记为 stale
+    const after35mMs = sampled23mAgoMs + 35 * 60 * 1000;
+    const overviewAfter35m = mgr.getAccountQuotaOverview(account, { nowMs: after35mMs });
+    assert.equal(overviewAfter35m.isStale, true);
+    assert.equal(overviewAfter35m.familyWindows.gemini.fiveHour?.stale, true);
   } finally {
     await rm(dir, { recursive: true, force: true }).catch(() => {});
   }

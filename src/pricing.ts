@@ -2,8 +2,9 @@ import { normalizeModelId, stripModelProviderPrefix } from './model-identity.js'
 import {
   MODEL_PRICES,
   getEffectiveModelPriceAlias,
-  FEED_MODEL_KEYS,
+  getEffectiveFeedModelKeys,
   CATALOG_PRICING_VERSION,
+  CATALOG_PRICING_UPDATED_AT,
   getEffectiveActiveModelKeys,
   getEffectiveModelDisplayName,
 } from './model-catalog.js';
@@ -69,10 +70,12 @@ export type ApiPricingEntry = ApiPricing | ApiPricingInterval[];
 export const DEFAULT_PRICING_FEED_URLS = [
   'https://raw.githubusercontent.com/Enzoo404/gravitybox/main/assets/pricing-feed.json',
   'https://cdn.jsdelivr.net/gh/Enzoo404/gravitybox@main/assets/pricing-feed.json',
+  'https://api.github.com/repos/Enzoo404/gravitybox/contents/assets/pricing-feed.json?ref=main',
 ];
 
 export const PRICING_METADATA = {
   version: CATALOG_PRICING_VERSION || '2026-11-13',
+  updatedAt: CATALOG_PRICING_UPDATED_AT || '',
   sourceUrl: 'https://cloud.google.com/vertex-ai/pricing',
   effectiveDate: '2026-11-01',
   currency: 'USD',
@@ -414,7 +417,7 @@ function buildKnownPricedKeys(
   extraPricingKeys?: Iterable<string>
 ): Set<string> {
   const known = new Set<string>();
-  for (const k of FEED_MODEL_KEYS) {
+  for (const k of getEffectiveFeedModelKeys()) {
     const norm = normalizeModelId(k);
     if (norm) known.add(norm);
   }
@@ -504,6 +507,7 @@ export type ModelAvailabilityKind =
 export interface ModelCatalogEntryMeta {
   availability: ModelAvailabilityKind;
   displayName: string;
+  hostOrder?: number;
   availableInTiers?: string[];
   activeTier?: string;
 }
@@ -804,7 +808,8 @@ export function resolvePricingCatalogSnapshot(
   const timestampSeconds = input.timestampSeconds ?? Math.floor(effectiveNowMs / 1000);
   const locale = input.locale ?? getActiveLocale();
 
-  const publicCandidateKeys = new Set<string>(FEED_MODEL_KEYS);
+  const effectiveFeedKeys = getEffectiveFeedModelKeys();
+  const publicCandidateKeys = new Set<string>(effectiveFeedKeys);
   if (input.publicPricingKeys) {
     for (const rawKey of input.publicPricingKeys) {
       const k = String(rawKey).trim();
@@ -821,7 +826,7 @@ export function resolvePricingCatalogSnapshot(
     .map((k) => String(k).trim())
     .filter((k) => Boolean(k) && !FORBIDDEN_CATALOG_KEYS.has(k));
   const effectiveActiveSet = new Set<string>(effectiveActiveList);
-  const feedModelSet = new Set<string>(FEED_MODEL_KEYS);
+  const feedModelSet = new Set<string>(effectiveFeedKeys);
   const knownPricedKeys = buildKnownPricedKeys(rawPricingTable);
 
   let primaryKind: CatalogSourceKind | null = null;
@@ -886,7 +891,7 @@ export function resolvePricingCatalogSnapshot(
     }
   }
 
-  const primaryPricedMap = new Map<string, { pricing: ApiPricing; enabled: boolean; displayName: string }>();
+  const primaryPricedMap = new Map<string, { pricing: ApiPricing; enabled: boolean; displayName: string; hostOrder?: number }>();
   const unpricedMap = new Map<string, {
     key: string;
     displayName: string;
@@ -911,15 +916,22 @@ export function resolvePricingCatalogSnapshot(
     });
   };
 
+  const isHostMenuOrdered = primaryKind === 'live' || primaryKind === 'snapshot' || primaryKind === 'account_live';
   if (primaryKind) {
-    const allowUnpricedLive = primaryKind === 'live' || primaryKind === 'snapshot' || primaryKind === 'account_live';
-    for (const c of primaryCandidates) {
+    const allowUnpricedLive = isHostMenuOrdered;
+    for (let idx = 0; idx < primaryCandidates.length; idx += 1) {
+      const c = primaryCandidates[idx]!;
       if (c.resolvedPricing) {
         const existing = primaryPricedMap.get(c.canonicalKey);
         primaryPricedMap.set(c.canonicalKey, {
           pricing: existing?.pricing ?? c.resolvedPricing,
           enabled: (existing?.enabled ?? false) || !c.disabled,
           displayName: resolveCatalogDisplayName(c.canonicalKey, c.displayName, existing?.displayName),
+          ...(existing?.hostOrder !== undefined
+            ? { hostOrder: existing.hostOrder }
+            : isHostMenuOrdered
+              ? { hostOrder: idx }
+              : {}),
         });
         unpricedMap.delete(c.canonicalKey);
       } else if (
@@ -1011,6 +1023,7 @@ export function resolvePricingCatalogSnapshot(
     modelCatalogState[key] = {
       availability: info.enabled ? 'available' : 'tier_locked',
       displayName: info.displayName,
+      ...(info.hostOrder !== undefined ? { hostOrder: info.hostOrder } : {}),
       ...(primaryTier ? { activeTier: primaryTier } : {}),
     };
   }
@@ -1130,6 +1143,7 @@ function translateProvenanceConditionsToEn(text: string): string {
     .replace(/基础 ([A-Za-z0-9 ._-]+) 文本参考价；内部 -n 标识按同系列 Flash 基准估算/g, 'Base $1 text reference rate; internal -n variant estimated from Flash series benchmark')
     .replace(/基础 ([A-Za-z0-9 ._-]+) 标准全量定价/g, 'Base $1 standard list pricing')
     .replace(/Google Cloud 标准文本参考价；(\d{4}-\d{2}-\d{2})为本地核价起点，不代表官方调价日期/g, 'Google Cloud standard text reference rate; $1 marks local audit baseline rather than an official price-change date')
+    .replace(/Google Cloud 标准文本参考价（([A-Za-z0-9 ._-]+) 历史基准）/g, 'Google Cloud standard text reference rate ($1 historical benchmark)')
     .replace(/沿用历史基准；不代表所有区域、长上下文或缓存写入单价；需按来源逐项核对/g, 'Historical benchmark; excludes regional, long-context, or cache-write surcharges; verify against official source')
     .replace(/沿用历史基准；缓存读取 (\$[0-9.]+\/MTok)，缓存写入 (\$[0-9.]+\/MTok)/g, 'Historical benchmark; cache read $1, cache write $2')
     .replace(/文本基准；缓存读取 (\$[0-9.]+\/MTok)，缓存写入 (\$[0-9.]+\/MTok)；不含工具费用/g, 'Text benchmark; cache read $1, cache write $2; excludes tool charges')

@@ -858,7 +858,7 @@ final class MenuPanelController: NSViewController {
             updateMenuTrendBuckets(report: report, summary: summary)
         }
 
-        let models = (report["byModel"] as? [[String: Any]]) ?? (report["models"] as? [[String: Any]]) ?? []
+        let models = ModelUsageFold.foldThinkingVariants((report["byModel"] as? [[String: Any]]) ?? (report["models"] as? [[String: Any]]) ?? [])
         let modelKey = "\(L10n.shared.currentLocale):\(report["snapshotId"] ?? ""):\(periodKey):\(models.count):\(pricedCount):\(unpricedCount):\(showAllModels):\(total)"
         if modelKey != renderedUsageModelKey {
             renderedUsageModelKey = modelKey
@@ -1256,7 +1256,7 @@ final class MenuPanelController: NSViewController {
         } else if stamp > 0 {
             let date = Date(timeIntervalSince1970: stamp)
             let fmt = Calendar.current.isDateInToday(date) ? Self.timeFormatter : Self.dateTimeFormatter
-            let isStale = Date().timeIntervalSince(date) > 15 * 60
+            let isStale = Date().timeIntervalSince(date) > app.quotaStaleThresholdSeconds
             let updatedStr = L10n.t("common.updated_at", ["time": fmt.string(from: date)], fallback: "更新于 \(fmt.string(from: date))")
             quotaFooterLabel.stringValue = (!app.reachable ? L10n.t("menu_panel.quota.offline_prefix", fallback: "本机服务离线 · ") : "") + updatedStr + (isStale ? L10n.t("menu_panel.quota.stale_suffix", fallback: " · 待刷新") : "")
             quotaFooterLabel.textColor = isStale ? accessibleWarningColor() : .secondaryLabelColor

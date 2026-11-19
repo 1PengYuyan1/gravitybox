@@ -35,10 +35,10 @@ import {
 } from './quota.js';
 
 export function getGoogleClientId(): string {
-  return process.env.GRAVITYBOX_GOOGLE_CLIENT_ID || process.env.GOOGLE_CLIENT_ID || '';
+  return process.env.GRAVITYBOX_GOOGLE_CLIENT_ID || '';
 }
 export function getGoogleClientSecret(): string {
-  return process.env.GRAVITYBOX_GOOGLE_CLIENT_SECRET || process.env.GOOGLE_CLIENT_SECRET || '';
+  return process.env.GRAVITYBOX_GOOGLE_CLIENT_SECRET || '';
 }
 
 export const CLOUD_CODE_LOAD_PROJECT_ENDPOINTS = [
