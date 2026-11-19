@@ -263,6 +263,110 @@ import Cocoa
         check(QuotaPresentation.effectiveMonitoredModelKey("argon", activeAccount: freeAccPayload) == "gemini", "Free remaps disabled argon to base gemini")
         check(QuotaPresentation.monitoredScopeSubtitle(for: "all", activeAccount: freeAccPayload).contains("免费账号"), "Free all subtitle clarifies free account pools")
 
+        // v1.1.3 ModelUsageFold.foldThinkingVariants contract assertions
+        let thinkingSuffixCases: [(String, String)] = [
+            ("claude-opus-4-6-low", "claude-opus-4-6"),
+            ("claude-opus-4-6-medium", "claude-opus-4-6"),
+            ("claude-opus-4-6-high", "claude-opus-4-6"),
+            ("claude-opus-4-6-xhigh", "claude-opus-4-6"),
+            ("claude-opus-4-6-extra-high", "claude-opus-4-6"),
+            ("claude-opus-4-6-extra-low", "claude-opus-4-6"),
+            ("claude-opus-4-6-thinking", "claude-opus-4-6"),
+            ("claude-opus-4-6-max", "claude-opus-4-6"),
+            ("claude-opus-4-6-high-thinking", "claude-opus-4-6"),
+            ("gemini-3.8-flash-n", "gemini-3.8-flash-n"),
+            ("gemini-3.8-flash-exp-a", "gemini-3.8-flash-exp-a"),
+            ("未知模型", "未知模型"),
+            ("Unknown Model", "Unknown Model")
+        ]
+        for (inputModel, expectedBase) in thinkingSuffixCases {
+            check(ModelUsageFold.baseModelKey(for: inputModel) == expectedBase, "ModelUsageFold.baseModelKey(\(inputModel)) must be \(expectedBase)")
+        }
+
+        let foldRows: [[String: Any]] = [
+            ["model": "claude-opus-4-6-low", "totalTokens": 100, "promptTokens": 60, "candidatesTokens": 40, "cachedTokens": 10, "cacheWriteTokens": 5, "requestCount": 1, "estimatedUsd": 0.10, "priced": true, "unpricedTokens": 0],
+            ["model": "claude-opus-4-6-medium", "total_tokens": 200, "input_tokens": 120, "output_tokens": 80, "cached_tokens": 20, "cache_write_tokens": 10, "request_count": 2, "estimated_usd": 0.20, "priced": true, "unpriced_tokens": 0],
+            ["model": "claude-opus-4-6-high", "totalTokens": 300, "promptTokens": 180, "candidatesTokens": 120, "cachedTokens": 30, "cacheWriteTokens": 15, "requestCount": 3, "estimatedUsd": 0.30, "priced": true, "unpricedTokens": 0],
+            ["model": "claude-opus-4-6-xhigh", "totalTokens": 400, "promptTokens": 240, "candidatesTokens": 160, "cachedTokens": 40, "cacheWriteTokens": 20, "requestCount": 4, "estimatedUsd": 0.40, "priced": true, "unpricedTokens": 0],
+            ["model": "claude-opus-4-6-extra-high", "totalTokens": 500, "promptTokens": 300, "candidatesTokens": 200, "cachedTokens": 50, "cacheWriteTokens": 25, "requestCount": 5, "estimatedUsd": 0.50, "priced": true, "unpricedTokens": 0],
+            ["model": "claude-opus-4-6-extra-low", "totalTokens": 600, "promptTokens": 360, "candidatesTokens": 240, "cachedTokens": 60, "cacheWriteTokens": 30, "requestCount": 6, "estimatedUsd": 0.60, "priced": true, "unpricedTokens": 0],
+            ["model": "claude-opus-4-6-thinking", "totalTokens": 700, "promptTokens": 420, "candidatesTokens": 280, "cachedTokens": 70, "cacheWriteTokens": 35, "requestCount": 7, "estimatedUsd": 0.70, "priced": true, "unpricedTokens": 0],
+            ["model": "claude-opus-4-6-max", "totalTokens": 800, "promptTokens": 480, "candidatesTokens": 320, "cachedTokens": 80, "cacheWriteTokens": 40, "requestCount": 8, "estimatedUsd": 0.80, "priced": true, "unpricedTokens": 0],
+            ["model": "gemini-3.8-flash-n", "totalTokens": 250, "promptTokens": 150, "candidatesTokens": 100, "requestCount": 2, "estimatedUsd": 0.05, "priced": true, "unpricedTokens": 0],
+            ["model": "gemini-3.8-flash-exp-a", "totalTokens": 150, "promptTokens": 90, "candidatesTokens": 60, "requestCount": 1, "estimatedUsd": 0.03, "priced": true, "unpricedTokens": 0],
+            ["model": "gemini-3.8-flash", "totalTokens": 500, "promptTokens": 300, "candidatesTokens": 200, "requestCount": 4, "estimatedUsd": 0.12, "priced": true, "unpricedTokens": 0]
+        ]
+        let folded = ModelUsageFold.foldThinkingVariants(foldRows)
+        check(folded.count == 4, "All 8 thinking variants fold into 1 row while -n, -exp-a, and base flash stay independent")
+        check((folded[0]["model"] as? String) == "claude-opus-4-6", "Folded thinking variants expose canonical base model")
+        check((folded[0]["totalTokens"] as? Int) == 3600 && (folded[0]["total_tokens"] as? Int) == 3600, "Folded total tokens sum across all 8 variants")
+        check((folded[0]["promptTokens"] as? Int) == 2160 && (folded[0]["input_tokens"] as? Int) == 2160, "Folded prompt/input tokens sum across all 8 variants")
+        check((folded[0]["candidatesTokens"] as? Int) == 1440 && (folded[0]["output_tokens"] as? Int) == 1440, "Folded candidates/output tokens sum across all 8 variants")
+        check((folded[0]["cachedTokens"] as? Int) == 360 && (folded[0]["cached_tokens"] as? Int) == 360, "Folded cached tokens sum across all 8 variants")
+        check((folded[0]["cacheWriteTokens"] as? Int) == 180 && (folded[0]["cache_write_tokens"] as? Int) == 180, "Folded cache write tokens sum across all 8 variants")
+        check((folded[0]["requestCount"] as? Int) == 36 && (folded[0]["request_count"] as? Int) == 36, "Folded request count sums across all 8 variants")
+        let foldedUsd = (folded[0]["estimatedUsd"] as? Double) ?? -1
+        let foldedUsdSnake = (folded[0]["estimated_usd"] as? Double) ?? -1
+        check(abs(foldedUsd - 3.60) < 1e-9 && abs(foldedUsdSnake - 3.60) < 1e-9, "Folded USD cost sums across all 8 variants")
+        check((folded[0]["priced"] as? Bool) == true && (folded[0]["partiallyPriced"] as? Bool) == false, "Fully priced folded row keeps priced=true and partiallyPriced=false")
+        check((folded[1]["model"] as? String) == "gemini-3.8-flash-n" && (folded[1]["totalTokens"] as? Int) == 250 && (folded[1]["requestCount"] as? Int) == 2, "-n variant must stay as an independent row")
+        check((folded[2]["model"] as? String) == "gemini-3.8-flash-exp-a" && (folded[2]["totalTokens"] as? Int) == 150 && (folded[2]["requestCount"] as? Int) == 1, "-exp-a variant must stay as an independent row")
+        check((folded[3]["model"] as? String) == "gemini-3.8-flash" && (folded[3]["totalTokens"] as? Int) == 500, "Base flash row remains unaffected by -n and -exp-a rows")
+
+        let mixedPricingFolded = ModelUsageFold.foldThinkingVariants([
+            ["model": "gemini-4-neon-high", "totalTokens": 1000, "requestCount": 2, "estimatedUsd": 0.75, "priced": true, "unpricedTokens": 0],
+            ["model": "gemini-4-neon-thinking", "totalTokens": 500, "requestCount": 1, "estimatedUsd": 0.0, "priced": false, "unpricedTokens": 500, "pricingStatus": "expired"],
+            ["model": "gemini-4-unpriced-low", "totalTokens": 300, "requestCount": 1, "estimatedUsd": 0.0, "priced": false, "unpricedTokens": 300],
+            ["model": "gemini-4-unpriced-high", "totalTokens": 200, "requestCount": 1, "estimatedUsd": 0.0, "priced": false, "unpricedTokens": 200]
+        ])
+        check(mixedPricingFolded.count == 2, "Mixed priced/unpriced and fully unpriced groups fold separately")
+        let mixedRow = mixedPricingFolded[0]
+        check((mixedRow["model"] as? String) == "gemini-4-neon" && (mixedRow["totalTokens"] as? Int) == 1500 && (mixedRow["requestCount"] as? Int) == 3, "Mixed pricing folded row aggregates tokens and requests")
+        check(abs(((mixedRow["estimatedUsd"] as? Double) ?? -1) - 0.75) < 1e-9 && (mixedRow["unpricedTokens"] as? Int) == 500 && (mixedRow["unpriced_tokens"] as? Int) == 500, "Mixed pricing folded row preserves priced USD and unpriced tokens")
+        check((mixedRow["priced"] as? Bool) == false && (mixedRow["partiallyPriced"] as? Bool) == true && (mixedRow["pricingStatus"] as? String) == "expired", "Mixed priced/unpriced fold marks partiallyPriced=true, priced=false, and propagates expired status")
+        let unpricedRow = mixedPricingFolded[1]
+        check((unpricedRow["model"] as? String) == "gemini-4-unpriced" && (unpricedRow["priced"] as? Bool) == false && (unpricedRow["partiallyPriced"] as? Bool) == false && (unpricedRow["unpricedTokens"] as? Int) == 500, "Fully unpriced fold marks priced=false and partiallyPriced=false")
+
+        let singleFolded = ModelUsageFold.foldThinkingVariants([
+            ["model": "claude-sonnet-4-6-extra-low", "totalTokens": 120, "requestCount": 1]
+        ])
+        check(singleFolded.count == 1 && (singleFolded[0]["model"] as? String) == "claude-sonnet-4-6", "Single-row fold still normalizes thinking suffix")
+
+        // v1.1.3 LiveStatus parsing contract assertions (pricingRevision, oauthClientConfigured, debug-port-missing)
+        let defaultStatus = LiveStatus()
+        check(defaultStatus.pricingRevision == "" && defaultStatus.oauthClientConfigured == false, "Default LiveStatus initializes empty pricingRevision and oauthClientConfigured=false")
+
+        let connectedStatus = LiveStatus([
+            "mode": "connected",
+            "languageMode": "zh",
+            "translationEnabled": true,
+            "pricingRevision": "feed-20261119-sha",
+            "oauthClientConfigured": true,
+            "accountsRevision": 7,
+            "activeAccountEmail": "active@example.test",
+            "liveAccountEmail": "live@example.test"
+        ])
+        check(connectedStatus.pricingRevision == "feed-20261119-sha", "LiveStatus parses pricingRevision")
+        check(connectedStatus.oauthClientConfigured == true, "LiveStatus parses oauthClientConfigured=true")
+        check(connectedStatus.accountsRevision == "7" && connectedStatus.enabled == true && connectedStatus.color == .systemGreen, "Connected LiveStatus parses accountsRevision, enabled state, and green indicator")
+
+        L10n.shared.setLanguage("zh-Hans", notify: false)
+        let debugPortMissingZh = LiveStatus([
+            "mode": "debug-port-missing",
+            "translationEnabled": true,
+            "pricingRevision": "rev-debug",
+            "oauthClientConfigured": false
+        ])
+        check(debugPortMissingZh.enabled == false, "debug-port-missing must force enabled=false even when translationEnabled=true")
+        check(debugPortMissingZh.title == "未开启调试端口", "Chinese debug-port-missing title matches L10n asset")
+        check(debugPortMissingZh.color == .systemOrange, "debug-port-missing indicator color must be systemOrange")
+        check(debugPortMissingZh.pricingRevision == "rev-debug" && debugPortMissingZh.oauthClientConfigured == false, "debug-port-missing retains pricingRevision and oauthClientConfigured=false")
+
+        L10n.shared.setLanguage("en", notify: false)
+        let debugPortMissingEn = LiveStatus(["mode": "debug-port-missing", "locale": "en", "translationEnabled": true])
+        check(debugPortMissingEn.enabled == false && debugPortMissingEn.title == "Debug Port Not Enabled" && debugPortMissingEn.color == .systemOrange, "English debug-port-missing status maps cleanly")
+        L10n.shared.setLanguage("zh-Hans", notify: false)
+
         print("\(assertionCount) native quota assertions passed")
     }
 }
