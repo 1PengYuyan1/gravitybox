@@ -97,7 +97,7 @@ final class MenuMeterRow: NSView {
     let resetLabel = text("", size: 10.5, color: .secondaryLabelColor)
     let valueLabel = text("", size: 12, weight: .semibold, color: .labelColor)
     let bar = MenuMeterBar()
-    private var lastAppliedKey = ""
+    private(set) var lastAppliedKey = ""
 
     init(title: String) {
         super.init(frame: .zero)
@@ -1006,7 +1006,7 @@ final class MenuExpandableAccountCardView: NSBox {
 
     let detailContainer = NSStackView()
     let quotaRowsStack = NSStackView()
-    private var quotaRowViews: [MenuMeterRow] = []
+    private(set) var quotaRowViews: [MenuMeterRow] = []
     let warningLabel = text("", size: 10.5, color: accessibleWarningColor(), wrap: true)
     let timestampLabel = text("", size: 10.5, color: Design.secondary)
     let switchButton = button(L10n.t("menu_panel.account_card.switch_btn", fallback: "切换账号…"), target: nil, action: #selector(switchPressed))

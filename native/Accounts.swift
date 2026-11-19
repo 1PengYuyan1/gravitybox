@@ -278,7 +278,8 @@ final class AccountsPage: NSObject {
         for group in contract.displayGroups {
             if let pct = group.primaryPercentage {
                 let label = group.summaryLabel.isEmpty ? group.displayName : group.summaryLabel
-                let staleSuffix = group.primaryWindow?.stale == true
+                let hasStaleWindow = group.primaryWindow?.stale == true || group.windows.contains(where: { $0.stale })
+                let staleSuffix = hasStaleWindow
                     ? " (\(L10n.t("quota.stale", fallback: "已过期")))"
                     : ""
                 parts.append("\(label) \(pct)%\(staleSuffix)")

@@ -2748,6 +2748,187 @@ import Cocoa
             _ = L10n.shared.setLanguage("zh-Hans", notify: true); pump()
         }
 
+        // Backup account stale quota refresh sync between Main App (AccountsPage) and Menu Bar (MenuPanelController)
+        do {
+            let syncHost = Assistant(state: state.appendingPathComponent("quota-menu-sync-host"))
+            syncHost.configuration = try ConfigurationStore(state: syncHost.state)
+            syncHost.bridge = BackendBridge(resources: state, state: syncHost.state)
+            syncHost.reachable = true
+            let nowTs = Date().timeIntervalSince1970
+            let staleTs = nowTs - 1800
+            let activeAcc: [String: Any] = [
+                "id": "acc-main",
+                "email": "main@example.invalid",
+                "name": "MainUser",
+                "subscription_tier": "PRO",
+                "quota_last_updated": Int(nowTs),
+                "quota": ["last_updated": nowTs, "subscription_tier": "PRO"],
+                "quotaGroups": [
+                    [
+                        "key": "gemini",
+                        "displayName": "Gemini",
+                        "summaryLabel": "Gemini",
+                        "brands": ["gemini"],
+                        "isStandalone": false,
+                        "availability": "available",
+                        "quotaState": "known",
+                        "windows": [
+                            ["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.90, "stale": false, "resetCountdown": "4 小时 10 分后重置"],
+                            ["id": "weekly", "period": "weekly", "label": "每周", "known": true, "remaining": 0.85, "stale": false, "resetCountdown": "5 天 2 小时后重置"]
+                        ]
+                    ]
+                ]
+            ]
+            let makeBackupAccount: (_ stale5h: Bool, _ staleWeekly: Bool, _ known5h: Bool, _ ts: Double, _ rev: String) -> [String: Any] = { stale5h, staleWeekly, known5h, ts, rev in
+                [
+                    "id": "acc-backup",
+                    "email": "backup@example.invalid",
+                    "name": "BackupUser",
+                    "subscription_tier": "PRO",
+                    "revision": rev,
+                    "quota_last_updated": Int(ts),
+                    "quota": ["last_updated": ts, "subscription_tier": "PRO"],
+                    "quotaGroups": [
+                        [
+                            "key": "gemini",
+                            "displayName": "Gemini",
+                            "summaryLabel": "Gemini",
+                            "brands": ["gemini"],
+                            "isStandalone": false,
+                            "availability": "available",
+                            "quotaState": (stale5h && staleWeekly) ? "stale" : "known",
+                            "windows": [
+                                [
+                                    "id": "5h",
+                                    "period": "5h",
+                                    "label": "5 小时",
+                                    "known": known5h,
+                                    "remaining": known5h ? 0.88 : NSNull(),
+                                    "stale": stale5h,
+                                    "resetCountdown": known5h ? "4 小时 30 分后重置" : ""
+                                ],
+                                [
+                                    "id": "weekly",
+                                    "period": "weekly",
+                                    "label": "每周",
+                                    "known": true,
+                                    "remaining": 0.92,
+                                    "stale": staleWeekly,
+                                    "resetCountdown": "6 天 1 小时后重置"
+                                ]
+                            ]
+                        ]
+                    ]
+                ]
+            }
+
+            var currentBackup = makeBackupAccount(true, true, false, staleTs, "rev-stale:ready")
+            var currentPoolRev = "pool-rev-1"
+            syncHost.statusValue = LiveStatus(["running": true, "runningChannel": "stable", "liveAccountEmail": "main@example.invalid", "accountsRevision": currentPoolRev])
+            syncHost.bridge.fixtureReply = { payload in
+                let cmd = payload["command"] as? String ?? ""
+                if cmd == "account_list" {
+                    return [
+                        "ok": true,
+                        "activeId": "acc-main",
+                        "currentAccountId": "acc-main",
+                        "accounts": [activeAcc, currentBackup],
+                        "pendingSwitch": false
+                    ]
+                }
+                if cmd == "quota_refresh" {
+                    currentBackup = makeBackupAccount(false, false, true, nowTs, "rev-fresh:ready")
+                    currentPoolRev = "pool-rev-2"
+                    return [
+                        "ok": true,
+                        "partial": false,
+                        "message": "配额已刷新",
+                        "account": currentBackup,
+                        "quota": currentBackup["quota"] as Any,
+                        "subscription_tier": "PRO"
+                    ]
+                }
+                if cmd == "status" {
+                    return [
+                        "ok": true,
+                        "status": [
+                            "mode": "connected",
+                            "running": true,
+                            "runningChannel": "stable",
+                            "liveAccountEmail": "main@example.invalid",
+                            "accountsRevision": currentPoolRev
+                        ],
+                        "tasks": [],
+                        "taskRevision": 1
+                    ]
+                }
+                return ["ok": true]
+            }
+
+            // 1. Initial stale load into both Main App (AccountsPage) and MenuPanelController (Tab 2 expanded backup card)
+            let syncAccountsPage = AccountsPage(app: syncHost)
+            syncHost.accountsPage = syncAccountsPage
+            let syncMenu = syncHost.ensureMenuPanelController()
+            let syncMenuWin = NSWindow(contentRect: NSRect(x: 0, y: 0, width: MenuPanelController.panelWidth, height: MenuPanelController.defaultPanelHeight), styleMask: [.titled], backing: .buffered, defer: false)
+            syncMenuWin.contentViewController = syncMenu
+            syncHost.fetchAccountList(notifyPage: true); pump()
+            syncMenu.panelWillOpen(); syncMenu.selectTab(2, persist: true); pump()
+            syncMenu.toggleAccountExpanded("acc-backup"); pump()
+
+            let backupCardInMenu = syncMenu.accountsCardsStack.arrangedSubviews.compactMap { $0 as? MenuExpandableAccountCardView }.first { $0.accountId == "acc-backup" }
+            check(backupCardInMenu != nil, "Menu accounts tab must mount backup account card")
+            check(backupCardInMenu?.quotaRowViews.first?.valueLabel.stringValue == "已过期", "Stale unknown 5h window in menu backup card must initially render 已过期 (got \(backupCardInMenu?.quotaRowViews.first?.valueLabel.stringValue ?? ""))")
+
+            // Verify partial window staleness in Main App collapsed summary (5h fresh, weekly stale -> still marks 已过期)
+            currentBackup = makeBackupAccount(false, true, true, staleTs, "rev-partial-stale:ready")
+            syncAccountsPage.fetch(["accounts": [activeAcc, currentBackup], "activeId": "acc-main", "pendingSwitch": false]); pump()
+            if !syncAccountsPage.isAllCollapsedMode {
+                syncAccountsPage.toggleCollapseAllAccounts(); pump()
+            }
+            let partialCollapsedTexts = allTextValues(syncAccountsPage.cardsStack)
+            check(partialCollapsedTexts.contains { $0.contains("Gemini 88% (已过期)") }, "Collapsed summary in Main App must disclose (已过期) when any window in the group is stale: \(partialCollapsedTexts)")
+
+            // 2. Simulate in-flight account_list race: old account_list starts while backup is still stale, then backup updates before old account_list returns
+            currentBackup = makeBackupAccount(true, true, false, staleTs, "rev-stale:ready")
+            syncHost.menuTracking = false
+            syncHost.fetchAccountList(notifyPage: true) // in-flight request #1 captures stale snapshot
+            check(syncHost.accountListInFlight == true, "First fetchAccountList must mark accountListInFlight")
+            currentBackup = makeBackupAccount(false, false, true, nowTs, "rev-fresh:ready")
+            syncHost.fetchAccountList(notifyPage: true) // request #2 arrives while #1 is still in flight
+            check(syncHost.accountListPendingRefetch == true, "fetchAccountList during in-flight account_list must queue accountListPendingRefetch instead of dropping")
+            pump()
+            pump()
+            check(backupCardInMenu?.quotaRowViews.first?.valueLabel.stringValue == "88%", "Queued accountListPendingRefetch must replace stale in-flight payload with fresh 88% in MenuPanelController (got \(backupCardInMenu?.quotaRowViews.first?.valueLabel.stringValue ?? ""))")
+
+            // 2b. Reset backup to stale, then run single-account refresh in Main App while menu popover is closed
+            currentBackup = makeBackupAccount(true, true, false, staleTs, "rev-stale-2:ready")
+            syncHost.fetchAccountList(notifyPage: true); pump()
+            check(backupCardInMenu?.quotaRowViews.first?.valueLabel.stringValue == "已过期", "Menu backup card must reset to 已过期 before single-account refresh")
+            syncHost.refreshSingleAccountQuota(id: "acc-backup")
+            pump()
+            pump()
+
+            // Verify MenuPanelController and cachedAccounts both reflect the fresh quota without reopening or manual refresh in menu bar
+            check(backupCardInMenu?.quotaRowViews.first?.valueLabel.stringValue == "88%", "Menu backup account 5h quota must update from 已过期 to 88% after Main App refresh (got \(backupCardInMenu?.quotaRowViews.first?.valueLabel.stringValue ?? ""))")
+            check(!(backupCardInMenu?.quotaRowViews.first?.resetLabel.stringValue.contains("过期") ?? true), "Menu backup account 5h resetLabel must clear 数据已过期 after Main App refresh")
+            check(!(backupCardInMenu?.quotaRowViews.last?.resetLabel.stringValue.contains("过期") ?? true), "Menu backup account weekly resetLabel must clear 数据已过期 after Main App refresh")
+            let refreshedCollapsedTexts = allTextValues(syncAccountsPage.cardsStack)
+            check(refreshedCollapsedTexts.contains { $0.contains("Gemini 88%") && !$0.contains("已过期") }, "Main App collapsed summary must also clear (已过期) after refresh: \(refreshedCollapsedTexts)")
+
+            // 3. Verify opening MenuPanelController on Tab 2 when lastAccountListFetchAt is >= 15s old proactively refetches account_list
+            currentBackup = makeBackupAccount(false, false, true, nowTs + 10, "rev-fresh-2:ready")
+            if var g = (currentBackup["quotaGroups"] as? [[String: Any]])?.first,
+               var ws = g["windows"] as? [[String: Any]], !ws.isEmpty {
+                ws[0]["remaining"] = 0.96
+                g["windows"] = ws
+                currentBackup["quotaGroups"] = [g]
+            }
+            syncHost.lastAccountListFetchAt = Date(timeIntervalSinceNow: -20)
+            syncMenu.panelWillOpen(); pump()
+            check(backupCardInMenu?.quotaRowViews.first?.valueLabel.stringValue == "96%", "Reopening MenuPanelController after 15s staleness window must proactively refetch account_list and render 96% (got \(backupCardInMenu?.quotaRowViews.first?.valueLabel.stringValue ?? ""))")
+            syncMenuWin.orderOut(nil)
+        }
+
         let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]
         try JSONSerialization.data(withJSONObject:result,options:[.prettyPrinted,.sortedKeys]).write(to:output.appendingPathComponent("native-ui-results.json"))
         window.orderOut(nil)

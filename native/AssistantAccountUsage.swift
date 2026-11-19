@@ -201,18 +201,45 @@ extension Assistant {
             switch response {
             case .failure(let error):
                 self.singleAccountRefreshErrors[id] = error.localizedDescription
-            case .success:
+            case .success(let value):
                 self.singleAccountRefreshErrors[id] = nil
                 if let globalErr = self.quotaRefreshError, !InterfaceText.isMultiAccountSummary(globalErr) {
                     self.quotaRefreshError = nil
                 }
+                if var updated = value["account"] as? [String: Any] {
+                    if updated["id"] == nil { updated["id"] = id }
+                    self.applyRefreshedAccountInPlace(updated, id: id)
+                }
                 self.fetchAccountList(notifyPage: true)
                 self.overview?.update(force: true)
+                self.refresh()
             }
             self.updateQuotaRefreshControls()
             self.menuPanelController?.syncFromAssistant()
             completion?(response)
         }
+    }
+
+    func applyRefreshedAccountInPlace(_ updated: [String: Any], id: String) {
+        if let idx = cachedAccounts.firstIndex(where: { ($0["id"] as? String) == id }) {
+            cachedAccounts[idx] = updated
+        }
+        if var payload = cachedAccountsBootstrapPayload,
+           var list = payload["accounts"] as? [[String: Any]],
+           let idx = list.firstIndex(where: { ($0["id"] as? String) == id }) {
+            list[idx] = updated
+            payload["accounts"] = list
+            cachedAccountsBootstrapPayload = payload
+            accountsPage?.fetch(payload)
+        } else if !cachedAccounts.isEmpty {
+            accountsPage?.fetch([
+                "accounts": cachedAccounts,
+                "activeId": activeAccountId,
+                "currentAccountId": activeAccountId,
+                "pendingSwitch": accountsPage?.hasPendingSwitch ?? false
+            ])
+        }
+        scheduleUIBootstrapSave()
     }
 
     func buildAccountSwitchMenu() -> NSMenu {
@@ -409,7 +436,8 @@ extension Assistant {
     }
     func finishQuotaRefresh(error: String?) {
         quotaRefreshing = false; quotaRefreshStartedAt = nil; pendingAccountTaskId = nil; quotaRefreshError = error; quotaRefreshPollTimer?.invalidate(); quotaRefreshPollTimer = nil
-        updateQuotaRefreshControls(); fetchAccountList(notifyPage: true); overview?.update(force: true)
+        if error == nil { singleAccountRefreshErrors.removeAll() }
+        updateQuotaRefreshControls(); fetchAccountList(notifyPage: true); overview?.update(force: true); menuPanelController?.syncFromAssistant(); refresh()
     }
     func updateQuotaRefreshControls() {
         let available = reachable && (pendingAccountTaskId == nil || quotaRefreshing)
@@ -434,13 +462,25 @@ extension Assistant {
     func fetchAccountList(notifyPage: Bool = true, completion: ((Result<[String: Any], Error>) -> Void)? = nil) {
         if let completion { accountListWaiters.append(completion) }
         if notifyPage { accountListPendingNotifyPage = true }
-        guard !accountListInFlight else { return }
+        guard !accountListInFlight else {
+            accountListPendingRefetch = true
+            return
+        }
         accountListInFlight = true
         accountListGeneration += 1
         let generation = accountListGeneration
+        let requestRevision = statusValue.accountsRevision
+        let requestLiveEmail = statusValue.liveAccountEmail
         lastAccountListFetchAt = Date()
         bridge.send(["command": "account_list"]) { [weak self] res in
             guard let self else { return }
+            if self.accountListPendingRefetch {
+                self.accountListPendingRefetch = false
+                self.accountListInFlight = false
+                let pendingNotify = self.accountListPendingNotifyPage
+                self.fetchAccountList(notifyPage: pendingNotify)
+                return
+            }
             self.accountListInFlight = false
             let waiters = self.accountListWaiters
             let shouldNotifyPage = self.accountListPendingNotifyPage
@@ -449,8 +489,12 @@ extension Assistant {
             if case .success(let val) = res, generation >= self.accountListGeneration, let list = val["accounts"] as? [[String: Any]] {
                 self.bootstrappedAccounts = false
                 self.cachedAccountsBootstrapPayload = val
-                self.lastFetchedAccountsRevision = self.statusValue.accountsRevision
-                self.lastFetchedLiveEmail = self.statusValue.liveAccountEmail
+                if self.statusValue.accountsRevision == requestRevision {
+                    self.lastFetchedAccountsRevision = requestRevision
+                }
+                if self.statusValue.liveAccountEmail == requestLiveEmail {
+                    self.lastFetchedLiveEmail = requestLiveEmail
+                }
                 var resolvedActiveId = val["activeId"] as? String ?? (val["currentAccountId"] as? String ?? "")
                 if !self.statusValue.liveAccountEmail.isEmpty,
                    let live = list.first(where: { ($0["email"] as? String ?? "").caseInsensitiveCompare(self.statusValue.liveAccountEmail) == .orderedSame }),
@@ -484,6 +528,7 @@ extension Assistant {
                 }
                 self.scheduleUIBootstrapSave()
                 self.updateQuotaRefreshControls()
+                self.menuPanelController?.syncFromAssistant()
                 if shouldNotifyPage { self.accountsPage?.fetch(val) }
             }
             for waiter in waiters { waiter(res) }

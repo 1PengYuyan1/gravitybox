@@ -127,6 +127,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
     var lastFetchedAccountsRevision = ""
     var lastFetchedLiveEmail = ""
     var accountListInFlight = false
+    var accountListPendingRefetch = false
     var accountListPendingNotifyPage = false
     var accountListGeneration = 0
     var accountListWaiters: [(Result<[String: Any], Error>) -> Void] = []

@@ -630,6 +630,9 @@ final class MenuPanelController: NSViewController {
 
     private func ensureDataForActiveTab(force: Bool) {
         guard app.reachable else { return }
+        let revisionChanged = !app.statusValue.accountsRevision.isEmpty && app.statusValue.accountsRevision != app.lastFetchedAccountsRevision
+        let accountListStale = app.lastAccountListFetchAt != .distantPast && Date().timeIntervalSince(app.lastAccountListFetchAt) >= 15.0
+        let needsAccountSync = app.cachedAccounts.isEmpty || app.bootstrappedAccounts || revisionChanged || accountListStale
         switch selectedTab {
         case 0:
             let periodKey = Self.periods[selectedPeriod]
@@ -643,12 +646,16 @@ final class MenuPanelController: NSViewController {
                 } else {
                     app.refreshAccountQuotas()
                 }
+            } else if needsAccountSync {
+                app.fetchAccountList(notifyPage: true)
             }
         default:
             if app.cachedAccounts.isEmpty || app.bootstrappedAccounts {
                 app.fetchAccountList(notifyPage: true)
             } else if force {
                 app.refreshAccountQuotas()
+            } else if needsAccountSync {
+                app.fetchAccountList(notifyPage: true)
             }
         }
     }
@@ -723,10 +730,14 @@ final class MenuPanelController: NSViewController {
             switch selectedTab {
             case 0:
                 syncUsageTabFromCache()
+                if !renderedQuotaTabKey.isEmpty { syncQuotaTab() }
+                if !accountCardsById.isEmpty { syncAccountsTab() }
             case 1:
                 syncQuotaTab()
+                if !accountCardsById.isEmpty { syncAccountsTab() }
             default:
                 syncAccountsTab()
+                if !renderedQuotaTabKey.isEmpty { syncQuotaTab() }
             }
         }
         if app.reachable && (app.menuTracking || app.menuPopover?.isShown == true) && selectedTab == 0 {
@@ -1370,7 +1381,8 @@ final class MenuPanelController: NSViewController {
             let cardsSummary = renderedAccountIds.map { id -> String in
                 guard let card = accountCardsById[id] else { return id }
                 guard expandedAccountIds.contains(id) else { return "\(id):0" }
-                return "\(id):1:\(card.quotaRowsStack.arrangedSubviews.count):\(card.warningLabel.isHidden ? "" : card.warningLabel.stringValue)"
+                let rowsKey = card.quotaRowViews.map(\.lastAppliedKey).joined(separator: ",")
+                return "\(id):1:\(card.quotaRowsStack.arrangedSubviews.count):\(rowsKey):\(card.warningLabel.isHidden ? "" : card.warningLabel.stringValue):\(card.timestampLabel.isHidden ? "" : card.timestampLabel.stringValue)"
             }.joined(separator: "|")
             tabFingerprint = "a:\(accountsCardsStack.arrangedSubviews.count):\(app.reachable):\(cardsSummary)"
         }
