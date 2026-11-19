@@ -22,7 +22,7 @@ test('P0-12: mergePricingEntries 与 resolvePricingForTimestamp 阻断基础条�
   const june2027Ms = Date.parse('2027-06-01T00:00:00Z');
   const june2027Sec = Math.floor(june2027Ms / 1000);
 
-  for (const model of ['gemini-3.8-flash', 'gemini-4-argon', 'gemini-4-hydrogen']) {
+  for (const model of ['gemini-3.8-flash', 'gemini-4-argon', 'gemini-4-hydrogen', 'gemini-4-neon']) {
     const resolved = resolvePricingForTimestamp(merged[model], june2027Sec, model);
     assert.ok(resolved, `${model} 在 2027-06-01 应解析出有效区间`);
     assert.equal(resolved.provenance?.validUntil, undefined, `${model} 开放区间不得继承过期 validUntil`);
@@ -151,6 +151,7 @@ test('P1-14: matchPricingKeys 识别 xhigh / extra-high 等思考后缀与远端
   assert.equal(matchPricingKeys('claude-opus-5-5-xhigh'), 'claude-opus-5-5');
   assert.equal(matchPricingKeys('gemini-3.8-flash-extra-high'), 'gemini-3.8-flash');
   assert.equal(matchPricingKeys('gemini-4-neon-high', ['gemini-4-neon']), 'gemini-4-neon');
+  assert.equal(matchPricingKeys('gemini-5-xenon-high', ['gemini-5-xenon']), 'gemini-5-xenon');
   assert.equal(matchPricingKeys('claude-sonnet-6-0-thinking-20270301', ['claude-sonnet-6-0']), 'claude-sonnet-6-0');
 
   const customTable = {

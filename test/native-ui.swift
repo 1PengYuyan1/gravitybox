@@ -608,7 +608,8 @@ import Cocoa
             func subviewsRecursive(_ v: NSView) -> [NSView] { [v] + v.subviews.flatMap { subviewsRecursive($0) } }
             let allSubviews = subviewsRecursive(tile)
             check(allSubviews.filter { $0 is NSImageView }.count == 1, "\(tile.metricKey) tile must contain only 1 micro icon and no chevron arrow")
-            check(allSubviews.filter { $0 is NSTextField }.count == 2, "\(tile.metricKey) tile must contain only title and value labels without subtitle lines")
+            let visibleTextFields = allSubviews.compactMap { $0 as? NSTextField }.filter { !$0.isHidden && !($0.superview?.isHidden ?? false) }
+            check(visibleTextFields.count == 2 && tile.statusBadge.isHidden, "\(tile.metricKey) tile must contain only title and value visible labels when status badge is hidden")
         }
         panelHost.appearance = NSAppearance(named: .aqua); panelHost.contentView?.layoutSubtreeIfNeeded(); pump()
         check(menuPanel.contentScroll.contentView.frame.width == MenuPanelController.panelWidth && (menuPanel.contentScroll.verticalScroller?.frame.width ?? 0) == 0, "Menu panel content must never reserve a scroller gutter or squeeze content width")
@@ -638,7 +639,8 @@ import Cocoa
             let subs = rowSubviews(modelRow)
             check(subs.filter { $0 is NSButton }.isEmpty, "MenuModelUsageRow must contain 0 NSButtons (no headerButton)")
             check(subs.filter { $0 is NSImageView }.count == 1, "MenuModelUsageRow must contain only 1 icon and no chevronView")
-            check(subs.filter { $0 is NSTextField }.count == 2, "MenuModelUsageRow must contain exactly 2 labels without detailLabel")
+            let visibleRowTextFields = subs.compactMap { $0 as? NSTextField }.filter { !$0.isHidden && !($0.superview?.isHidden ?? false) }
+            check(visibleRowTextFields.count == 2 && modelRow.statusBadge.isHidden, "MenuModelUsageRow must contain exactly 2 visible labels without detailLabel when statusBadge is hidden")
             check(subs.filter { $0 is MenuMeterBar }.count == 1, "MenuModelUsageRow must contain shareBar")
         }
         check(menuPanel.contentScroll.contentView.frame.width == MenuPanelController.panelWidth && (menuPanel.contentScroll.verticalScroller?.frame.width ?? 0) == 0, "Expanded menu panel must never reserve a scroller gutter or squeeze content width")
@@ -1632,7 +1634,8 @@ import Cocoa
             check(pricingSheet.retiredListStack?.isHidden == true, "retiredListStack must be hidden by default")
             check(pricingSheet.renderedRetiredSummaryLines.count == 2 && pricingSheet.renderedRetiredSummaryLines[0].contains("claude-3.5-sonnet [已核对]") && pricingSheet.renderedRetiredSummaryLines[1].contains("gemini-2.5-pro [历史基准]"), "renderedRetiredSummaryLines must track retired models sorted by key")
             let visibleSheetTexts = allTextValues(pricingSheet.sheet.contentView!)
-            check(visibleSheetTexts.contains("Gemini 4 Argon") && visibleSheetTexts.contains("Gemini 4.5 Live") && visibleSheetTexts.contains("已在 Antigravity 检测到该模型，等待公开价格表补充单价"), "Sheet must render displayName and unpriced live description")
+            check(!pricingSheet.subtitleLabel.isHidden && pricingSheet.subtitleLabel.stringValue == "已同步最新公开价格表；另有 2 组新模型待上游补充单价", "Sheet header subtitle must announce unpriced model count when synced: \(pricingSheet.subtitleLabel.stringValue)")
+            check(visibleSheetTexts.contains("Gemini 4 Argon") && visibleSheetTexts.contains("Gemini 4.5 Live") && visibleSheetTexts.contains { $0.contains("检测到 2 组新上线模型暂未公布公开单价") }, "Sheet must render displayName and unified unpriced summary banner")
             func findPricingScrollView(_ v: NSView) -> NSScrollView? {
                 if let sv = v as? NSScrollView { return sv }
                 for sub in v.subviews { if let found = findPricingScrollView(sub) { return found } }
@@ -2075,7 +2078,8 @@ import Cocoa
             enPricingSheet.retiredToggleBtn?.performClick(nil); pump()
             check(enPricingSheet.retiredToggleBtn?.title == "▾ Deprecated Models (2 · Historical Ledger Only)", "Expanded English toggle title must match spec: \(enPricingSheet.retiredToggleBtn?.title ?? "nil")")
             let enPricingTexts = allTextValues(enPricingSheet.sheet.contentView!)
-            check(enPricingTexts.contains("New · Rate Pending") && enPricingTexts.contains("Locked on Current Plan") && enPricingTexts.contains("Active on ULTRA") && enPricingTexts.contains("Deprecated") && enPricingTexts.contains("Detected in Antigravity; awaiting public pricing feed rate"), "English pricing sheet must localize all new badges and descriptions: \(enPricingTexts)")
+            check(!enPricingSheet.subtitleLabel.isHidden && enPricingSheet.subtitleLabel.stringValue == "Synced latest pricing feed; 1 new model(s) awaiting upstream rates", "English pricing sheet header subtitle must align with unpriced model count: \(enPricingSheet.subtitleLabel.stringValue)")
+            check(enPricingTexts.contains("New · Rate Pending") && enPricingTexts.contains("Locked on Current Plan") && enPricingTexts.contains("Active on ULTRA") && enPricingTexts.contains("Deprecated") && enPricingTexts.contains { $0.contains("Detected 1 newly launched model(s) without public rates yet") }, "English pricing sheet must localize all badges and unified banner: \(enPricingTexts)")
             let enPricingCjkLeaks = enPricingTexts.filter { $0.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil }
             check(enPricingCjkLeaks.isEmpty, "English pricing sheet must not leak Chinese characters: \(enPricingCjkLeaks)")
             enPricingSheet.closeSheet(); pump()
@@ -2597,6 +2601,151 @@ import Cocoa
             assistant.statusValue = prevStatus
             assistant.reachable = prevReachable
             dbgPanelHost.orderOut(nil)
+        }
+
+        // Unpriced / partial pricing UI decoupling, model badges, and PricingSyncSheet variant folding (zh-Hans & en)
+        do {
+            let partialHost = Assistant(state: state.appendingPathComponent("partial-pricing-ui"))
+            partialHost.configuration = try ConfigurationStore(state: partialHost.state)
+            partialHost.bridge = BackendBridge(resources: state, state: partialHost.state)
+            partialHost.reachable = true
+            let sampleModels: [[String: Any]] = [
+                ["model": "gemini-5-nova", "totalTokens": 12_100_000, "promptTokens": 11_000_000, "candidatesTokens": 100_000, "cachedTokens": 1_000_000, "requestCount": 58, "estimatedUsd": 0.0, "priced": false, "partiallyPriced": false, "unpricedTokens": 12_100_000],
+                ["model": "gemini-4-hydrogen", "totalTokens": 11_000_000, "promptTokens": 1_000_000, "candidatesTokens": 100_000, "cachedTokens": 9_900_000, "requestCount": 69, "estimatedUsd": 3.16, "priced": true, "partiallyPriced": false, "unpricedTokens": 0, "pricingStatus": "confirmed"]
+            ]
+            partialHost.bridge.fixtureReply = { payload in
+                let cmd = payload["command"] as? String ?? ""
+                if cmd == "dashboard_summary" {
+                    return [
+                        "ok": true,
+                        "accounts": [
+                            "activeName": "Alex", "activeEmail": "alex@example.invalid", "activeTier": "ULTRA",
+                            "liveAccountEmail": "alex@example.invalid", "isLiveVerified": true,
+                            "quotaGroups": [
+                                ["id": "gemini", "displayName": "Gemini", "fiveHourRemaining": 94, "weeklyRemaining": 88]
+                            ]
+                        ],
+                        "usage": [
+                            "todayTokens": 23_100_000, "totalTokens": 4_730_000_000, "estimatedUsd": 3.16, "allTimeEstimatedUsd": 930.70,
+                            "requestCount": 127, "totalRequestCount": 38964,
+                            "todayPricedModels": 1, "todayUnpricedModels": 1, "pricedModels": 2, "unpricedModels": 1,
+                            "databasesScanned": 10, "databasesDiscovered": 10, "availability": "complete",
+                            "todayByModel": sampleModels, "todayHourly": []
+                        ]
+                    ]
+                }
+                if cmd == "usage_summary" {
+                    return [
+                        "ok": true, "period": payload["period"] as? String ?? "all", "snapshotId": "partial-snap-1",
+                        "summary": [
+                            "totalTokens": 4_730_000_000, "promptTokens": 100_000_000, "cachedTokens": 4_600_000_000, "candidatesTokens": 30_000_000,
+                            "requestCount": 38964, "estimatedUsd": 930.70, "pricedModels": 2, "unpricedModels": 1,
+                            "databasesScanned": 10, "databasesDiscovered": 10, "availability": "complete", "lastScannedAt": Date().timeIntervalSince1970
+                        ],
+                        "byModel": sampleModels, "models": sampleModels, "dailyTrends": [], "todayHourly": []
+                    ]
+                }
+                return ["ok": true]
+            }
+
+            _ = L10n.shared.setLanguage("zh-Hans", notify: true); pump()
+            let partialWindow = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 960, height: 640), styleMask: [.titled], backing: .buffered, defer: false)
+            partialHost.window = partialWindow
+            let partialOverview = DashboardPage(app: partialHost)
+            let partialUsage = UsagePage(app: partialHost)
+            let ovBox = NSView(frame: NSRect(x: 0, y: 0, width: 880, height: 580))
+            ovBox.addSubview(partialOverview.view); pin(partialOverview.view, to: ovBox)
+            partialWindow.contentView = ovBox
+            partialOverview.fetch(); pump()
+            ovBox.layoutSubtreeIfNeeded(); pump()
+
+            check(partialOverview.usageMetric.stringValue == "$3.16", "Partial overview KPI must show pure USD without prefix: \(partialOverview.usageMetric.stringValue)")
+            check(partialOverview.costMetricCard?.statusBadge?.isHidden == false && partialOverview.costMetricCard?.statusBadge?.title == "部分计价", "Overview cost card must display 部分计价 status badge")
+            check(partialOverview.usageDetail.stringValue == "含 1 款待定价 · 累计部分 $930.70", "Overview cost detail must surface pending count and partial total: \(partialOverview.usageDetail.stringValue)")
+            let zhCostNatW = (partialOverview.usageMetric.stringValue as NSString).size(withAttributes: [.font: partialOverview.usageMetric.font!]).width
+            check(partialOverview.usageMetric.bounds.width + 1.0 >= ceil(zhCostNatW), "Overview pure USD value must not truncate (\(partialOverview.usageMetric.bounds.width) < \(zhCostNatW))")
+            let bentoTexts = allTextValues(partialOverview.bentoRightStack)
+            check(bentoTexts.contains("待定价"), "Overview bento active models must show 待定价 pill for unpriced model: \(bentoTexts)")
+
+            let usgBox = NSView(frame: NSRect(x: 0, y: 0, width: 880, height: 580))
+            usgBox.addSubview(partialUsage.view); pin(partialUsage.view, to: usgBox)
+            partialWindow.contentView = usgBox
+            partialUsage.fetch(force: true); pump()
+            usgBox.layoutSubtreeIfNeeded(); pump()
+            check(partialUsage.usdMetric.stringValue == "$930.70", "UsagePage KPI must show pure USD without prefix: \(partialUsage.usdMetric.stringValue)")
+            check(!partialUsage.costStatusBadge.isHidden && partialUsage.costStatusBadge.title == "部分计价", "UsagePage cost card must show 部分计价 pill")
+            check(!partialUsage.usdDetail.isHidden && partialUsage.usdDetail.stringValue.contains("含 1 款待定价模型"), "UsagePage usdDetail must explain pending model: \(partialUsage.usdDetail.stringValue)")
+
+            let partialMenu = partialHost.ensureMenuPanelController()
+            let partialPanelHost = NSWindow(contentRect: NSRect(x: 0, y: 0, width: MenuPanelController.panelWidth, height: MenuPanelController.defaultPanelHeight), styleMask: [.titled], backing: .buffered, defer: false)
+            partialPanelHost.contentViewController = partialMenu
+            partialMenu.selectTab(0, persist: false); partialMenu.panelWillOpen(); pump()
+            partialPanelHost.setContentSize(partialMenu.preferredContentSize); partialPanelHost.contentView?.layoutSubtreeIfNeeded(); pump()
+            check(partialMenu.costTile.valueLabel.stringValue == "$930.70", "MenuPanel costTile must display pure $930.70 without prefix: \(partialMenu.costTile.valueLabel.stringValue)")
+            check(!partialMenu.costTile.statusBadge.isHidden && partialMenu.costTile.statusBadge.title == "部分", "MenuPanel costTile must show 部分 status badge")
+            check(partialMenu.usageFooterLabel.stringValue.contains("1 款模型待定价"), "MenuPanel footer must note pending models: \(partialMenu.usageFooterLabel.stringValue)")
+            let menuCostNatW = (partialMenu.costTile.valueLabel.stringValue as NSString).size(withAttributes: [.font: partialMenu.costTile.valueLabel.font!]).width
+            check(partialMenu.costTile.valueLabel.bounds.width + 1.0 >= ceil(menuCostNatW), "MenuPanel pure USD value must not truncate (\(partialMenu.costTile.valueLabel.bounds.width) < \(menuCostNatW))")
+            let menuModelsTexts = allTextValues(partialMenu.modelsListStack)
+            check(menuModelsTexts.contains("待定价"), "MenuPanel models list must show 待定价 badge on unpriced row: \(menuModelsTexts)")
+
+            // PricingSyncSheetController variant folding check (5 Neon/Nova variants -> 1 card + unified banner + subtitle)
+            let foldedSheet = PricingSyncSheetController(app: partialHost)
+            foldedSheet.show(in: partialWindow, payload: [
+                "synced": true,
+                "status": ["lastCheckAt": 1794539910722.0, "modelCount": 2],
+                "unpricedLiveModels": [
+                    ["key": "gemini-5-nova-high", "displayName": "Gemini 5 Nova (High)", "disabled": false],
+                    ["key": "gemini-5-nova-xhigh", "displayName": "Gemini 5 Nova (XHigh)", "disabled": false],
+                    ["key": "gemini-5-nova-medium", "displayName": "Gemini 5 Nova (Medium)", "disabled": false],
+                    ["key": "gemini-5-nova-low", "displayName": "Gemini 5 Nova (Low)", "disabled": false],
+                    ["key": "gemini-pro-orchestrator-nova", "displayName": "Orchestrator (Nova)", "disabled": false],
+                ],
+                "prices": [
+                    "gemini-4-hydrogen": ["input": 1.5, "output": 7.5, "cached": 0.075]
+                ],
+                "pricingStatus": ["gemini-4-hydrogen": "confirmed"],
+                "modelCatalogState": ["gemini-4-hydrogen": ["availability": "available", "displayName": "Gemini 4 Hydrogen"]],
+            ])
+            pump()
+            check(foldedSheet.summaryPill.title.hasSuffix("· 2 款"), "Folded PricingSyncSheet must count grouped unpriced + priced as 2: \(foldedSheet.summaryPill.title)")
+            check(foldedSheet.renderedSummaryLines.count == 2, "5 Nova variants must fold into 1 unpriced group + 1 priced card (got \(foldedSheet.renderedSummaryLines.count))")
+            let foldedZhTexts = allTextValues(foldedSheet.sheet.contentView!)
+            check(foldedZhTexts.contains("涵盖变体：Low · Medium · High · XHigh · Orchestrator"), "Folded group card must list combined variants: \(foldedZhTexts)")
+
+            _ = L10n.shared.setLanguage("en", notify: true); pump()
+            let enPartialOverview = DashboardPage(app: partialHost)
+            let enPartialUsage = UsagePage(app: partialHost)
+            let enPartialMenu = MenuPanelController(app: partialHost)
+            let enOvBox = NSView(frame: NSRect(x: 0, y: 0, width: 880, height: 580))
+            enOvBox.addSubview(enPartialOverview.view); pin(enPartialOverview.view, to: enOvBox)
+            partialWindow.contentView = enOvBox
+            enPartialOverview.fetch(); pump()
+            enOvBox.layoutSubtreeIfNeeded(); pump()
+
+            let enUsgBox = NSView(frame: NSRect(x: 0, y: 0, width: 880, height: 580))
+            enUsgBox.addSubview(enPartialUsage.view); pin(enPartialUsage.view, to: enUsgBox)
+            partialWindow.contentView = enUsgBox
+            enPartialUsage.fetch(force: true); pump()
+            enUsgBox.layoutSubtreeIfNeeded(); pump()
+
+            partialPanelHost.contentViewController = enPartialMenu
+            enPartialMenu.selectTab(0, persist: false); enPartialMenu.panelWillOpen(); pump()
+            partialPanelHost.setContentSize(enPartialMenu.preferredContentSize); partialPanelHost.contentView?.layoutSubtreeIfNeeded(); pump()
+
+            check(enPartialOverview.costMetricCard?.statusBadge?.title == "Partial" && enPartialOverview.usageMetric.stringValue == "$3.16", "English Overview partial card must keep pure USD and Partial pill")
+            check(!enPartialMenu.costTile.statusBadge.isHidden && enPartialMenu.costTile.statusBadge.title == "Partial" && enPartialMenu.costTile.valueLabel.stringValue == "$930.70", "English MenuPanel costTile must keep pure USD and Partial pill")
+            check(!enPartialUsage.costStatusBadge.isHidden && enPartialUsage.costStatusBadge.title == "Partial" && enPartialUsage.usdMetric.stringValue == "$930.70", "English UsagePage cost must keep pure USD and Partial pill")
+            let foldedEnTexts = allTextValues(foldedSheet.sheet.contentView!)
+            check(foldedEnTexts.contains("Includes variants: Low · Medium · High · XHigh · Orchestrator"), "English folded group card must localize variants list: \(foldedEnTexts)")
+            let partialEnLeaks = (allTextValues(enOvBox) + allTextValues(enUsgBox) + allTextValues(enPartialMenu.view) + foldedEnTexts)
+                .filter { $0.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil }
+            check(partialEnLeaks.isEmpty, "English partial-pricing views must not leak Chinese characters: \(partialEnLeaks)")
+
+            foldedSheet.closeSheet(); pump()
+            partialPanelHost.orderOut(nil)
+            partialWindow.orderOut(nil)
+            _ = L10n.shared.setLanguage("zh-Hans", notify: true); pump()
         }
 
         let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]

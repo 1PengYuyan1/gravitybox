@@ -28,12 +28,13 @@ const INTERNAL_DERIVATIVE_RE = /(?:^|[-_])(?:trial|control|tiered|safety[-_]le|e
 
 // 仅作为新模型雷达候选的现代主流对话模型族，过滤老旧历史模型与非文本模态条目
 const MODERN_RADAR_MODEL_RE = /^(?:gemini-(?:3\.[5-9]|[4-9](?:\.\d+)?)|claude-(?:(?:sonnet|opus|haiku)-[4-9]|[4-9](?:[-.]\d+)?-(?:sonnet|opus|haiku))|gpt-(?:4\.[5-9]|[5-9](?:\.\d+)?)|o[3-9](?:-|$))/i;
-const IGNORED_RADAR_SUFFIX_RE = /(?:batch|audio|realtime|image|video|tts|stt|transcribe|embed|moderation|search|deep-research|computer-use|free|:free|:extended)/i;
+const IGNORED_RADAR_SUFFIX_RE = /(?:batch|audio|realtime|image|video|tts|stt|transcribe|embed|moderation|search|deep-research|computer-use|cyber-permissive|free|:free|:extended)/i;
 
 // 常见目录 key 到官方/LiteLLM 常见别名的补充映射
 const CATALOG_TO_UPSTREAM_ALIASES = {
   'gemini-4-carbon': ['gemini-4-carbon', 'gemini-4.0-carbon', 'gemini-4-pro'],
   'gemini-4-argon': ['gemini-4-argon', 'gemini-4.0-argon'],
+  'gemini-4-neon': ['gemini-4-neon', 'gemini-4.0-neon'],
   'gemini-4-hydrogen': ['gemini-4-hydrogen', 'gemini-4.0-hydrogen'],
   'gemini-3.8-flash': ['gemini-3.8-flash'],
   'gemini-3.1-pro': ['gemini-3.1-pro', 'gemini-3.1-pro-preview'],
@@ -279,7 +280,12 @@ export function normalizeUpstreamModelKey(rawKey) {
     .trim()
     .toLowerCase()
     .replace(/^(?:vertex_ai|gemini|google|anthropic|openai)\//i, '')
-    .replace(/@.+$/, '');
+    .replace(/@.+$/, '')
+    .replace(/\s*\([^)]*\)/g, '')
+    .replace(/[*†‡]+/g, '')
+    .replace(/[_\s]+/g, '-')
+    .replace(/-{2,}/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 export function parseLiteLlmRates(data) {
@@ -353,10 +359,28 @@ export function parseOpenRouterRates(payload) {
   return map;
 }
 
-function lookupUpstreamForCatalogKey(key, map) {
-  const candidates = [key, ...(CATALOG_TO_UPSTREAM_ALIASES[key] ?? [])].map((s) => s.toLowerCase());
-  for (const candidate of candidates) {
+function expandCanonicalVariants(normKey) {
+  if (!normKey) return [];
+  const out = new Set([normKey]);
+  const claudeHyphen = normKey.replace(/^(claude-(?:opus|sonnet|haiku)-)(\d+)\.(\d+)$/i, '$1$2-$3');
+  if (claudeHyphen !== normKey) out.add(claudeHyphen);
+  const claudeDot = normKey.replace(/^(claude-(?:opus|sonnet|haiku)-)(\d+)-(\d+)$/i, '$1$2.$3');
+  if (claudeDot !== normKey) out.add(claudeDot);
+  return [...out];
+}
+
+function lookupUpstreamByNormalizedId(normId, map) {
+  for (const candidate of expandCanonicalVariants(normId)) {
     if (map.has(candidate)) return map.get(candidate);
+  }
+  return null;
+}
+
+function lookupUpstreamForCatalogKey(key, map) {
+  const candidates = [key, ...(CATALOG_TO_UPSTREAM_ALIASES[key] ?? [])].map((s) => normalizeUpstreamModelKey(s));
+  for (const candidate of candidates) {
+    const hit = lookupUpstreamByNormalizedId(candidate, map);
+    if (hit) return hit;
   }
   return null;
 }
@@ -614,6 +638,181 @@ export function bumpCatalogVersion(currentVersion, todayDate) {
   return todayDate;
 }
 
+export function canonicalCatalogKeyForNewModel(normId) {
+  return String(normId ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/^(claude-(?:opus|sonnet|haiku)-)(\d+)\.(\d+)$/i, '$1$2-$3');
+}
+
+export function buildAutoStagedAliases(modelId) {
+  const clean = String(modelId ?? '').trim().toLowerCase();
+  const match = clean.match(/^gemini-([4-9](?:\.\d+)?)-([a-z][a-z0-9]*)$/);
+  if (!match) return {};
+  const codename = match[2];
+  const cap = codename.charAt(0).toUpperCase() + codename.slice(1);
+  return {
+    [`gemini-pro-orchestrator-${codename}`]: clean,
+    [`orchestrator (${codename})`]: clean,
+    [`Orchestrator (${cap})`]: clean,
+    [`${clean}-tiered`]: clean,
+    [`${clean}-tiered-low`]: clean,
+    [`${clean}-tiered-medium`]: clean,
+    [`${clean}-tiered-high`]: clean,
+    [`${clean}-tiered-xhigh`]: clean,
+    [`${clean}-tiered-extra-high`]: clean,
+  };
+}
+
+export function formatCanonicalModelDisplayName(modelId, officialModelName) {
+  const cleaned = String(officialModelName ?? '')
+    .replace(/\s*\([^)]*\)/g, '')
+    .replace(/[*†‡]+/g, '')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
+  if (cleaned) return cleaned;
+  return String(modelId ?? '')
+    .split('-')
+    .map((p) => (p ? p.charAt(0).toUpperCase() + p.slice(1) : p))
+    .join(' ');
+}
+
+function inferPlatformLabels(vendor, url) {
+  if (vendor === 'Google' || /cloud\.google\.com|ai\.google\.dev/i.test(String(url))) {
+    return { platform: 'Google Cloud 标准 Global API', platformEn: 'Google Cloud Standard Global API' };
+  }
+  if (vendor === 'Anthropic' || /anthropic\.com|claude\.com/i.test(String(url))) {
+    return { platform: 'Anthropic 标准 API', platformEn: 'Anthropic Standard API' };
+  }
+  if (vendor === 'OpenAI' || /openai\.com/i.test(String(url))) {
+    return { platform: 'OpenAI 标准 API', platformEn: 'OpenAI Standard API' };
+  }
+  return { platform: `${vendor} 标准 API`, platformEn: `${vendor} Standard API` };
+}
+
+export function evaluateNewModelStagingCandidate({ id, vendor = 'Upstream', url = '', official, litellm }) {
+  const catalogKey = canonicalCatalogKeyForNewModel(id);
+  const reasons = [];
+  if (!official || official.confidence !== 'high') {
+    reasons.push('官网未取得 high 置信度标准报价');
+  }
+  if (
+    !official ||
+    !Number.isFinite(official.inputPer1M) ||
+    official.inputPer1M <= 0 ||
+    !Number.isFinite(official.outputPer1M) ||
+    official.outputPer1M <= 0
+  ) {
+    reasons.push('官网缺少有效 input/output 单价');
+  } else if (
+    official.inputPer1M > MAX_SAFE_USD_PER_M ||
+    official.outputPer1M > MAX_SAFE_USD_PER_M ||
+    (Number.isFinite(official.cachedPer1M) && official.cachedPer1M > MAX_SAFE_USD_PER_M)
+  ) {
+    reasons.push(`提取单价超过$${MAX_SAFE_USD_PER_M}/1M安全上限`);
+  }
+  if (official?.hasContextTiers) {
+    reasons.push('含长上下文阶梯价需人工复核');
+  }
+  if (official?.promoValidUntil) {
+    reasons.push(`含推广截止日(${official.promoValidUntil})需人工复核`);
+  }
+  if (!litellm) {
+    reasons.push('LiteLLM 尚无对应通道报价（需双源共识）');
+  } else if (
+    official &&
+    Number.isFinite(official.inputPer1M) &&
+    Number.isFinite(official.outputPer1M) &&
+    (!ratesClose(official.inputPer1M, litellm.input) || !ratesClose(official.outputPer1M, litellm.output))
+  ) {
+    reasons.push(`官网($${official.inputPer1M}/$${official.outputPer1M})与LiteLLM($${litellm.input}/$${litellm.output})偏差>1%`);
+  }
+
+  const offCached = official && Number.isFinite(official.cachedPer1M) && official.cachedPer1M >= 0 ? official.cachedPer1M : null;
+  const ltCached = litellm && Number.isFinite(litellm.cached) && litellm.cached >= 0 ? litellm.cached : null;
+  if (offCached !== null && ltCached !== null && !ratesClose(offCached, ltCached)) {
+    reasons.push(`官网cached($${offCached})与LiteLLM($${ltCached})偏差>1%`);
+  }
+
+  const offCw = official && Number.isFinite(official.cacheWritePer1M) && official.cacheWritePer1M > 0 ? official.cacheWritePer1M : null;
+  const ltCw = litellm && Number.isFinite(litellm.cacheWrite) && litellm.cacheWrite >= 0 ? litellm.cacheWrite : null;
+  if (offCw !== null && (ltCw === null || !ratesClose(offCw, ltCw))) {
+    reasons.push('官网含未经 LiteLLM 一致确认的 cacheWrite（或延迟生效条款）');
+  }
+
+  if (reasons.length > 0) {
+    return { stageable: false, catalogKey, reasons };
+  }
+
+  const cachedVal = offCached !== null ? roundRate(offCached) : (ltCached !== null ? roundRate(ltCached) : 0);
+  const cacheWriteVal = offCw !== null ? roundRate(offCw) : undefined;
+  return {
+    stageable: true,
+    catalogKey,
+    displayName: formatCanonicalModelDisplayName(catalogKey, official.officialModelName),
+    vendor,
+    url,
+    aliases: buildAutoStagedAliases(catalogKey),
+    proposed: {
+      input: roundRate(official.inputPer1M),
+      output: roundRate(official.outputPer1M),
+      cached: cachedVal,
+      ...(cacheWriteVal !== undefined ? { cacheWrite: cacheWriteVal } : {}),
+    },
+  };
+}
+
+export function applyStagedNewModels(catalog, stagedModels, nowMs = Date.now(), options = {}) {
+  const { bumpVersion = true } = options;
+  if (!Array.isArray(stagedModels) || stagedModels.length === 0) return false;
+  const todayDate = new Date(nowMs).toISOString().slice(0, 10);
+  catalog.names ??= {};
+  catalog.prices ??= {};
+  catalog.aliases ??= {};
+  catalog.feedModels ??= [];
+
+  let changed = false;
+  for (const candidate of stagedModels) {
+    const key = candidate.catalogKey;
+    if (!key || Object.hasOwn(catalog.prices, key)) continue;
+    const { platform, platformEn } = inferPlatformLabels(candidate.vendor, candidate.url);
+    catalog.names[key] = candidate.displayName;
+    catalog.prices[key] = {
+      model: key,
+      input: candidate.proposed.input,
+      output: candidate.proposed.output,
+      cached: candidate.proposed.cached,
+      ...(candidate.proposed.cacheWrite !== undefined ? { cacheWrite: candidate.proposed.cacheWrite } : {}),
+      provenance: {
+        ...(candidate.url ? { sourceUrl: candidate.url } : {}),
+        platform,
+        platformEn,
+        conditions: `标准全量定价（${todayDate}生效）`,
+        conditionsEn: `Standard list pricing (effective ${todayDate})`,
+        checkedAt: todayDate,
+        validFrom: null,
+        validUntil: null,
+        verification: 'confirmed',
+      },
+    };
+    for (const [aliasKey, target] of Object.entries(candidate.aliases ?? {})) {
+      if (!Object.hasOwn(catalog.aliases, aliasKey)) {
+        catalog.aliases[aliasKey] = target;
+      }
+    }
+    if (!catalog.feedModels.includes(key)) {
+      catalog.feedModels.push(key);
+    }
+    changed = true;
+  }
+
+  if (changed && bumpVersion) {
+    catalog.pricingVersion = bumpCatalogVersion(catalog.pricingVersion, todayDate);
+    catalog.pricingUpdatedAt = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
+  }
+  return changed;
+}
+
 /**
  * 以不篡改历史的方式安全增量更新 catalog.prices[key] 与顶层版本元数据。
  */
@@ -780,10 +979,22 @@ export async function runAutoUpdatePricing(options = {}) {
   const pageAlerts = [];
   const officialByKey = new Map();
   const discoveredOfficialNewModels = [];
-  const knownAliasSet = new Set([
-    ...Object.keys(catalog.prices ?? {}).map((k) => k.toLowerCase()),
-    ...Object.keys(catalog.aliases ?? {}).map((k) => k.toLowerCase()),
-  ]);
+  const seenNewModels = new Set();
+  const knownAliasSet = new Set(
+    [
+      ...Object.keys(catalog.prices ?? {}).map((k) => normalizeUpstreamModelKey(k)),
+      ...Object.keys(catalog.aliases ?? {}).map((k) => normalizeUpstreamModelKey(k)),
+      ...Object.values(catalog.names ?? {}).map((v) => normalizeUpstreamModelKey(v)),
+      ...Object.values(CATALOG_TO_UPSTREAM_ALIASES).flatMap((arr) =>
+        arr.map((alias) => normalizeUpstreamModelKey(alias))
+      ),
+    ].filter(Boolean)
+  );
+  for (const existing of [...knownAliasSet]) {
+    for (const v of expandCanonicalVariants(existing)) {
+      knownAliasSet.add(v);
+    }
+  }
 
   for (const [url, targetModels] of sourceTargets.entries()) {
     const rule = VENDOR_CONTENT_ANCHORS.find((r) => r.match.test(url));
@@ -831,22 +1042,32 @@ export async function runAutoUpdatePricing(options = {}) {
       probeRows.push(`| ${vendor} | \`${res.status}\` | Parsed (${extracted.models.length} models) | ${url} |`);
 
       for (const item of extracted.models) {
+        const normName = normalizeUpstreamModelKey(item.officialModelName);
+        const normVariants = new Set(expandCanonicalVariants(normName));
         const matchedKey =
           (item.catalogKey && catalog.prices?.[item.catalogKey] ? item.catalogKey : null) ??
-          targetModels.find(
-            (m) =>
-              m.key.toLowerCase() === String(item.officialModelName ?? '').trim().toLowerCase() ||
-              m.displayName.toLowerCase() === String(item.officialModelName ?? '').trim().toLowerCase()
-          )?.key ??
+          targetModels.find((m) => {
+            const candidateKeys = [m.key, m.displayName, ...(CATALOG_TO_UPSTREAM_ALIASES[m.key] ?? [])];
+            return candidateKeys.some((cand) => {
+              const candNorm = normalizeUpstreamModelKey(cand);
+              return Boolean(candNorm) && normVariants.has(candNorm);
+            });
+          })?.key ??
           null;
 
         if (matchedKey) {
-          officialByKey.set(matchedKey, item);
-        } else {
-          const normName = normalizeUpstreamModelKey(item.officialModelName);
-          if (normName && MODERN_RADAR_MODEL_RE.test(normName) && !IGNORED_RADAR_SUFFIX_RE.test(normName) && !knownAliasSet.has(normName)) {
-            discoveredOfficialNewModels.push({ vendor, url, item });
+          if (!officialByKey.has(matchedKey) || item.catalogKey === matchedKey) {
+            officialByKey.set(matchedKey, item);
           }
+        } else if (
+          normName &&
+          MODERN_RADAR_MODEL_RE.test(normName) &&
+          !IGNORED_RADAR_SUFFIX_RE.test(normName) &&
+          ![...normVariants].some((v) => knownAliasSet.has(v)) &&
+          !seenNewModels.has(normName)
+        ) {
+          seenNewModels.add(normName);
+          discoveredOfficialNewModels.push({ vendor, url, item });
         }
       }
     } catch (err) {
@@ -891,27 +1112,49 @@ export async function runAutoUpdatePricing(options = {}) {
     else if (evaluation.status === 'yellow') yellowItems.push(evaluation);
   }
 
-  // 新模型雷达（仅关注现代主流对话模型，避免数百个历史旧模型刷屏）
+  // 新模型雷达（仅关注现代主流对话模型，避免数百个历史旧模型刷屏；若通过严格双源共识，可预生成标准入库 PR 候选）
   const newModelsRadar = [];
+  const stagedNewModels = [];
   for (const entry of discoveredOfficialNewModels) {
     const id = normalizeUpstreamModelKey(entry.item.officialModelName);
+    const litellm = lookupUpstreamByNormalizedId(id, litellmMap);
+    const openrouter = lookupUpstreamByNormalizedId(id, openrouterMap);
+    const staging = evaluateNewModelStagingCandidate({
+      id,
+      vendor: entry.vendor,
+      url: entry.url,
+      official: entry.item,
+      litellm,
+    });
+    if (staging.stageable) {
+      stagedNewModels.push(staging);
+    }
     newModelsRadar.push({
       model: id,
+      vendor: entry.vendor,
+      url: entry.url,
       official: entry.item,
-      litellm: litellmMap.get(id) ?? null,
-      openrouter: openrouterMap.get(id) ?? null,
-      note: '官网发现未入库现代模型（需人工确认是否加入 activeModels 并同步单测）',
+      litellm,
+      openrouter,
+      consensusReady: staging.stageable,
+      stagedCatalogKey: staging.catalogKey,
+      note: staging.stageable
+        ? `双源共识通过：已自动预入库 \`${staging.catalogKey}\`（含衍生别名）供 PR 审阅合入；请确认是否纳入 activeModels`
+        : `官网发现未入库现代模型（${staging.reasons.join('；')}）`,
     });
   }
 
   const expiring = collectExpiringIntervals(catalog, nowMs);
 
-  // 5. 执行增量写入（仅应用经过双源共识的 greenUpdates）
+  // 5. 执行增量写入（应用双源共识 greenUpdates，以及通过严格双源共识的全新现代模型草案供 PR 审阅）
   let filesModified = false;
-  if (writeMode && greenUpdates.length > 0) {
+  if (writeMode && (greenUpdates.length > 0 || stagedNewModels.length > 0)) {
     const todayDate = new Date(nowMs).toISOString().slice(0, 10);
     for (const item of greenUpdates) {
       applyVerifiedPriceUpdate(catalog, item.key, item.proposed, nowMs, { bumpVersion: false });
+    }
+    if (stagedNewModels.length > 0) {
+      applyStagedNewModels(catalog, stagedNewModels, nowMs, { bumpVersion: false });
     }
     catalog.pricingVersion = bumpCatalogVersion(catalog.pricingVersion, todayDate);
     catalog.pricingUpdatedAt = new Date(nowMs).toISOString().replace(/\.\d{3}Z$/, 'Z');
@@ -922,15 +1165,12 @@ export async function runAutoUpdatePricing(options = {}) {
   }
 
   // 6. 决策分流：no_change / green_auto_merge / yellow_needs_review / fetch_failed
-  // 注：newModelsRadar 仅作信息雷达展示，不阻断已入库模型经过双源共识核实的自动合入；
-  // 若上游抓取存在异常告警且未产生绿/黄结论，返回 fetch_failed 防止工作流误关既有漂移告警 Issue
+  // 注：新模型即使双源共识预写入，也保持 yellow_needs_review 走人工 PR 审阅合入，不走 green_auto_merge
   let decision = 'no_change';
-  if (yellowItems.length > 0 || expiring.length > 0) {
+  if (yellowItems.length > 0 || expiring.length > 0 || newModelsRadar.length > 0 || stagedNewModels.length > 0) {
     decision = 'yellow_needs_review';
   } else if (greenUpdates.length > 0) {
     decision = 'green_auto_merge';
-  } else if (newModelsRadar.length > 0) {
-    decision = 'yellow_needs_review';
   } else if (pageAlerts.length > 0) {
     decision = 'fetch_failed';
   }
@@ -948,6 +1188,7 @@ export async function runAutoUpdatePricing(options = {}) {
     `- **Decision**: \`${decision}\``,
     `- **Gemini Flash Extraction**: ${geminiApiKey ? 'enabled' : 'skipped (GEMINI_API_KEY not set)'}`,
     `- **Verified Consensus Updates (Green)**: ${greenUpdates.length}`,
+    `- **Auto-Staged New Models (PR Ready)**: ${stagedNewModels.length}`,
     `- **Needs Review / Divergence / New Models (Yellow)**: ${yellowItems.length + newModelsRadar.length}`,
     `- **Expiring Promotional Intervals (<=14d)**: ${expiring.length}`,
     '',
@@ -964,6 +1205,19 @@ export async function runAutoUpdatePricing(options = {}) {
           ...greenUpdates.map(
             (g) =>
               `| \`${g.key}\` | ${formatPriceTuple(g.local)} | ${formatPriceTuple(g.proposed)} | ${String(g.official?.evidenceQuote ?? '').replace(/\|/g, '/').slice(0, 100)} |`
+          ),
+          '',
+        ]
+      : []),
+    ...(stagedNewModels.length > 0
+      ? [
+          '#### Auto-Staged New Model Candidates (PR Ready for Review)',
+          '',
+          '| Catalog Key | Display Name | Staged Rate | Derived Aliases |',
+          '| :--- | :--- | :--- | :--- |',
+          ...stagedNewModels.map(
+            (s) =>
+              `| \`${s.catalogKey}\` | ${s.displayName} | ${formatPriceTuple(s.proposed)} | ${Object.keys(s.aliases).length} |`
           ),
           '',
         ]
@@ -1004,6 +1258,7 @@ export async function runAutoUpdatePricing(options = {}) {
     filesModified,
     geminiEnabled: Boolean(geminiApiKey),
     greenUpdates,
+    stagedNewModels,
     yellowItems,
     newModelsRadar,
     expiring,
@@ -1029,6 +1284,7 @@ async function main() {
       `files_modified=${report.filesModified ? 'true' : 'false'}`,
       `has_alert=${report.decision === 'yellow_needs_review' ? 'true' : 'false'}`,
       `green_count=${report.greenUpdates.length}`,
+      `staged_new_count=${report.stagedNewModels.length}`,
       `yellow_count=${report.yellowItems.length + report.newModelsRadar.length}`,
     ];
     await appendFile(process.env.GITHUB_OUTPUT, lines.join('\n') + '\n', 'utf8');

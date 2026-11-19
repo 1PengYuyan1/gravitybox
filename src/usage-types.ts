@@ -1,6 +1,6 @@
 import type { ApiPricing } from './pricing.js';
 import { stripModelProviderPrefix } from './model-identity.js';
-import { getEffectiveModelPriceAlias } from './model-catalog.js';
+import { getEffectiveModelAliasKeys, getEffectiveModelPriceAlias } from './model-catalog.js';
 import type { LedgerEvent } from './usage-ledger.js';
 import { USAGE_PROJECTION_VERSION } from './protobuf-projection.js';
 import { bt } from './i18n.js';
@@ -133,11 +133,59 @@ export function isUnknownModelName(name: string | null | undefined): boolean {
   return clean === CANONICAL_UNKNOWN_MODEL || clean.toLowerCase() === 'unknown model';
 }
 
+const ORCHESTRATOR_THINKING_SUFFIX_RE = /-(?:extra-high|extra-low|xhigh|high|medium|low|thinking)$/i;
+
+/**
+ * 动态识别尚未入库的新代号 Orchestrator（如 gemini-pro-orchestrator-<codename> 或 Orchestrator (<Codename>)），
+ * 仅合并模型身份，绝不自行伪造定价。
+ */
+export function resolveDynamicOrchestratorModel(
+  strippedId: string,
+  cleanLabel: string,
+  siblingModelIds?: Iterable<string>
+): string | null {
+  const idText = String(strippedId ?? '').trim();
+  const labelText = String(cleanLabel ?? '').trim();
+  const idCodename = idText.match(/^gemini-pro-orchestrator-(?!g1(?:-|$)|default$|pro$)([a-z][a-z0-9]*)$/i)?.[1];
+  const labelCodename =
+    idText.match(/^Orchestrator\s*\(\s*([a-z][a-z0-9]*)\s*\)$/i)?.[1] ??
+    labelText.match(/^Orchestrator\s*\(\s*([a-z][a-z0-9]*)\s*\)$/i)?.[1];
+  const rawCodename = idCodename ?? labelCodename;
+  if (!rawCodename) return null;
+  const codename = rawCodename.toLowerCase();
+  if (codename === 'pro' || codename === 'flash' || codename === 'default' || codename === 'unknown' || codename === 'g1') {
+    return null;
+  }
+  const cap = codename.charAt(0).toUpperCase() + codename.slice(1);
+  const explicitAlias =
+    getEffectiveModelPriceAlias(`gemini-pro-orchestrator-${codename}`) ??
+    getEffectiveModelPriceAlias(`Orchestrator (${cap})`) ??
+    getEffectiveModelPriceAlias(`orchestrator (${codename})`);
+  if (explicitAlias) return explicitAlias;
+
+  const versionedRe = new RegExp(`^gemini-(\\d+(?:\\.\\d+)?)-${codename}$`, 'i');
+  if (siblingModelIds) {
+    for (const raw of siblingModelIds) {
+      const cleaned = stripModelProviderPrefix(String(raw ?? ''))
+        .trim()
+        .replace(/(?:^|[-_])disabled$/i, '')
+        .replace(ORCHESTRATOR_THINKING_SUFFIX_RE, '');
+      const m = cleaned.match(versionedRe);
+      if (m) return `gemini-${m[1]}-${codename}`;
+    }
+  }
+  for (const known of getEffectiveModelAliasKeys()) {
+    const m = known.match(versionedRe);
+    if (m) return `gemini-${m[1]}-${codename}`;
+  }
+  return `gemini-4-${codename}`;
+}
+
 export function resolveDatabaseModelFullName(
   modelId: string | null | undefined,
   label: string | null | undefined,
   modelEnum?: number | null,
-  options?: { canonicalUnknown?: boolean }
+  options?: { canonicalUnknown?: boolean; siblingModelIds?: Iterable<string> }
 ): string {
   const rawId = typeof modelId === 'string' ? modelId.trim() : '';
   const cleanId = isUnknownModelName(rawId) ? '' : rawId;
@@ -167,6 +215,8 @@ export function resolveDatabaseModelFullName(
       const labelAlias = getEffectiveModelPriceAlias(cleanLabel);
       if (labelAlias) return labelAlias;
     }
+    const dynamicOrchestrator = resolveDynamicOrchestratorModel(strippedId, cleanLabel, options?.siblingModelIds);
+    if (dynamicOrchestrator) return dynamicOrchestrator;
   }
 
   if (
@@ -196,6 +246,8 @@ export function resolveDatabaseModelFullName(
     if (/^(?:gemini-pro-orchestrator|gemini-pro-orchestrator-g1-pro|gemini-pro-orchestrator-argon)$/i.test(strippedId)) {
       return 'gemini-4-argon';
     }
+    const dynamicOrchestrator = resolveDynamicOrchestratorModel(strippedId, cleanLabel, options?.siblingModelIds);
+    if (dynamicOrchestrator) return dynamicOrchestrator;
     if (/^MODEL_PLACEHOLDER_M\d+$/i.test(strippedId) && cleanLabel) {
       const normalizedLabel = normalizeDisplayLabel(cleanLabel);
       return getEffectiveModelPriceAlias(normalizedLabel) ?? normalizedLabel;

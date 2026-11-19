@@ -833,8 +833,12 @@ final class MenuPanelController: NSViewController {
         tokensTile.toolTip = nil
         requestsTile.setValueText(InterfaceText.formatInteger(requests))
         let isAllUnpriced = unpricedCount > 0 && pricedCount == 0 && total > 0 && usd == 0
-        let partialPrefix = unpricedCount > 0 ? L10n.t("menu_panel.usage.partial_prefix", fallback: "部分 ") : ""
-        costTile.setValueText(isAllUnpriced ? L10n.t("menu_panel.usage.unpriced", fallback: "未计价") : partialPrefix + InterfaceText.formatUsd(usd))
+        let isPartialCost = unpricedCount > 0 && !isAllUnpriced
+        costTile.setValueText(
+            isAllUnpriced ? L10n.t("menu_panel.usage.unpriced", fallback: "未计价") : InterfaceText.formatUsd(usd),
+            badgeText: isPartialCost ? L10n.t("menu_panel.cost.partial_badge", fallback: "部分") : nil,
+            badgeTint: accessibleWarningColor()
+        )
         cacheTile.setValueText(denom > 0 ? String(format: "%.1f%%", locale: Locale(identifier: "en_US_POSIX"), cacheHit) : "—")
 
         let snapKey = "\(report["snapshotId"] ?? ""):\(periodKey):\(selectedChartDimension.rawValue):\(total):\(requests):\(failed):\(unknown)"
@@ -844,7 +848,7 @@ final class MenuPanelController: NSViewController {
         }
 
         let models = (report["byModel"] as? [[String: Any]]) ?? (report["models"] as? [[String: Any]]) ?? []
-        let modelKey = "\(L10n.shared.currentLocale):\(report["snapshotId"] ?? ""):\(periodKey):\(models.count):\(showAllModels):\(total)"
+        let modelKey = "\(L10n.shared.currentLocale):\(report["snapshotId"] ?? ""):\(periodKey):\(models.count):\(pricedCount):\(unpricedCount):\(showAllModels):\(total)"
         if modelKey != renderedUsageModelKey {
             renderedUsageModelKey = modelKey
             rebuildMenuModelList(models: models, totalTokens: total)
@@ -859,6 +863,9 @@ final class MenuPanelController: NSViewController {
             footerParts.append(L10n.t("menu_panel.usage.cached_snapshot", fallback: "沿用缓存快照"))
         } else if failed > 0 {
             footerParts.append(L10n.t("menu_panel.usage.failed_dbs", ["count": failed], fallback: "\(failed) 个会话库异常"))
+        }
+        if unpricedCount > 0 {
+            footerParts.append(L10n.t("menu_panel.usage.unpriced_footer", ["count": unpricedCount], fallback: "\(unpricedCount) 款模型待定价"))
         }
         usageFooterLabel.stringValue = footerParts.joined(separator: " · ")
         usageFooterLabel.textColor = (app.usageFetchErrorsByPeriod[periodKey] != nil || failed > 0 || availability == "cached")
@@ -1015,15 +1022,31 @@ final class MenuPanelController: NSViewController {
             let mTokens = intVal(entry.item, "totalTokens", fallback: intVal(entry.item, "total_tokens"))
             let ratio = totalTokens > 0 ? CGFloat(mTokens) / CGFloat(totalTokens) : 0
             let tokensStr = InterfaceText.formatCompactTokens(mTokens, formatSmallWithLocale: true)
+            let isPriced = (entry.item["priced"] as? Bool) ?? true
+            let isPartialModel = (entry.item["partiallyPriced"] as? Bool) ?? false
+            let badgeText: String
+            let badgeTint: NSColor
+            if !isPriced && !isPartialModel && mTokens > 0 {
+                badgeText = L10n.t("menu_panel.model.unpriced_badge", fallback: "待定价")
+                badgeTint = accessibleWarningColor()
+            } else if isPartialModel {
+                badgeText = L10n.t("menu_panel.model.partial_badge", fallback: "部分")
+                badgeTint = accessibleWarningColor()
+            } else {
+                badgeText = ""
+                badgeTint = Design.blue
+            }
 
             if let existing = modelRowViewsByName[entry.key] {
-                existing.update(displayName: entry.displayName, tokensText: tokensStr, shareFraction: ratio)
+                existing.update(displayName: entry.displayName, tokensText: tokensStr, shareFraction: ratio, badgeText: badgeText, badgeTint: badgeTint)
             } else {
                 let rowView = MenuModelUsageItemView(
                     model: entry.displayName,
                     rawModelKey: entry.rawId.isEmpty ? entry.displayName : entry.rawId,
                     tokensText: tokensStr,
-                    shareFraction: ratio
+                    shareFraction: ratio,
+                    badgeText: badgeText,
+                    badgeTint: badgeTint
                 )
                 modelRowViewsByName[entry.key] = rowView
             }

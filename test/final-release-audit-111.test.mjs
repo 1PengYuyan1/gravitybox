@@ -451,14 +451,14 @@ test('OPT-07 & OPT-09 & OPT-10 & OPT-12: Pro Trial/Ultra Trial 不误判为 FREE
       source: 'cloud',
       tier: 'ULTRA',
       models: [
-        { id: 'gemini-4-neon-trial', displayName: 'Gemini 4 Neon Trial' },
+        { id: 'gemini-5-xenon-trial', displayName: 'Gemini 5 Xenon Trial' },
         { id: 'o5-mini', displayName: 'OpenAI o5-mini' },
         { id: 'internal-exp-99-trial', displayName: 'internal-exp-99-trial' },
       ],
     },
   });
   const unpricedKeys = snap.unpricedLiveModels.map((m) => m.key);
-  assert.equal(unpricedKeys.includes('gemini-4-neon-trial'), true);
+  assert.equal(unpricedKeys.includes('gemini-5-xenon-trial'), true);
   assert.equal(unpricedKeys.includes('o5-mini'), true);
   assert.equal(unpricedKeys.includes('internal-exp-99-trial'), false);
 

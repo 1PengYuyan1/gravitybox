@@ -424,11 +424,13 @@ final class MenuMetricTileView: NSView {
     let metricKey: String
     let iconView: NSImageView
     let titleLabel: NSTextField
+    let statusBadge: PillBadge
     let valueLabel: NSTextField
 
     init(key: String, title: String) {
         self.metricKey = key
         self.titleLabel = text(title, size: 11.5, weight: .medium, color: Design.secondary)
+        self.statusBadge = pillBadge("", color: accessibleWarningColor())
         self.valueLabel = text("—", size: 20, weight: .bold, color: Design.text)
 
         let iconName: String
@@ -469,8 +471,17 @@ final class MenuMetricTileView: NSView {
         valueLabel.lineBreakMode = .byTruncatingTail
         valueLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        let topRow = horizontal([iv, titleLabel], spacing: 4.5)
+        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        statusBadge.label.font = .systemFont(ofSize: 9.5, weight: .semibold)
+        statusBadge.isHidden = true
+        statusBadge.setContentHuggingPriority(.required, for: .horizontal)
+        statusBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        statusBadge.setAccessibilityElement(false)
+
+        let topRow = horizontal([iv, titleLabel, flexibleSpace(), statusBadge], spacing: 4.5)
         topRow.alignment = .centerY
+        topRow.detachesHiddenViews = true
 
         let stack = vertical([topRow, valueLabel], spacing: 3.5)
         stack.alignment = .leading
@@ -491,17 +502,31 @@ final class MenuMetricTileView: NSView {
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    func setValueText(_ text: String, warning: Bool = false) {
+    func setValueText(
+        _ text: String,
+        warning: Bool = false,
+        badgeText: String? = nil,
+        badgeTint: NSColor = accessibleWarningColor()
+    ) {
         if valueLabel.stringValue != text {
             valueLabel.stringValue = text
         }
         valueLabel.textColor = warning ? accessibleWarningColor() : Design.text
+        let cleanBadge = (badgeText ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        statusBadge.isHidden = cleanBadge.isEmpty
+        if !cleanBadge.isEmpty {
+            if statusBadge.title != cleanBadge {
+                statusBadge.title = cleanBadge
+            }
+            statusBadge.tint = badgeTint
+        }
         refreshAccessibility()
     }
 
     func refreshAccessibility() {
         let sep = L10n.shared.isEnglish ? ", " : "，"
-        setAccessibilityLabel("\(titleLabel.stringValue)\(sep)\(valueLabel.stringValue)")
+        let badgePart = (!statusBadge.isHidden && !statusBadge.title.isEmpty) ? " · \(statusBadge.title)" : ""
+        setAccessibilityLabel("\(titleLabel.stringValue)\(badgePart)\(sep)\(valueLabel.stringValue)")
     }
 
     override func draw(_ dirtyRect: NSRect) {
@@ -861,14 +886,23 @@ final class MenuModelUsageItemView: NSView {
     let rawModel: String
     let iconView = symbol("sparkles", size: 12, color: Design.secondary)
     let nameLabel: NSTextField
+    let statusBadge: PillBadge
     let tokensLabel: NSTextField
     let shareBar = MenuMeterBar()
 
-    init(model: String, rawModelKey: String? = nil, tokensText: String, shareFraction: CGFloat) {
+    init(
+        model: String,
+        rawModelKey: String? = nil,
+        tokensText: String,
+        shareFraction: CGFloat,
+        badgeText: String = "",
+        badgeTint: NSColor = accessibleWarningColor()
+    ) {
         let resolvedRawKey = (rawModelKey?.trimmingCharacters(in: .whitespacesAndNewlines)).flatMap { $0.isEmpty ? nil : $0 } ?? model
         self.rawModel = resolvedRawKey
         let display = model
         self.nameLabel = text(display, size: 12, weight: .semibold, color: .labelColor, wrap: true)
+        self.statusBadge = pillBadge(badgeText, color: badgeTint)
         self.tokensLabel = text(tokensText, size: 12, weight: .semibold, color: .labelColor)
         super.init(frame: .zero)
 
@@ -876,6 +910,12 @@ final class MenuModelUsageItemView: NSView {
         nameLabel.lineBreakMode = .byWordWrapping
         nameLabel.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         nameLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        statusBadge.label.font = .systemFont(ofSize: 9.5, weight: .semibold)
+        let cleanBadge = badgeText.trimmingCharacters(in: .whitespacesAndNewlines)
+        statusBadge.isHidden = cleanBadge.isEmpty
+        statusBadge.setContentHuggingPriority(.required, for: .horizontal)
+        statusBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
+        statusBadge.setAccessibilityElement(false)
         tokensLabel.font = .monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
         tokensLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
 
@@ -893,8 +933,9 @@ final class MenuModelUsageItemView: NSView {
         shareBar.fraction = max(0.02, min(1.0, shareFraction))
         shareBar.heightAnchor.constraint(equalToConstant: 4.5).isActive = true
 
-        let topRow = horizontal([iconView, nameLabel, flexibleSpace(), tokensLabel], spacing: 6)
+        let topRow = horizontal([iconView, nameLabel, statusBadge, flexibleSpace(), tokensLabel], spacing: 6)
         topRow.alignment = .centerY
+        topRow.detachesHiddenViews = true
 
         let stack = vertical([topRow, shareBar], spacing: 4)
         fillWidth(topRow, in: stack)
@@ -904,26 +945,42 @@ final class MenuModelUsageItemView: NSView {
 
         setAccessibilityElement(true)
         setAccessibilityRole(.group)
-        setAccessibilityLabel(Self.accessibilityText(display: display, tokensText: tokensText))
+        setAccessibilityLabel(Self.accessibilityText(display: display, tokensText: tokensText, badgeText: cleanBadge))
     }
     required init?(coder: NSCoder) { fatalError() }
 
-    private static func accessibilityText(display: String, tokensText: String) -> String {
-        L10n.shared.isEnglish ? "\(display), \(tokensText) Tokens" : "\(display)，\(tokensText) Token"
+    private static func accessibilityText(display: String, tokensText: String, badgeText: String = "") -> String {
+        let base = L10n.shared.isEnglish ? "\(display), \(tokensText) Tokens" : "\(display)，\(tokensText) Token"
+        return badgeText.isEmpty ? base : "\(base) · \(badgeText)"
     }
 
-    func update(displayName: String? = nil, tokensText: String, shareFraction: CGFloat) {
+    func update(
+        displayName: String? = nil,
+        tokensText: String,
+        shareFraction: CGFloat,
+        badgeText: String = "",
+        badgeTint: NSColor = accessibleWarningColor()
+    ) {
         let nextDisplay = displayName ?? nameLabel.stringValue
+        let cleanBadge = badgeText.trimmingCharacters(in: .whitespacesAndNewlines)
         let displayChanged = nameLabel.stringValue != nextDisplay
         let tokensChanged = tokensLabel.stringValue != tokensText
+        let badgeWasHidden = statusBadge.isHidden
+        let badgeTitleBefore = statusBadge.title
         if displayChanged {
             nameLabel.stringValue = nextDisplay
         }
         if tokensChanged {
             tokensLabel.stringValue = tokensText
         }
-        if displayChanged || tokensChanged {
-            setAccessibilityLabel(Self.accessibilityText(display: nextDisplay, tokensText: tokensText))
+        statusBadge.isHidden = cleanBadge.isEmpty
+        if !cleanBadge.isEmpty {
+            if statusBadge.title != cleanBadge { statusBadge.title = cleanBadge }
+            statusBadge.tint = badgeTint
+        }
+        let badgeChanged = badgeWasHidden != statusBadge.isHidden || badgeTitleBefore != statusBadge.title
+        if displayChanged || tokensChanged || badgeChanged {
+            setAccessibilityLabel(Self.accessibilityText(display: nextDisplay, tokensText: tokensText, badgeText: cleanBadge))
         }
         shareBar.fraction = max(0.02, min(1.0, shareFraction))
     }

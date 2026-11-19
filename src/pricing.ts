@@ -8,6 +8,7 @@ import {
   getEffectiveModelDisplayName,
 } from './model-catalog.js';
 import { bt, getActiveLocale } from './i18n.js';
+import { resolveDynamicOrchestratorModel } from './usage-types.js';
 
 export interface ApiPricingContextTier {
   /** 单步总输入规模阈值（promptTokens > thresholdTokens 触发；inclusive=true 时为 >=） */
@@ -511,6 +512,7 @@ export interface UnpricedLiveModelEntry {
   key: string;
   displayName: string;
   disabled: boolean;
+  variants?: string[];
 }
 
 export interface PricingCatalogModelInput {
@@ -602,6 +604,68 @@ interface ExtractedCatalogCandidate {
   resolvedPricing: ApiPricing | null;
   displayName: string;
   disabled: boolean;
+  variantLabel?: string;
+  isOrchestratorVariant?: boolean;
+}
+
+const UNPRICED_THINKING_SUFFIX_LABELS: Record<string, string> = {
+  low: 'Low',
+  medium: 'Medium',
+  high: 'High',
+  xhigh: 'XHigh',
+  'extra-high': 'Extra High',
+  'extra-low': 'Extra Low',
+  thinking: 'Thinking',
+};
+
+const UNPRICED_VARIANT_ORDER: Record<string, number> = {
+  Low: 0,
+  Medium: 1,
+  High: 2,
+  XHigh: 3,
+  'Extra High': 4,
+  'Extra Low': 5,
+  Thinking: 6,
+  Orchestrator: 7,
+};
+
+function stripDisplayTierSuffix(displayName: string): string {
+  const cleaned = displayName
+    .replace(/\s*[（(]\s*(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|thinking)\s*[）)]\s*$/i, '')
+    .replace(/\s+(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|thinking)\s*$/i, '')
+    .trim();
+  return cleaned || displayName;
+}
+
+function foldUnpricedLiveCandidate(
+  baseId: string,
+  canonicalKey: string,
+  rawDisplayName: string,
+  siblingNormIds: ReadonlySet<string>
+): { canonicalKey: string; displayName: string; variantLabel?: string; isOrchestratorVariant?: boolean } {
+  const orchestratorTarget = resolveDynamicOrchestratorModel(baseId, rawDisplayName, siblingNormIds);
+  if (orchestratorTarget) {
+    const isOrchLabel = /^Orchestrator\s*\(/i.test(rawDisplayName);
+    return {
+      canonicalKey: orchestratorTarget,
+      displayName: isOrchLabel ? '' : stripDisplayTierSuffix(rawDisplayName),
+      variantLabel: 'Orchestrator',
+      isOrchestratorVariant: true,
+    };
+  }
+  if (/^(?:gemini|claude|gpt|o[1-9])/.test(canonicalKey)) {
+    const suffixMatch = canonicalKey.match(/^(.+)-(extra-high|extra-low|xhigh|high|medium|low|thinking)$/i);
+    if (suffixMatch) {
+      const baseKey = suffixMatch[1]!;
+      const rawSuffix = suffixMatch[2]!.toLowerCase();
+      return {
+        canonicalKey: baseKey,
+        displayName: stripDisplayTierSuffix(rawDisplayName),
+        variantLabel: UNPRICED_THINKING_SUFFIX_LABELS[rawSuffix] ?? rawSuffix,
+      };
+    }
+  }
+  return { canonicalKey, displayName: rawDisplayName };
 }
 
 function isUserVisiblePreviewChatModel(
@@ -643,6 +707,16 @@ function extractCatalogModels(
   timestampSeconds: number
 ): ExtractedCatalogCandidate[] {
   if (!Array.isArray(rawModels) || rawModels.length === 0) return [];
+  const siblingNormIds = new Set<string>();
+  for (const m of rawModels) {
+    if (!m || typeof m !== 'object') continue;
+    if (m.stale === true || m.quota_source === 'carried') continue;
+    const rawId = String(m.model_id ?? m.id ?? m.name ?? m.model_or_alias ?? m.modelOrAlias ?? '').trim();
+    if (!rawId) continue;
+    const cleaned = normalizeModelId(rawId.replace(/(?:^|[-_])disabled$/i, '').trim())
+      .replace(/-(?:extra-high|extra-low|xhigh|high|medium|low|thinking)$/i, '');
+    if (cleaned) siblingNormIds.add(cleaned);
+  }
   const parsed: ExtractedCatalogCandidate[] = [];
   for (const m of rawModels) {
     if (!m || typeof m !== 'object') continue;
@@ -660,9 +734,9 @@ function extractCatalogModels(
     const resolvedPricing = foundPricing
       ? resolvePricingForTimestamp(foundPricing.entry, timestampSeconds, foundPricing.key)
       : null;
-    const canonicalKey = foundPricing?.key || matchPricingKeys(baseId, extraKeys) || normBase;
-    if (!canonicalKey || FORBIDDEN_CATALOG_KEYS.has(canonicalKey)) continue;
-    const isPricedFlashLite = isPricedCatalogFlashLiteModel(baseId, canonicalKey, knownPricedKeys);
+    const initialKey = foundPricing?.key || matchPricingKeys(baseId, extraKeys) || normBase;
+    if (!initialKey || FORBIDDEN_CATALOG_KEYS.has(initialKey)) continue;
+    const isPricedFlashLite = isPricedCatalogFlashLiteModel(baseId, initialKey, knownPricedKeys);
     if (
       !effectiveActiveSet.has(normBase) &&
       !isPricedFlashLite &&
@@ -672,12 +746,18 @@ function extractCatalogModels(
       continue;
     }
     const disabled = m.disabled === true || hasDisabledSuffix;
+    const folded = resolvedPricing
+      ? { canonicalKey: initialKey, displayName: rawDisplayName }
+      : foldUnpricedLiveCandidate(baseId, initialKey, rawDisplayName, siblingNormIds);
+    if (!folded.canonicalKey || FORBIDDEN_CATALOG_KEYS.has(folded.canonicalKey)) continue;
 
     parsed.push({
-      canonicalKey,
+      canonicalKey: folded.canonicalKey,
       resolvedPricing,
-      displayName: rawDisplayName,
+      displayName: folded.displayName,
       disabled,
+      ...(folded.variantLabel ? { variantLabel: folded.variantLabel } : {}),
+      ...(folded.isOrchestratorVariant ? { isOrchestratorVariant: true } : {}),
     });
   }
 
@@ -807,7 +887,29 @@ export function resolvePricingCatalogSnapshot(
   }
 
   const primaryPricedMap = new Map<string, { pricing: ApiPricing; enabled: boolean; displayName: string }>();
-  const unpricedMap = new Map<string, UnpricedLiveModelEntry>();
+  const unpricedMap = new Map<string, {
+    key: string;
+    displayName: string;
+    hasNonOrchestratorName: boolean;
+    disabled: boolean;
+    variants: Set<string>;
+  }>();
+  const recordUnpricedCandidate = (c: ExtractedCatalogCandidate, disabled: boolean) => {
+    const existing = unpricedMap.get(c.canonicalKey);
+    const incomingNonOrch = !c.isOrchestratorVariant && Boolean(c.displayName);
+    const nextDisplayName = incomingNonOrch || !existing?.hasNonOrchestratorName
+      ? resolveCatalogDisplayName(c.canonicalKey, c.displayName, existing?.displayName)
+      : existing.displayName;
+    const variants = existing?.variants ?? new Set<string>();
+    if (c.variantLabel) variants.add(c.variantLabel);
+    unpricedMap.set(c.canonicalKey, {
+      key: c.canonicalKey,
+      displayName: nextDisplayName,
+      hasNonOrchestratorName: Boolean(existing?.hasNonOrchestratorName || incomingNonOrch),
+      disabled: existing ? (existing.disabled && disabled) : disabled,
+      variants,
+    });
+  };
 
   if (primaryKind) {
     const allowUnpricedLive = primaryKind === 'live' || primaryKind === 'snapshot' || primaryKind === 'account_live';
@@ -819,16 +921,13 @@ export function resolvePricingCatalogSnapshot(
           enabled: (existing?.enabled ?? false) || !c.disabled,
           displayName: resolveCatalogDisplayName(c.canonicalKey, c.displayName, existing?.displayName),
         });
+        unpricedMap.delete(c.canonicalKey);
       } else if (
-        allowUnpricedLive ||
-        (primaryKind === 'account_cloud' && !c.disabled && !feedModelSet.has(c.canonicalKey))
+        !primaryPricedMap.has(c.canonicalKey) &&
+        (allowUnpricedLive ||
+          (primaryKind === 'account_cloud' && !c.disabled && !feedModelSet.has(c.canonicalKey)))
       ) {
-        const existing = unpricedMap.get(c.canonicalKey);
-        unpricedMap.set(c.canonicalKey, {
-          key: c.canonicalKey,
-          displayName: resolveCatalogDisplayName(c.canonicalKey, c.displayName, existing?.displayName),
-          disabled: existing ? (existing.disabled && c.disabled) : c.disabled,
-        });
+        recordUnpricedCandidate(c, c.disabled);
       }
     }
 
@@ -869,12 +968,7 @@ export function resolvePricingCatalogSnapshot(
       if (c.disabled || primaryPricedMap.has(c.canonicalKey)) continue;
       if (!c.resolvedPricing) {
         if (!feedModelSet.has(c.canonicalKey)) {
-          const existingUnpriced = unpricedMap.get(c.canonicalKey);
-          unpricedMap.set(c.canonicalKey, {
-            key: c.canonicalKey,
-            displayName: resolveCatalogDisplayName(c.canonicalKey, c.displayName, existingUnpriced?.displayName),
-            disabled: false,
-          });
+          recordUnpricedCandidate(c, false);
         }
         continue;
       }
@@ -933,7 +1027,17 @@ export function resolvePricingCatalogSnapshot(
     };
   }
 
-  const unpricedLiveModels = Array.from(unpricedMap.values());
+  const unpricedLiveModels: UnpricedLiveModelEntry[] = Array.from(unpricedMap.values()).map((u) => {
+    const variants = [...u.variants].sort(
+      (a, b) => (UNPRICED_VARIANT_ORDER[a] ?? 99) - (UNPRICED_VARIANT_ORDER[b] ?? 99) || a.localeCompare(b)
+    );
+    return {
+      key: u.key,
+      displayName: u.displayName,
+      disabled: u.disabled,
+      ...(variants.length > 0 ? { variants } : {}),
+    };
+  });
   for (const u of unpricedLiveModels) {
     modelCatalogState[u.key] = {
       availability: 'unpriced_live',

@@ -435,8 +435,9 @@ final class DashboardPage: NSObject {
         }
 
         let pill = pillBadge(badgeText, color: badgeTint)
+        pill.label.font = .systemFont(ofSize: 9.5, weight: .semibold)
         pill.isHidden = badgeText.isEmpty
-        pill.setContentCompressionResistancePriority(.defaultHigh, for: .horizontal)
+        pill.setContentCompressionResistancePriority(.required, for: .horizontal)
         pill.setContentHuggingPriority(.required, for: .horizontal)
 
         let rightLabel = text(trailingText, size: 11, weight: .semibold, color: trailingTint)
@@ -448,6 +449,7 @@ final class DashboardPage: NSObject {
 
         let topRow = horizontal([nameLabel, pill, flexibleSpace(), rightLabel], spacing: 6)
         topRow.alignment = .centerY
+        topRow.detachesHiddenViews = true
 
         let subLabel = metricDetail(subtitle)
 
@@ -615,12 +617,34 @@ final class DashboardPage: NSObject {
                 }
                 let sharePct = Int(round(shareRatio * 100))
                 let shareNote = sharePct > 0 ? L10n.t("overview.bento.share_pct", ["pct": sharePct]) : ""
-                let costNote = mUsd > 0 ? " · \(InterfaceText.formatUsd(mUsd))" : ""
+                let isPriced = (item["priced"] as? Bool) ?? true
+                let isPartialModel = (item["partiallyPriced"] as? Bool) ?? false
+                let isUnpricedModel = !isPriced && !isPartialModel && mTokens > 0
+                let badgeText: String
+                let badgeTint: NSColor
+                if isUnpricedModel {
+                    badgeText = L10n.t("overview.model.unpriced_badge")
+                    badgeTint = accessibleWarningColor()
+                } else if isPartialModel {
+                    badgeText = L10n.t("overview.model.partial_badge")
+                    badgeTint = accessibleWarningColor()
+                } else {
+                    badgeText = ""
+                    badgeTint = Design.blue
+                }
+                let costNote: String
+                if isPartialModel && mUsd > 0 {
+                    costNote = L10n.t("overview.bento.cost_partial", ["cost": InterfaceText.formatUsd(mUsd)])
+                } else if !isUnpricedModel && mUsd > 0 {
+                    costNote = " · \(InterfaceText.formatUsd(mUsd))"
+                } else {
+                    costNote = ""
+                }
                 let row = Self.makeBentoSubRow(
                     title: displayModel,
                     copyModelId: rawModelId,
-                    badgeText: "",
-                    badgeTint: Design.blue,
+                    badgeText: badgeText,
+                    badgeTint: badgeTint,
                     subtitle: L10n.t("overview.bento.model_sub_multi", ["reqs": InterfaceText.formatInteger(mReqs), "share": shareNote, "cost": costNote]),
                     trailingText: L10n.t("overview.bento.tokens_trailing", ["tokens": InterfaceText.formatCompactTokens(mTokens)]),
                     trailingTint: .labelColor,
@@ -638,12 +662,34 @@ final class DashboardPage: NSObject {
             let mTokens = intVal(topModel, "totalTokens", fallback: intVal(topModel, "total_tokens"))
             let mReqs = intVal(topModel, "requestCount", fallback: intVal(topModel, "request_count"))
             let mUsd = doubleVal(topModel, "estimatedUsd", fallback: doubleVal(topModel, "estimated_usd"))
-            let costNote = mUsd > 0 ? " · \(InterfaceText.formatUsd(mUsd))" : ""
+            let isPriced = (topModel["priced"] as? Bool) ?? true
+            let isPartialModel = (topModel["partiallyPriced"] as? Bool) ?? false
+            let isUnpricedModel = !isPriced && !isPartialModel && mTokens > 0
+            let badgeText: String
+            let badgeTint: NSColor
+            if isUnpricedModel {
+                badgeText = L10n.t("overview.model.unpriced_badge")
+                badgeTint = accessibleWarningColor()
+            } else if isPartialModel {
+                badgeText = L10n.t("overview.model.partial_badge")
+                badgeTint = accessibleWarningColor()
+            } else {
+                badgeText = ""
+                badgeTint = Design.blue
+            }
+            let costNote: String
+            if isPartialModel && mUsd > 0 {
+                costNote = L10n.t("overview.bento.cost_partial", ["cost": InterfaceText.formatUsd(mUsd)])
+            } else if !isUnpricedModel && mUsd > 0 {
+                costNote = " · \(InterfaceText.formatUsd(mUsd))"
+            } else {
+                costNote = ""
+            }
             let row1 = Self.makeBentoSubRow(
                 title: displayModel,
                 copyModelId: rawModelId,
-                badgeText: "",
-                badgeTint: Design.blue,
+                badgeText: badgeText,
+                badgeTint: badgeTint,
                 subtitle: L10n.t("overview.bento.model_sub_single", ["reqs": InterfaceText.formatInteger(mReqs), "cost": costNote]),
                 trailingText: L10n.t("overview.bento.tokens_trailing", ["tokens": InterfaceText.formatCompactTokens(mTokens)]),
                 trailingTint: .labelColor,
@@ -1034,6 +1080,7 @@ final class DashboardPage: NSObject {
         self.todayTokensDetail.textColor = accessibleWarningColor()
         self.todayTokensDetail.toolTip = nil
         self.usageMetric.stringValue = "—"
+        self.costMetricCard?.setStatusBadge(nil)
         self.usageDetail.stringValue = retryDetail
         self.usageDetail.textColor = accessibleWarningColor()
         self.usageDetail.toolTip = nil
@@ -1225,8 +1272,27 @@ final class DashboardPage: NSObject {
 
             let todayUnpriced = intVal(usg, "todayUnpricedModels")
             let todayPriced = intVal(usg, "todayPricedModels")
-            self.usageMetric.stringValue = todayUnpriced > 0 && todayPriced == 0 && todayUsd == 0 ? L10n.t("menu_panel.usage.unpriced") : (todayUnpriced > 0 ? L10n.t("overview.metric.today_partial_cost") : "") + InterfaceText.formatUsd(todayUsd)
-            self.usageDetail.stringValue = unpriced > 0 && intVal(usg, "pricedModels") == 0 ? L10n.t("overview.metric.total_unpriced") : L10n.t("overview.metric.total_cost", ["cost": InterfaceText.formatUsd(allUsd)])
+            let allPriced = intVal(usg, "pricedModels")
+            let isAllTodayUnpriced = todayUnpriced > 0 && todayPriced == 0 && todayUsd == 0
+            let isPartialToday = todayUnpriced > 0 && !isAllTodayUnpriced
+            self.usageMetric.stringValue = isAllTodayUnpriced
+                ? L10n.t("menu_panel.usage.unpriced")
+                : InterfaceText.formatUsd(todayUsd)
+            self.costMetricCard?.setStatusBadge(
+                isPartialToday ? L10n.t("overview.cost.partial_badge") : nil,
+                tint: accessibleWarningColor()
+            )
+            let totalCostSummary: String
+            if unpriced > 0 && allPriced == 0 && allUsd == 0 {
+                totalCostSummary = L10n.t("overview.metric.total_unpriced")
+            } else if unpriced > 0 {
+                totalCostSummary = L10n.t("overview.metric.total_partial_cost", ["cost": InterfaceText.formatUsd(allUsd)])
+            } else {
+                totalCostSummary = L10n.t("overview.metric.total_cost", ["cost": InterfaceText.formatUsd(allUsd)])
+            }
+            self.usageDetail.stringValue = todayUnpriced > 0
+                ? L10n.t("overview.metric.today_unpriced_with_total", ["count": todayUnpriced, "total": totalCostSummary])
+                : totalCostSummary
             self.usageDetail.toolTip = nil
             self.costMetricCard?.titleField?.stringValue = L10n.t("overview.metric.today_cost")
 

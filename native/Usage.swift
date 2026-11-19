@@ -20,6 +20,7 @@ final class UsagePage: NSObject {
     let totalTokensMetric = metricValue()
     let tokensDetail = text(L10n.t("usage.tokens.placeholder"), size: 11, color: .secondaryLabelColor, wrap: true)
     let costTitle = text(L10n.t("usage.section.cost"), size: 12, weight: .semibold)
+    let costStatusBadge = pillBadge("", color: accessibleWarningColor())
     let usdMetric = metricValue()
     let usdDetail = text("", size: 11, color: .secondaryLabelColor, wrap: true)
     let cacheRateMetric = metricValue()
@@ -80,11 +81,18 @@ final class UsagePage: NSObject {
         fillWidth(trendHeader, in: trend); fillWidth(trendChart, in: trend)
         root.addArrangedSubview(group([trend]))
         costTitle.font = .systemFont(ofSize: 13, weight: .semibold)
+        costTitle.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        costStatusBadge.label.font = .systemFont(ofSize: 10, weight: .semibold)
+        costStatusBadge.isHidden = true
+        costStatusBadge.setContentHuggingPriority(.required, for: .horizontal)
+        costStatusBadge.setContentCompressionResistancePriority(.required, for: .horizontal)
         usdMetric.font = .monospacedDigitSystemFont(ofSize: 24, weight: .semibold)
+        usdMetric.setContentCompressionResistancePriority(.required, for: .horizontal)
         donutLegendStack.orientation = .vertical; donutLegendStack.alignment = .leading; donutLegendStack.spacing = 5
         donutLegendStack.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let costHeading = horizontal([costTitle, flexibleSpace(), usdMetric], spacing: 8)
+        let costHeading = horizontal([costTitle, costStatusBadge, flexibleSpace(), usdMetric], spacing: 8)
         costHeading.alignment = .centerY
+        costHeading.detachesHiddenViews = true
         costHeading.heightAnchor.constraint(equalToConstant: 28).isActive = true
         let donutBody = horizontal([donutChart, donutLegendStack], spacing: 10)
         donutBody.alignment = .centerY
@@ -293,6 +301,7 @@ final class UsagePage: NSObject {
         self.syncExportButtonState(for: period)
         if (summary["availability"] as? String) == "unavailable" {
             for label in [self.totalTokensMetric, self.usdMetric, self.cacheRateMetric, self.requestsMetric] { label.stringValue = "—" }
+            self.costStatusBadge.isHidden = true
             self.tokensDetail.stringValue = L10n.t("usage.unavailable.tokens")
             self.usdDetail.stringValue = L10n.t("usage.unavailable.cost")
             self.usdDetail.textColor = .secondaryLabelColor
@@ -328,8 +337,14 @@ final class UsagePage: NSObject {
         let pricedCount = (summary["pricedModels"] as? Int) ?? (summary["priced_models"] as? Int) ?? (value["pricedModels"] as? Int) ?? 0
         let unpricedCount = (summary["unpricedModels"] as? Int) ?? (summary["unpriced_models"] as? Int) ?? (value["unpricedModels"] as? Int) ?? 0
         self.costTitle.stringValue = L10n.t("usage.section.cost")
-        let partialPrefix = (unpricedCount > 0 && (pricedCount > 0 || usd > 0)) ? L10n.t("usage.models.partial_prefix") : ""
-        self.usdMetric.stringValue = unpricedCount > 0 && pricedCount == 0 && usd == 0 ? L10n.t("menu_panel.usage.unpriced") : partialPrefix + self.formatUsd(usd)
+        let isAllUnpriced = unpricedCount > 0 && pricedCount == 0 && usd == 0
+        let isPartialCost = unpricedCount > 0 && !isAllUnpriced
+        self.usdMetric.stringValue = isAllUnpriced ? L10n.t("menu_panel.usage.unpriced") : self.formatUsd(usd)
+        self.costStatusBadge.isHidden = !isPartialCost
+        if isPartialCost {
+            self.costStatusBadge.title = L10n.t("usage.cost.partial_badge")
+            self.costStatusBadge.tint = accessibleWarningColor()
+        }
         self.usdDetail.stringValue = ""
         self.usdDetail.isHidden = true
 
@@ -345,8 +360,15 @@ final class UsagePage: NSObject {
 
         let priceRows = value["byModel"] as? [[String: Any]] ?? []
         let outdated = priceRows.filter { ($0["pricingStatus"] as? String ?? "") == "expired" }.count
+        var costNotes: [String] = []
+        if unpricedCount > 0 {
+            costNotes.append(L10n.t("usage.cost.unpriced_models_note", ["count": unpricedCount]))
+        }
         if outdated > 0 {
-            self.usdDetail.stringValue = L10n.t("usage.cost.outdated_models", ["count": outdated])
+            costNotes.append(L10n.t("usage.cost.outdated_models", ["count": outdated]))
+        }
+        if !costNotes.isEmpty {
+            self.usdDetail.stringValue = costNotes.joined(separator: " · ")
             self.usdDetail.textColor = accessibleWarningColor()
             self.usdDetail.isHidden = false
         } else {

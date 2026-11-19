@@ -222,6 +222,10 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         ])
 
         let headerTextCol = vertical([titleLabel, subtitleLabel], spacing: 2)
+        headerTextCol.detachesHiddenViews = true
+        headerTextCol.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        titleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        subtitleLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         fillWidth(titleLabel, in: headerTextCol)
         fillWidth(subtitleLabel, in: headerTextCol)
         summaryPill.setContentHuggingPriority(.required, for: .horizontal)
@@ -498,6 +502,199 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         renderPayload(payload, resetScroll: true)
     }
 
+    struct UnpricedModelGroup {
+        let key: String
+        let displayName: String
+        let disabled: Bool
+        let variants: [String]
+    }
+
+    private static let unpricedVariantOrder: [String: Int] = [
+        "Low": 0,
+        "Medium": 1,
+        "High": 2,
+        "XHigh": 3,
+        "Extra High": 4,
+        "Extra Low": 5,
+        "Thinking": 6,
+        "Orchestrator": 7,
+    ]
+
+    private static func stripDisplayTierSuffix(_ name: String) -> String {
+        let patterns = [
+            "\\s*[（(]\\s*(?:extra[\\s-]*high|extra[\\s-]*low|xhigh|high|medium|low|thinking)\\s*[）)]\\s*$",
+            "\\s+(?:extra[\\s-]*high|extra[\\s-]*low|xhigh|high|medium|low|thinking)\\s*$"
+        ]
+        var current = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        for pattern in patterns {
+            if let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) {
+                let range = NSRange(current.startIndex..<current.endIndex, in: current)
+                current = regex.stringByReplacingMatches(in: current, range: range, withTemplate: "").trimmingCharacters(in: .whitespacesAndNewlines)
+            }
+        }
+        return current
+    }
+
+    static func groupUnpricedLiveModels(_ rawUnpriced: [[String: Any]]) -> [UnpricedModelGroup] {
+        let parsed: [(key: String, displayName: String, disabled: Bool, variants: [String])] = rawUnpriced.compactMap { item in
+            guard let rawKey = item["key"] as? String else { return nil }
+            let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !key.isEmpty else { return nil }
+            let displayName = (item["displayName"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let disabled = item["disabled"] as? Bool == true
+            let variants = (item["variants"] as? [String] ?? [])
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .filter { !$0.isEmpty }
+            return (key: key, displayName: displayName, disabled: disabled, variants: variants)
+        }
+        guard !parsed.isEmpty else { return [] }
+
+        let thinkingRegex = try? NSRegularExpression(
+            pattern: "^((?:gemini|claude|gpt|o[1-9]).+?)-(extra-high|extra-low|xhigh|high|medium|low|thinking)$",
+            options: [.caseInsensitive]
+        )
+        let orchIdRegex = try? NSRegularExpression(
+            pattern: "^gemini-pro-orchestrator-(?!g1(?:-|$)|default$|pro$)([a-z][a-z0-9]*)$",
+            options: [.caseInsensitive]
+        )
+        let orchLabelRegex = try? NSRegularExpression(
+            pattern: "^Orchestrator\\s*\\(\\s*([a-z][a-z0-9]*)\\s*\\)$",
+            options: [.caseInsensitive]
+        )
+
+        var siblingBases: [String] = []
+        for item in parsed {
+            let lower = item.key.lowercased()
+            if let regex = thinkingRegex {
+                let range = NSRange(lower.startIndex..<lower.endIndex, in: lower)
+                if let match = regex.firstMatch(in: lower, range: range), let baseRange = Range(match.range(at: 1), in: lower) {
+                    siblingBases.append(String(lower[baseRange]))
+                    continue
+                }
+            }
+            siblingBases.append(lower)
+        }
+
+        let suffixLabels: [String: String] = [
+            "low": "Low",
+            "medium": "Medium",
+            "high": "High",
+            "xhigh": "XHigh",
+            "extra-high": "Extra High",
+            "extra-low": "Extra Low",
+            "thinking": "Thinking",
+        ]
+
+        struct Bucket {
+            let key: String
+            var displayName: String
+            var hasNonOrchName: Bool
+            var disabled: Bool
+            var variants: Set<String>
+        }
+        var order: [String] = []
+        var buckets: [String: Bucket] = [:]
+
+        for item in parsed {
+            let lower = item.key.lowercased()
+            var targetKey = item.key
+            var resolvedDisplay = item.displayName
+            var isOrch = false
+            var collectedVariants = Set(item.variants)
+
+            var codename: String? = nil
+            if let regex = orchIdRegex {
+                let range = NSRange(lower.startIndex..<lower.endIndex, in: lower)
+                if let m = regex.firstMatch(in: lower, range: range), let r = Range(m.range(at: 1), in: lower) {
+                    codename = String(lower[r])
+                }
+            }
+            if codename == nil, let regex = orchLabelRegex {
+                let range = NSRange(item.displayName.startIndex..<item.displayName.endIndex, in: item.displayName)
+                if let m = regex.firstMatch(in: item.displayName, range: range), let r = Range(m.range(at: 1), in: item.displayName) {
+                    let candidate = String(item.displayName[r]).lowercased()
+                    if !["pro", "flash", "default", "unknown", "g1"].contains(candidate) {
+                        codename = candidate
+                    }
+                }
+            }
+
+            if let codename {
+                isOrch = true
+                collectedVariants.insert("Orchestrator")
+                let basePattern = "^gemini-(\\d+(?:\\.\\d+)?)-" + NSRegularExpression.escapedPattern(for: codename) + "$"
+                if let baseRegex = try? NSRegularExpression(pattern: basePattern, options: [.caseInsensitive]),
+                   let matchedSibling = siblingBases.first(where: { sib in
+                       let r = NSRange(sib.startIndex..<sib.endIndex, in: sib)
+                       return baseRegex.firstMatch(in: sib, range: r) != nil
+                   }) {
+                    targetKey = matchedSibling
+                } else {
+                    targetKey = "gemini-4-\(codename)"
+                }
+                if let regex = orchLabelRegex {
+                    let r = NSRange(resolvedDisplay.startIndex..<resolvedDisplay.endIndex, in: resolvedDisplay)
+                    if regex.firstMatch(in: resolvedDisplay, range: r) != nil {
+                        resolvedDisplay = ""
+                    }
+                }
+            } else if let regex = thinkingRegex {
+                let range = NSRange(lower.startIndex..<lower.endIndex, in: lower)
+                if let m = regex.firstMatch(in: lower, range: range),
+                   let baseRange = Range(m.range(at: 1), in: lower),
+                   let sufRange = Range(m.range(at: 2), in: lower) {
+                    targetKey = String(lower[baseRange])
+                    let rawSuf = String(lower[sufRange]).lowercased()
+                    collectedVariants.insert(suffixLabels[rawSuf] ?? rawSuf)
+                    resolvedDisplay = stripDisplayTierSuffix(item.displayName)
+                }
+            }
+
+            if resolvedDisplay.isEmpty && isOrch {
+                let parts = targetKey.split(separator: "-")
+                if parts.count >= 3, parts[0] == "gemini" {
+                    let ver = parts[1]
+                    let code = parts[2].prefix(1).uppercased() + parts[2].dropFirst()
+                    resolvedDisplay = "Gemini \(ver) \(code)"
+                }
+            }
+
+            if var existing = buckets[targetKey] {
+                existing.disabled = existing.disabled && item.disabled
+                existing.variants.formUnion(collectedVariants)
+                if !isOrch && !resolvedDisplay.isEmpty && (!existing.hasNonOrchName || existing.displayName.isEmpty) {
+                    existing.displayName = resolvedDisplay
+                    existing.hasNonOrchName = true
+                }
+                buckets[targetKey] = existing
+            } else {
+                order.append(targetKey)
+                buckets[targetKey] = Bucket(
+                    key: targetKey,
+                    displayName: resolvedDisplay,
+                    hasNonOrchName: !isOrch && !resolvedDisplay.isEmpty,
+                    disabled: item.disabled,
+                    variants: collectedVariants
+                )
+            }
+        }
+
+        return order.compactMap { k in
+            guard let b = buckets[k] else { return nil }
+            let sortedVariants = b.variants.sorted { lhs, rhs in
+                let lo = unpricedVariantOrder[lhs] ?? 99
+                let ro = unpricedVariantOrder[rhs] ?? 99
+                return lo != ro ? lo < ro : lhs.localizedStandardCompare(rhs) == .orderedAscending
+            }
+            return UnpricedModelGroup(
+                key: b.key,
+                displayName: b.displayName.isEmpty ? b.key : b.displayName,
+                disabled: b.disabled,
+                variants: sortedVariants
+            )
+        }
+    }
+
     private func renderPayload(_ payload: [String: Any], resetScroll: Bool) {
         lastPayload = payload
         let synced = payload["synced"] as? Bool == true
@@ -510,16 +707,9 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         let pricingStatus = payload["pricingStatus"] as? [String: String] ?? [:]
         let modelCatalogState = payload["modelCatalogState"] as? [String: [String: Any]] ?? [:]
         let rawUnpriced = payload["unpricedLiveModels"] as? [[String: Any]] ?? []
-        let validUnpriced = rawUnpriced.compactMap { item -> (key: String, displayName: String, disabled: Bool)? in
-            guard let rawKey = item["key"] as? String else { return nil }
-            let key = rawKey.trimmingCharacters(in: .whitespacesAndNewlines)
-            guard !key.isEmpty else { return nil }
-            let displayName = (item["displayName"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
-            let disabled = item["disabled"] as? Bool == true
-            return (key: key, displayName: displayName, disabled: disabled)
-        }
+        let groupedUnpriced = Self.groupUnpricedLiveModels(rawUnpriced)
 
-        let activeCount = prices.count + validUnpriced.count
+        let activeCount = prices.count + groupedUnpriced.count
         let totalModels = activeCount > 0 ? activeCount : (status["modelCount"] as? Int ?? 0)
         let lastCheckMs: Double = (status["lastCheckAt"] as? NSNumber)?.doubleValue
             ?? (status["lastSyncAt"] as? NSNumber)?.doubleValue
@@ -540,6 +730,9 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             titleLabel.stringValue = healedCount > 0 ? L10n.t("pricing_sheet.synced_healed") : L10n.t("pricing_sheet.synced")
             if healedCount > 0 {
                 subtitleLabel.stringValue = L10n.t("pricing_sheet.healed_sub", ["count": healedCount])
+                subtitleLabel.isHidden = false
+            } else if !groupedUnpriced.isEmpty {
+                subtitleLabel.stringValue = L10n.t("pricing_sheet.synced_with_unpriced_sub", ["count": groupedUnpriced.count])
                 subtitleLabel.isHidden = false
             } else {
                 subtitleLabel.stringValue = ""
@@ -580,12 +773,44 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
 
         var summaryLines: [String] = []
 
-        for item in validUnpriced {
+        if !groupedUnpriced.isEmpty {
+            let bannerBox = DesignCardBox()
+            bannerBox.boxType = .custom
+            bannerBox.cornerRadius = 9
+            bannerBox.borderWidth = 0.75
+            bannerBox.borderColor = Design.dynamicAlpha(accessibleWarningColor(), 0.34)
+            bannerBox.fillColor = Design.dynamicAlpha(accessibleWarningColor(), 0.08, 0.12)
+            bannerBox.enablesHoverHighlight = false
+            bannerBox.contentViewMargins = .zero
+
+            let bannerIcon = symbol("sparkles", size: 12.5, color: accessibleWarningColor())
+            bannerIcon.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([
+                bannerIcon.widthAnchor.constraint(equalToConstant: 14),
+                bannerIcon.heightAnchor.constraint(equalToConstant: 14)
+            ])
+            let bannerLabel = text(
+                L10n.t("pricing_sheet.unpriced_summary_banner", ["count": groupedUnpriced.count]),
+                size: 11.5,
+                weight: .medium,
+                color: .labelColor,
+                wrap: true
+            )
+            bannerLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            let bannerRow = horizontal([bannerIcon, bannerLabel], spacing: 8)
+            bannerRow.alignment = .centerY
+            bannerBox.addSubview(bannerRow)
+            pin(bannerRow, to: bannerBox, inset: 9)
+            listStack.addArrangedSubview(bannerBox)
+            fillWidth(bannerBox, in: listStack)
+        }
+
+        for group in groupedUnpriced {
             let unpricedBadgeTitle = L10n.t("pricing_sheet.availability.unpriced_live")
-            var topViews = makeTitleViews(key: item.key, displayName: item.displayName)
+            var topViews = makeTitleViews(key: group.key, displayName: group.displayName)
             topViews.append(makeRigidBadge(unpricedBadgeTitle, color: accessibleWarningColor()))
             var summarySuffix = ""
-            if item.disabled {
+            if group.disabled {
                 let lockedTitle = L10n.t("pricing_sheet.availability.tier_locked")
                 topViews.append(makeRigidBadge(lockedTitle, color: accessibleWarningColor()))
                 summarySuffix = " [\(lockedTitle)]"
@@ -594,13 +819,23 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             let topRow = horizontal(topViews, spacing: 6)
             topRow.alignment = .centerY
 
-            let descLabel = text(L10n.t("pricing_sheet.unpriced_live_desc"), size: 11.5, color: Design.secondary, wrap: true)
-            let cardBody = vertical([topRow, descLabel], spacing: 4)
+            var cardRows: [NSView] = [topRow]
+            if !group.variants.isEmpty {
+                let variantsLabel = text(
+                    L10n.t("pricing_sheet.unpriced_variants", ["variants": group.variants.joined(separator: " · ")]),
+                    size: 11,
+                    color: Design.secondary,
+                    wrap: true
+                )
+                cardRows.append(variantsLabel)
+            }
+            let cardBody = vertical(cardRows, spacing: 4)
             for r in cardBody.arrangedSubviews { fillWidth(r, in: cardBody) }
             let card = makeCardBox(body: cardBody)
             listStack.addArrangedSubview(card)
             fillWidth(card, in: listStack)
-            summaryLines.append("\(item.key) [\(unpricedBadgeTitle)]\(summarySuffix)")
+            let variantsSummary = group.variants.isEmpty ? "" : " (\(group.variants.joined(separator: ", ")))"
+            summaryLines.append("\(group.key) [\(unpricedBadgeTitle)]\(summarySuffix)\(variantsSummary)")
         }
 
         let sortedKeys = prices.keys.sorted { lhs, rhs in
@@ -643,7 +878,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
 
         var retiredSummary: [String] = []
         if !retiredPrices.isEmpty {
-            if !validUnpriced.isEmpty || !sortedKeys.isEmpty {
+            if !groupedUnpriced.isEmpty || !sortedKeys.isEmpty {
                 let sep = divider()
                 listStack.addArrangedSubview(sep)
                 fillWidth(sep, in: listStack)
@@ -685,7 +920,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         }
         renderedRetiredSummaryLines = retiredSummary
 
-        if validUnpriced.isEmpty && sortedKeys.isEmpty && retiredPrices.isEmpty {
+        if groupedUnpriced.isEmpty && sortedKeys.isEmpty && retiredPrices.isEmpty {
             let emptyLabel = text(L10n.t("pricing_sheet.empty"), size: 12, color: Design.secondary)
             listStack.addArrangedSubview(emptyLabel)
         }

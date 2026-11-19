@@ -954,6 +954,7 @@ interface StageAccumulator {
 const COMPACT_MODEL_LABEL_RULES: ReadonlyArray<readonly [RegExp, string, string]> = [
   [/^gemini-4-carbon/, 'Carbon', 'C'],
   [/^gemini-4-argon/, 'Argon', 'A'],
+  [/^gemini-4-neon/, 'Neon', 'N'],
   [/^gemini-4-hydrogen/, 'Hydrogen', 'H'],
   [/^gemini-(?:[\d.]+-)?pro|^gemini-pro/, 'Pro', 'P'],
   [/^gemini-(?:[\d.]+-)?flash|^gemini-flash/, 'Flash', 'F'],
@@ -1029,10 +1030,13 @@ function classifyContextModelSlot(params: {
     /\borchestrator\b/i.test(stepModelName);
 
   if (isPlannerHint || (!combinedRaw && /\borchestrator\b|^MODEL_PLACEHOLDER_M66[78]$/i.test(fallbackInputModelId))) {
-    const hasCodenameInStep = /\b(?:carbon|argon|hydrogen)\b/i.test(combinedRaw);
+    const hasCodenameInStep = /\b(?:carbon|argon|hydrogen|neon)\b|\bgemini-pro-orchestrator-(?!g1(?:-|$))[a-z][a-z0-9]*\b/i.test(combinedRaw);
     const isCarbon = /\bcarbon\b/i.test(combinedRaw) || modelEnum === 1667 || /M667$/i.test(responseModel) || (!hasCodenameInStep && /\bcarbon\b/i.test(fallbackInputModelId));
     const isArgon = !isCarbon && (/\bargon\b/i.test(combinedRaw) || modelEnum === 1668 || /M668$/i.test(responseModel) || (!hasCodenameInStep && /\bargon\b/i.test(fallbackInputModelId)));
-    const dynMatch = !isCarbon && !isArgon ? `${combinedRaw} ${fallbackInputModelId}`.match(/Orchestrator\s*\(\s*([A-Za-z][A-Za-z0-9._-]{1,31})\s*\)/i) : null;
+    const dynMatch = !isCarbon && !isArgon
+      ? `${combinedRaw} ${fallbackInputModelId}`.match(/Orchestrator\s*\(\s*([A-Za-z][A-Za-z0-9._-]{1,31})\s*\)/i)
+        ?? `${combinedRaw} ${fallbackInputModelId}`.match(/\bgemini-pro-orchestrator-(?!g1(?:-|$))([a-z][a-z0-9]*)\b/i)
+      : null;
     const rawCode = isCarbon ? 'Carbon' : isArgon ? 'Argon' : dynMatch?.[1] || 'Argon';
     const lowerCode = rawCode.toLowerCase();
     const shortLabel = rawCode.charAt(0).toUpperCase() + rawCode.slice(1);
