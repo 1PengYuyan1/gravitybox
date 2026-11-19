@@ -6,6 +6,17 @@
 
 ## [Unreleased]
 
+## [1.1.3] - 2026-11-19
+
+### Added
+- **JSON Account Import & `0600` Backup Export (`#20`)**：`AddAccountSheet` 升级为「保存当前账号 + 从 JSON 导入账号」双卡布局，`AccountsPage` 头部新增「导出备份…」入口；后端 `importAccountsFromJson` / `exportAccountsBackup` 支持单文件、多文件与目录批量导入（单锁批量事务、按标准化邮箱去重以隔离外部 ID 碰撞），导出需经二次交互确认并由后端直接以 `0600` 权限原子落盘（IPC 零凭据返回）。
+
+### Changed
+- **Authoritative Remote Pricing Catalog & Official Host Watch**：`assets/pricing-feed.json`（保留 `schema: 1`）支持随包冷启动水合与完整生效快照接管，远端同步可直接热更新公开模型清单、别名、容量与中英定价依据（`ETag` / `304` + SHA-256 去重 + `pricingRevision` 实时联动界面与 HUD）；GitHub Actions 价格巡检改以 Antigravity 官方模型文档为权威真值源做原文精确核对与宿主过滤（忽略非宿主模型），核验通过后自动合入公开费率。
+- **Thinking-Variant Usage Summary Folding**：原生主窗口用量页、总览热门模型卡片及常驻菜单栏面板（`ModelUsageFold`）自动将同一基础模型的思考程度变体（`-low`、`-medium`、`-high`、`-xhigh`、`-extra-high`、`-extra-low`、`-thinking`、`-max`）合并汇总展示 Token、请求数与费用，同时保留请求明细流水原始模型标识。
+- **Same-Origin `agy` CLI Credential Sync & Compliant Switching (`#19`)**：切号与回滚时按非侵入原则同步已存在的同源 CLI 凭据文件（`~/.gemini/antigravity-cli/antigravity-oauth-token` 与 `~/.gemini/jetski-standalone-oauth-token`，不主动新建且完全隔离 `@google/gemini-cli` 凭据）；无 `.env` 凭据配置时允许持有有效 `refresh_token` 但 `access_token` 已过期的账号正常切号，并将 CLI 同步隔离于桌面端 7 天回滚文件摘要锁之外，确保 CLI 外部续期后仍可完整对称回滚。
+- **Three-Tier Periodic Quota Refresh & Dynamic Stale Threshold Alignment**：建立「后端过期待刷巡检（启动 5 秒 + 30 秒周期）+ 原生 `Assistant` 定时刷新与唤醒补刷 + 手动按需刷新」三层配额刷新机制；前后端统一将配额过期阈值动态对齐所选刷新间隔（`resolveQuotaStaleSeconds` / `quotaStaleThresholdSeconds`，默认 15 分钟，间隔大于 15 分钟时自动放宽为 `interval + 2m`），覆盖后端配额概览、主窗口账号卡片与常驻菜单栏面板并在切换刷新周期后即时生效。
+
 ## [1.1.2] - 2026-11-19
 
 ### Added
@@ -170,7 +181,8 @@
 ### Fixed
 - **Native UI**：保持菜单栏状态图标在不同翻译开关状态下的不透明度一致（`b9921e8`，已包含于 1.0.0）。
 
-[Unreleased]: https://github.com/Enzoo404/gravitybox/compare/v1.1.2...HEAD
+[Unreleased]: https://github.com/Enzoo404/gravitybox/compare/v1.1.3...HEAD
+[1.1.3]: https://github.com/Enzoo404/gravitybox/compare/v1.1.2...v1.1.3
 [1.1.2]: https://github.com/Enzoo404/gravitybox/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/Enzoo404/gravitybox/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/Enzoo404/gravitybox/compare/v1.0.5...v1.1.0
