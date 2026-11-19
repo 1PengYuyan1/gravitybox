@@ -222,6 +222,9 @@ describeContractGroup("连接与控制 · debug-port-missing", { concurrency: fa
 
   test('未运行时保持 waiting；已运行但无 DevToolsActivePort 时切到 debug-port-missing 并支持中英文与恢复连接', async () => {
     const profileDir = await mkdtemp(join(tmpdir(), 'gb-debug-port-'));
+    const fakeAppDir = join(profileDir, 'Antigravity.app');
+    await mkdir(join(fakeAppDir, 'Contents/Resources'), { recursive: true });
+    await writeFile(join(fakeAppDir, 'Contents/Resources/app.asar'), 'mock-asar');
     const keyPath = join(profileDir, 'mock-key.pem');
     const certPath = join(profileDir, 'mock-cert.pem');
     await execFileAsync('/usr/bin/openssl', [
@@ -252,7 +255,7 @@ describeContractGroup("连接与控制 · debug-port-missing", { concurrency: fa
     let ctrl;
     try {
       ctrl = new Controller({
-        appPath: '/Applications/Antigravity.app',
+        appPath: fakeAppDir,
         profile: profileDir,
         dictionary,
         hudEnabled: true,
@@ -306,7 +309,7 @@ describeContractGroup("连接与控制 · debug-port-missing", { concurrency: fa
         legacyPatch: false,
       };
       await writeFile(join(profileDir, 'DevToolsActivePort'), `${port}\n/devtools/browser/mock\n`);
-      for (let i = 0; i < 100; i++) {
+      for (let i = 0; i < 200; i++) {
         if (mockServer.receivedMethods.includes('Target.setDiscoverTargets') && ctrl.status.windows === 1) break;
         await new Promise((r) => setTimeout(r, 30));
       }
