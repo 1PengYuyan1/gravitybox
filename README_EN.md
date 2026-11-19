@@ -64,7 +64,7 @@ If you use Google **Antigravity** daily on macOS, you've probably hit a few blin
 ## 🚀 3-Minute Quick Start
 
 1. **Download & Install**: Grab the latest `GravityBox-<version>-arm64.dmg` from [GitHub Releases](https://github.com/Enzoo404/gravitybox/releases/latest) (self-contained runtime included—**no Node.js or external dependencies needed**), drag **GravityBox.app** into **Applications**, and run the one-line Gatekeeper command in [First-Time Installation](#first-time-installation) below.
-2. **Launch & Auto-Connect**: Open **GravityBox** and official **Antigravity**. GravityBox automatically connects to Antigravity windows—attaching the live Telemetry HUD right below your chat composer and applying your chosen display language.
+2. **Launch & Auto-Connect**: Open **GravityBox** and launch official **Antigravity** via GravityBox (or externally). GravityBox automatically connects to Antigravity windows—attaching the live Telemetry HUD right below your chat composer and applying your chosen display language. Starting with Antigravity `2.33.0`, if Antigravity was launched externally without a remote debugging port, GravityBox surfaces a **Debug Port Not Enabled** banner to guide a safe relaunch without force-killing your workspace.
 3. **Three Everyday Touchpoints**:
    - **While coding → Glance below the chat box**: Watch the live HUD capsules; hover for quick inspection or **click any capsule to pin its upward card** (press `Esc` or click outside to close).
    - **Quick checks → Click the Menu Bar icon**: Check `Usage · Quota · Accounts` anytime without leaving fullscreen, or use the top-right `···` menu to toggle HUD or switch languages.
@@ -183,7 +183,7 @@ Hover over (or click to pin) any capsule to open its detailed breakdown card:
 | **Antigravity Enhancement** | **Display Language** | `Follow System` (default)<br>`简体中文`<br>`English` | **Unified language selector**: Controls both GravityBox's own UI language and whether Antigravity's UI is dynamically localized into Simplified Chinese. Selecting `English` keeps both GravityBox and Antigravity in clean English immediately—no restart needed. |
 | **Antigravity Enhancement** | **Conversation HUD** | Toggle (default `On`) | Shows or hides the 3-capsule Telemetry HUD below Antigravity's chat box. **Independent of language**—you can keep Antigravity in English while enjoying the English HUD. |
 | **Quota & Pricing** | **Quota Refresh Interval** | `Manual Refresh` (default)<br>`Every 5 / 10 / 15 / 30 / 60 min` | How often GravityBox polls remaining quotas for saved accounts in the background. Leave on `Manual Refresh` for single-account use, or `10–15 min` when rotating accounts. |
-| **Quota & Pricing** | **Auto-Update Pricing Feed** | `Check Now` button + Toggle (default `Off`) | Syncs the public model pricing feed every 24 hours from GitHub / jsDelivr so newly launched models get accurate cost estimates without waiting for an app update.<br>Click **Check Now** to open the **Pricing Feed** sheet—inspect per-model input, cache read/write, and output rates with official source links, and automatically heal historical unpriced entries. |
+| **Quota & Pricing** | **Auto-Update Pricing Feed** | `Check Now` button + Toggle (default `Off`) | Syncs the public model pricing feed every 24 hours from GitHub / jsDelivr so newly launched models get accurate cost estimates without waiting for an app update.<br>Click **Check Now** to open the **Pricing Feed** sheet—inspect per-model input, cache read/write, and output rates with official source links, view newly launched unpriced models grouped cleanly by model family, and automatically heal historical unpriced entries. |
 | **System & Storage** | **Launch at Login** | Toggle (default `Off`) | Starts GravityBox quietly in the macOS menu bar whenever you log in. |
 | **System & Storage** | **Sync with Antigravity** | Toggle (default `Off`) | Automatically launches GravityBox when Antigravity opens and quits when Antigravity closes. |
 | **System & Storage** | **Storage & Maintenance** | Status badge + `Manage Storage…` | Displays reclaimable cache size (`Reclaimable XX MB` or `Healthy`) and opens the safe cleanup sheet (see Section 5 below). |
@@ -192,7 +192,7 @@ Hover over (or click to pin) any capsule to open its detailed breakdown card:
 
 ### 2. Overview (`Overview`) — Daily Snapshot at a Glance
 - **Active Account Quota Card**: Displays your active account, plan badge (`PRO` / `ULTRA` / `FREE`), and separate **5-Hour** vs. **Weekly** remaining bars with reset countdowns for Gemini, Claude/GPT, and standalone high-tier pools (such as `Gemini 4 Argon`). Missing or unauthorized pools are labeled honestly—never padded with fake `100%` bars.
-- **Today's 3 Metric Cards**: Shows **Today's Token Usage**, **Today's Estimated Cost**, and **Today's Requests**, each paired with your all-time cumulative total.
+- **Today's 3 Metric Cards**: Shows **Today's Token Usage**, **Today's Estimated Cost** (with a decoupled **`Partial`** badge when unpriced models exist, keeping the dollar figure clean), and **Today's Requests**, each paired with your all-time cumulative total.
 - **24-Hour Distribution & Active Models**: Hourly consumption bar chart (`00:00–23:00`) on the left, and top active models with request share and estimated cost on the right.
 
 ---

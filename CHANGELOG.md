@@ -6,17 +6,19 @@
 
 ## [Unreleased]
 
-## [1.1.2] - 2026-11-18
+## [1.1.2] - 2026-11-19
 
 ### Added
 - **Antigravity `2.33.0` Support & Debug-Port Safe Relaunch**：登记并验证 Google Antigravity `2.33.0` 官方包指纹与 AST 提取快照（`ui-strings/2.33.0.json`），补全 `2.33.0` 新增词条至 `dict/base.json` 及 `23` 条动态/内联 `TEMPLATE_RULES`（覆盖 `2.23.0` ~ `2.33.0`）；在 `AssistantProcessLifecycle` 全部拉起/重开路径统一传入 `--remote-debugging-port=0`，并在检测到 Antigravity 已运行但未开调试端口时通过 `debug-port-missing` 状态引导用户确认后优雅退出重连（严禁后台强杀）。
-- **Legacy Flash-Lite Historical Pricing Benchmarks**：新增 `gemini-2.5-flash-lite` 与 `gemini-3.5-flash-lite` 历史基准费率（`model-catalog.json` / `pricing-feed.json`），支持已定价历史 Flash-Lite 模型的目录展示与折叠归档，同时保留对 `gemini-4-hydrogen-sonar` 等未定价活跃模型的识别（`src/pricing.ts`）。
+- **Gemini 4 Neon, Legacy Flash-Lite Pricing & Pricing Watch Staging**：新增 `gemini-4-neon` 正式基准费率以及 `gemini-2.5-flash-lite`、`gemini-3.5-flash-lite` 历史基准费率（`model-catalog.json` / `pricing-feed.json`），支持已定价历史 Flash-Lite 模型的目录展示与折叠归档，同时保留对 `gemini-4-hydrogen-sonar` 等未定价活跃模型的识别（`src/pricing.ts`）；远端价格巡检（`tools/auto-update-pricing.mjs` / `.github/workflows/pricing-watch.yml`）支持自动暂存已发现官方费率的新模型候选（`staged_new_count`）。
 
 ### Changed
+- **Decoupled Partial Cost Badges & Family-Folded Pricing Sheet**：将主窗口总览/用量页与菜单栏面板中的「部分计价 / 部分」从金额主数值前缀解耦为独立语义徽章，并在模型明细精确标注「待定价 / 部分计价」（菜单栏简写「部分 / 待定价」）；`PricingSyncSheetController` 将未定价活跃模型按基座模型家族自动折叠归并、展示涵盖变体与统一提示横幅，并移除触发横幅时的冗余头部副标题（`Pages.swift` / `Usage.swift` / `MenuPanelController.swift` / `MenuPanelComponents.swift` / `PricingSyncSheetController.swift`）。
 - **Add-Account Sheet & Account Card Layout**：移除了「添加账号」弹窗中开发遗留的「Google 授权登录…」界面入口，精简为单卡确认布局（直接展示当前账号与「保存当前账号」导入入口，后台仍保留基于 `.env` 凭据的备用账号静默续期刷新配额能力），并优化账号卡片标题与徽章的水平挤压与省略表现（`Accounts.swift` / `AddAccountSheet.swift` / `account-quota.ts`）。
 - **Usage Protobuf Projection**：优化用量历史数据库解析与分块投影限制（`USAGE_PROJECTION_VERSION = 2`、`USAGE_PROTO_LIMITS`），降低超大会话记录读取开销（`protobuf-projection.ts` / `usage-scanner.ts`）。
 
 ### Fixed
+- **Main App & Menu Bar Backup Account Quota Sync**：修复在主窗口刷新已过期的备用账号配额后，菜单栏面板仍残留「已过期 / 数据已过期」状态的问题；为 `fetchAccountList` 增加 `accountListPendingRefetch` 排队重拉与 `accountsRevision` 匹配校验，单账号刷新后立即就地更新 `cachedAccounts` 并同步刷新菜单栏面板，`MenuPanelController` 在打开/切入配额与账号页签时校验 15 秒新鲜度，并统一主窗口折叠摘要与菜单栏对分窗口部分过期的展示口径（`Assistant.swift` / `AssistantAccountUsage.swift` / `MenuPanelController.swift` / `MenuPanelComponents.swift` / `Accounts.swift` / `src/main.ts`）。
 - **HUD Subagent Running vs. Waiting/Standing-by Accuracy**：将子智能体运行态步状态（`1=PENDING`、`2=RUNNING`、`8=GENERATING`）与轮次耗时活跃状态分离，排除 `WAITING(9)`、`swarm_wait` 待命步与兄弟并发防抖拖活，并在前端 `hud-manager.js` 排除 `waiting` / `standing_by` / `blocked` / `needs_attention` 等非运行圆点与横幅混杂数字，修复 Swarm 场景下 HUD 子智能体数量虚高的问题。
 - **IDE Bilingual Inline & SVG Icon Localization**：扩展 `engine.js` `INLINE_TAGS` 以支持 `<svg>` 图标占位及 `svg + span + button + span` 提示行整句映射，补齐“项目已存在”多片段弹窗、“创建项目”重复文件夹提示与“对话已归档”含图标通知等界面汉化。
 
