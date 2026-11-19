@@ -1634,7 +1634,7 @@ import Cocoa
             check(pricingSheet.retiredListStack?.isHidden == true, "retiredListStack must be hidden by default")
             check(pricingSheet.renderedRetiredSummaryLines.count == 2 && pricingSheet.renderedRetiredSummaryLines[0].contains("claude-3.5-sonnet [已核对]") && pricingSheet.renderedRetiredSummaryLines[1].contains("gemini-2.5-pro [历史基准]"), "renderedRetiredSummaryLines must track retired models sorted by key")
             let visibleSheetTexts = allTextValues(pricingSheet.sheet.contentView!)
-            check(!pricingSheet.subtitleLabel.isHidden && pricingSheet.subtitleLabel.stringValue == "已同步最新公开价格表；另有 2 组新模型待上游补充单价", "Sheet header subtitle must announce unpriced model count when synced: \(pricingSheet.subtitleLabel.stringValue)")
+            check(pricingSheet.subtitleLabel.isHidden && pricingSheet.subtitleLabel.stringValue.isEmpty, "Sheet header subtitle must stay hidden when unpriced banner already explains it: \(pricingSheet.subtitleLabel.stringValue)")
             check(visibleSheetTexts.contains("Gemini 4 Argon") && visibleSheetTexts.contains("Gemini 4.5 Live") && visibleSheetTexts.contains { $0.contains("检测到 2 组新上线模型暂未公布公开单价") }, "Sheet must render displayName and unified unpriced summary banner")
             func findPricingScrollView(_ v: NSView) -> NSScrollView? {
                 if let sv = v as? NSScrollView { return sv }
@@ -2078,7 +2078,7 @@ import Cocoa
             enPricingSheet.retiredToggleBtn?.performClick(nil); pump()
             check(enPricingSheet.retiredToggleBtn?.title == "▾ Deprecated Models (2 · Historical Ledger Only)", "Expanded English toggle title must match spec: \(enPricingSheet.retiredToggleBtn?.title ?? "nil")")
             let enPricingTexts = allTextValues(enPricingSheet.sheet.contentView!)
-            check(!enPricingSheet.subtitleLabel.isHidden && enPricingSheet.subtitleLabel.stringValue == "Synced latest pricing feed; 1 new model(s) awaiting upstream rates", "English pricing sheet header subtitle must align with unpriced model count: \(enPricingSheet.subtitleLabel.stringValue)")
+            check(enPricingSheet.subtitleLabel.isHidden && enPricingSheet.subtitleLabel.stringValue.isEmpty, "English pricing sheet header subtitle must stay hidden when unpriced banner is shown: \(enPricingSheet.subtitleLabel.stringValue)")
             check(enPricingTexts.contains("New · Rate Pending") && enPricingTexts.contains("Locked on Current Plan") && enPricingTexts.contains("Active on ULTRA") && enPricingTexts.contains("Deprecated") && enPricingTexts.contains { $0.contains("Detected 1 newly launched model(s) without public rates yet") }, "English pricing sheet must localize all badges and unified banner: \(enPricingTexts)")
             let enPricingCjkLeaks = enPricingTexts.filter { $0.range(of: "[\\u4E00-\\u9FFF]", options: .regularExpression) != nil }
             check(enPricingCjkLeaks.isEmpty, "English pricing sheet must not leak Chinese characters: \(enPricingCjkLeaks)")

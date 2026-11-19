@@ -731,9 +731,6 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             if healedCount > 0 {
                 subtitleLabel.stringValue = L10n.t("pricing_sheet.healed_sub", ["count": healedCount])
                 subtitleLabel.isHidden = false
-            } else if !groupedUnpriced.isEmpty {
-                subtitleLabel.stringValue = L10n.t("pricing_sheet.synced_with_unpriced_sub", ["count": groupedUnpriced.count])
-                subtitleLabel.isHidden = false
             } else {
                 subtitleLabel.stringValue = ""
                 subtitleLabel.isHidden = true

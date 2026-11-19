@@ -641,7 +641,6 @@
     "pricing_sheet.done": "完成",
     "pricing_sheet.synced_healed": "价格基准已同步并补齐历史记录",
     "pricing_sheet.synced": "价格基准已同步",
-    "pricing_sheet.synced_with_unpriced_sub": "已同步最新公开价格表；另有 {count} 组新模型待上游补充单价",
     "pricing_sheet.healed_sub": "已自动补齐 {count} 条历史未计价记录",
     "pricing_sheet.sync_incomplete": "同步未完成，展示当前生效基准",
     "pricing_sheet.check_hint": "检查提示：{error}",

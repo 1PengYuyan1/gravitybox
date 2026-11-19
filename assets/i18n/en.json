@@ -641,7 +641,6 @@
     "pricing_sheet.done": "Done",
     "pricing_sheet.synced_healed": "Pricing Feed Synced & History Backfilled",
     "pricing_sheet.synced": "Pricing Feed Synced",
-    "pricing_sheet.synced_with_unpriced_sub": "Synced latest pricing feed; {count} new model(s) awaiting upstream rates",
     "pricing_sheet.healed_sub": "Automatically backfilled {count} unpriced historical record(s)",
     "pricing_sheet.sync_incomplete": "Sync incomplete; showing active local feed",
     "pricing_sheet.check_hint": "Check notice: {error}",
