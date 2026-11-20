@@ -444,73 +444,91 @@ import Cocoa
                 }
             }
 
-            // 1) 双卡添加账号模式（v1.1.3 Issue #20：第一卡「保存当前账号」主操作 + 第二卡「从 JSON 导入账号」，彻底移除 Google OAuth 登录按钮）
+            // 1) 三卡管理账号模式（第一卡「保存当前账号」主操作 + 第二卡「导入账号」 + 第三卡「导出账号」，彻底移除 Google OAuth 登录按钮）
             let prevStatusForAdd = assistant.statusValue
             assistant.statusValue = LiveStatus(fixtureStatus)
             check(assistant.statusValue.oauthClientConfigured == false, "Fixture default status must treat oauthClientConfigured as false")
-            let addSheet = AddAccountSheet(app: assistant, saved: {})
+            let addSheet = AddAccountSheet(app: assistant, accountCount: 3, saved: {})
             addSheet.show(in: window, onDismiss: {})
             addSheet.window.appearance = NSAppearance(named: appearance)
             addSheet.window.contentView?.layoutSubtreeIfNeeded(); pump()
             let singleContent = addSheet.window.contentView!
             check(!allTextValues(singleContent).contains { $0.contains("Google 授权登录") || $0.contains("Sign in with Google") }, "AddAccountSheet must not render removed Google OAuth button")
-            check(addSheet.currentButton.isDescendant(of: singleContent) && addSheet.currentButton.isEnabled, "Dual-card AddAccountSheet must present enabled currentButton")
-            check(addSheet.importJsonButton.isDescendant(of: singleContent) && addSheet.importJsonButton.isEnabled, "Dual-card AddAccountSheet must present enabled importJsonButton")
-            check(addSheet.currentButton.bezelColor == Design.blue && addSheet.currentButton.keyEquivalent == "\r", "Dual-card currentButton must be primary blue Return button")
-            check(addSheet.currentButton.toolTip == nil && addSheet.importJsonButton.toolTip == nil && addSheet.cancelButton.toolTip == nil, "AddAccountSheet buttons must not set toolTip")
+            check(addSheet.currentButton.isDescendant(of: singleContent) && addSheet.currentButton.isEnabled, "Three-card AddAccountSheet must present enabled currentButton")
+            check(addSheet.importJsonButton.isDescendant(of: singleContent) && addSheet.importJsonButton.isEnabled, "Three-card AddAccountSheet must present enabled importJsonButton")
+            check(addSheet.exportButton.isDescendant(of: singleContent) && addSheet.exportButton.isEnabled, "Three-card AddAccountSheet must present enabled exportButton when accounts exist")
+            check(addSheet.currentButton.bezelColor == Design.blue && addSheet.currentButton.keyEquivalent == "\r", "Three-card currentButton must be primary blue Return button")
+            check(addSheet.currentButton.toolTip == nil && addSheet.importJsonButton.toolTip == nil && addSheet.exportButton.toolTip == nil && addSheet.cancelButton.toolTip == nil, "AddAccountSheet buttons must not set toolTip")
             check(addSheet.window.initialFirstResponder === addSheet.currentButton && addSheet.window.firstResponder === addSheet.currentButton, "Initial focus must land on currentButton")
             let singleZhHeight = singleContent.frame.height
-            check(singleZhHeight > 210 && singleZhHeight < 310, "Dual-card AddAccountSheet height must be compact (got \(singleZhHeight))")
+            check(singleZhHeight > 280 && singleZhHeight < 415, "Three-card AddAccountSheet height must be compact (got \(singleZhHeight))")
             let singleLabels = findLabels(singleContent)
             check(singleLabels.contains { $0.stringValue == "当前 Antigravity 账号" }, "AddAccountSheet must show current account card title")
-            check(singleLabels.contains { $0.stringValue == "从 JSON 导入账号" }, "AddAccountSheet must show JSON import card title")
+            check(singleLabels.contains { $0.stringValue == "导入账号" }, "AddAccountSheet must show JSON import card title")
+            check(singleLabels.contains { $0.stringValue == "导出账号" }, "AddAccountSheet must show JSON export card title")
             if let subLbl = singleLabels.first(where: { $0.stringValue == "导入当前 Antigravity 登录账号" }) {
-                verifyLabelNotTruncated(subLbl, context: "Dual-card zh save subtitle")
+                verifyLabelNotTruncated(subLbl, context: "Three-card zh save subtitle")
             } else {
                 check(false, "AddAccountSheet missing zh save subtitle")
             }
             if let importSubLbl = singleLabels.first(where: { $0.stringValue == "支持导入 GravityBox 备份文件、单账号 JSON 或账号文件夹" }) {
-                verifyLabelNotTruncated(importSubLbl, context: "Dual-card zh import subtitle")
+                verifyLabelNotTruncated(importSubLbl, context: "Three-card zh import subtitle")
             } else {
                 check(false, "AddAccountSheet missing zh import subtitle")
+            }
+            if let exportSubLbl = singleLabels.first(where: { $0.stringValue == "将已保存的 3 个账号导出为 JSON 文件（含登录凭据，请妥善保管）" }) {
+                verifyLabelNotTruncated(exportSubLbl, context: "Three-card zh export subtitle")
+            } else {
+                check(false, "AddAccountSheet missing zh export subtitle")
             }
             check(singleLabels.contains { $0.stringValue == "alex@example.invalid" }, "AddAccountSheet must show copyable current email")
             check(!allTextValues(singleContent).contains { $0.localizedCaseInsensitiveContains("Insiders") }, "AddAccountSheet must not mention Insiders")
             try capture(singleContent, output.appendingPathComponent("\(theme)-add-account.png"))
 
-            // 展开 feedback 与 busy 状态：同时禁用两个卡片按钮且高度紧贴内容
+            // 展开 feedback 与 busy 状态：同时禁用三个卡片按钮且高度紧贴内容
             addSheet.status.stringValue = "正在从 JSON 导入账号…"
             addSheet.busy(true); pump()
-            check(!addSheet.currentButton.isEnabled && !addSheet.importJsonButton.isEnabled, "Busy state must disable both currentButton and importJsonButton")
+            check(!addSheet.currentButton.isEnabled && !addSheet.importJsonButton.isEnabled && !addSheet.exportButton.isEnabled, "Busy state must disable currentButton, importJsonButton, and exportButton")
             let singleBusyHeight = singleContent.frame.height
-            check(singleBusyHeight > singleZhHeight + 8 && singleBusyHeight < 345, "Expanded feedback height must hug content (got \(singleBusyHeight))")
+            check(singleBusyHeight > singleZhHeight + 8 && singleBusyHeight < 455, "Expanded feedback height must hug content (got \(singleBusyHeight))")
             addSheet.status.stringValue = ""
             addSheet.busy(false); pump()
-            check(addSheet.currentButton.isEnabled && addSheet.importJsonButton.isEnabled, "Clearing busy state must re-enable both card buttons")
-            check(abs(singleContent.frame.height - singleZhHeight) <= 1, "Collapsing feedback must restore compact dual-card height")
+            check(addSheet.currentButton.isEnabled && addSheet.importJsonButton.isEnabled && addSheet.exportButton.isEnabled, "Clearing busy state must re-enable all card buttons")
+            check(abs(singleContent.frame.height - singleZhHeight) <= 1, "Collapsing feedback must restore compact three-card height")
 
-            // 中英文热切换：双卡文案与按钮全部更新且高度自适应不截断
+            // 中英文热切换：三卡文案与按钮全部更新且高度自适应不截断
             L10n.shared.setLanguage("en", notify: true); pump()
             addSheet.window.contentView?.layoutSubtreeIfNeeded()
             let singleEnLabels = findLabels(singleContent)
             check(singleEnLabels.contains { $0.stringValue == "Current Antigravity Account" }, "English hot-switch must update card 1 title")
-            check(singleEnLabels.contains { $0.stringValue == "Import from JSON" }, "English hot-switch must update card 2 title")
-            check(addSheet.currentButton.title == "Save Current Account" && addSheet.importJsonButton.title == "Choose Files…" && addSheet.cancelButton.title == "Cancel", "English hot-switch must update card and footer buttons")
+            check(singleEnLabels.contains { $0.stringValue == "Import Accounts" }, "English hot-switch must update card 2 title")
+            check(singleEnLabels.contains { $0.stringValue == "Export Accounts" }, "English hot-switch must update card 3 title")
+            check(addSheet.currentButton.title == "Save Current Account" && addSheet.importJsonButton.title == "Choose Files…" && addSheet.exportButton.title == "Export File…" && addSheet.cancelButton.title == "Cancel", "English hot-switch must update card and footer buttons")
             if let enSub = singleEnLabels.first(where: { $0.stringValue == "Import active Antigravity sign-in session" }) {
-                verifyLabelNotTruncated(enSub, context: "Dual-card en save subtitle")
+                verifyLabelNotTruncated(enSub, context: "Three-card en save subtitle")
             } else {
                 check(false, "English hot-switch missing card 1 subtitle")
             }
             if let enImportSub = singleEnLabels.first(where: { $0.stringValue == "Import GravityBox backup files, single-account JSON files, or a folder" }) {
-                verifyLabelNotTruncated(enImportSub, context: "Dual-card en import subtitle")
+                verifyLabelNotTruncated(enImportSub, context: "Three-card en import subtitle")
             } else {
                 check(false, "English hot-switch missing card 2 subtitle")
             }
-            check(singleContent.frame.height < 320, "Dual-card English sheet height must remain compact (got \(singleContent.frame.height))")
+            if let enExportSub = singleEnLabels.first(where: { $0.stringValue == "Export 3 saved account(s) as a JSON file (includes credentials; store securely)" }) {
+                verifyLabelNotTruncated(enExportSub, context: "Three-card en export subtitle")
+            } else {
+                check(false, "English hot-switch missing card 3 subtitle")
+            }
+            check(singleContent.frame.height < 425, "Three-card English sheet height must remain compact (got \(singleContent.frame.height))")
             L10n.shared.setLanguage("zh-Hans", notify: true); pump()
             addSheet.dismiss(); waitForSheetDetach(on: window, description: "AddAccountSheet to detach")
 
-            // 2) 即使配置了 .env 后台续期凭据（oauthClientConfigured == true），AddAccountSheet 仍保持固定双卡且 mergeStatusSnapshot 保留该状态字段
+            // 2) 0 账号时导出按钮自动禁用；同时验证导入与导出控制流
+            let emptyManageSheet = AddAccountSheet(app: assistant, accountCount: 0, saved: {})
+            check(!emptyManageSheet.exportButton.isEnabled, "Export button must be disabled when 0 accounts are saved")
+            emptyManageSheet.busy(false)
+            check(!emptyManageSheet.exportButton.isEnabled, "Clearing busy state must keep export button disabled when 0 accounts are saved")
+
             var oauthStatusRaw = fixtureStatus
             oauthStatusRaw["oauthClientConfigured"] = true
             let withOAuthStatus = LiveStatus(oauthStatusRaw)
@@ -519,27 +537,42 @@ import Cocoa
             assistant.statusValue = withOAuthStatus
             var importSavedCallbackFired = false
             var expiredNoticeCaptured: (String, String)? = nil
-            let oauthSheet = AddAccountSheet(app: assistant, saved: { importSavedCallbackFired = true })
+            let oauthSheet = AddAccountSheet(app: assistant, accountCount: 3, saved: { importSavedCallbackFired = true })
             oauthSheet.show(in: window, onDismiss: {})
             oauthSheet.window.appearance = NSAppearance(named: appearance)
             oauthSheet.window.contentView?.layoutSubtreeIfNeeded(); pump()
             let oauthContent = oauthSheet.window.contentView!
-            check(oauthSheet.currentButton.isDescendant(of: oauthContent) && oauthSheet.importJsonButton.isDescendant(of: oauthContent), "AddAccountSheet must keep dual-card layout regardless of oauthClientConfigured")
+            check(oauthSheet.currentButton.isDescendant(of: oauthContent) && oauthSheet.importJsonButton.isDescendant(of: oauthContent) && oauthSheet.exportButton.isDescendant(of: oauthContent), "AddAccountSheet must keep three-card layout regardless of oauthClientConfigured")
             check(!allTextValues(oauthContent).contains { $0.contains("Google 授权登录") || $0.contains("Sign in with Google") }, "AddAccountSheet must never show removed Google OAuth button")
             let prevFixtureReplyForImport = assistant.bridge.fixtureReply
+            var exportedPayloadFromSheet: [String: Any]? = nil
             assistant.bridge.fixtureReply = { payload in
                 if (payload["command"] as? String) == "account_import_json" {
                     return ["ok": true, "imported": 2, "updated": 1, "skipped": [["source": "bad.json", "reason": "缺少有效的 refresh_token"]], "expiredWithoutRefreshConfig": 1]
+                }
+                if (payload["command"] as? String) == "account_export_backup" {
+                    exportedPayloadFromSheet = payload
+                    return ["ok": true, "path": payload["path"] as? String ?? "", "count": 3]
                 }
                 return prevFixtureReplyForImport?(payload) ?? ["ok": true]
             }
             oauthSheet.filePickerHook = { [URL(fileURLWithPath: "/tmp/mock-accounts-backup.json")] }
             oauthSheet.expiredNoticeHook = { title, body in expiredNoticeCaptured = (title, body) }
             oauthSheet.importFromJson(); pump()
-            assistant.bridge.fixtureReply = prevFixtureReplyForImport
             check(importSavedCallbackFired, "Successful JSON import must trigger saved callback")
             check(expiredNoticeCaptured?.0 == "部分导入账号的短期凭据已过期" && (expiredNoticeCaptured?.1.contains("1 个账号") == true), "JSON import with expiredWithoutRefreshConfig > 0 must surface expired credential notice")
-            oauthSheet.dismiss(); waitForSheetDetach(on: window, description: "OAuth AddAccountSheet to detach")
+
+            let exportSheet = AddAccountSheet(app: assistant, accountCount: 3, saved: {})
+            exportSheet.show(in: window, onDismiss: {})
+            exportSheet.exportConfirmHook = { true }
+            exportSheet.exportSavePanelHook = { defaultName in
+                check(defaultName.hasPrefix("gravitybox-accounts-backup-") && defaultName.hasSuffix(".json"), "Export accounts default filename must match gravitybox-accounts-backup-YYYYMMDD.json")
+                return URL(fileURLWithPath: "/tmp/\(defaultName)")
+            }
+            exportSheet.exportAccounts(); pump()
+            assistant.bridge.fixtureReply = prevFixtureReplyForImport
+            check((exportedPayloadFromSheet?["confirmed"] as? Bool) == true && (exportedPayloadFromSheet?["path"] as? String)?.hasPrefix("/tmp/gravitybox-accounts-backup-") == true, "Export accounts inside Manage Accounts sheet must send account_export_backup with confirmed: true")
+            exportSheet.dismiss(); waitForSheetDetach(on: window, description: "Export AddAccountSheet to detach")
             assistant.statusValue = prevStatusForAdd
             let logSheet = UsageLogController(app:assistant,period:"today")
             logSheet.show(in:window,onDismiss:{})
@@ -1057,7 +1090,7 @@ import Cocoa
         let statusButton = NSButton(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
         let baseIcon = assistant.baseMenuConnectedIcon()
         check(baseIcon != nil, "baseMenuConnectedIcon must load valid icon")
-        check(baseIcon?.size == NSSize(width: 18, height: 18), "baseMenuConnectedIcon size must be 18x18")
+        check(baseIcon?.size == NSSize(width: 20, height: 20), "baseMenuConnectedIcon size must be 20x20")
         check(baseIcon?.isTemplate == true, "baseMenuConnectedIcon must be marked as template for system auto-tinting")
         assistant.updateStatusItemState(buttonOverride: statusButton)
         check(statusButton.image === baseIcon, "Status item image must be baseMenuConnectedIcon")
@@ -1318,29 +1351,12 @@ import Cocoa
         window.appearance = NSAppearance(named: .aqua)
         window.contentView?.layoutSubtreeIfNeeded(); pump()
         func allAccButtons(_ v: NSView) -> [NSButton] { (v as? NSButton).map { [$0] } ?? v.subviews.flatMap { allAccButtons($0) } }
-        check(!allAccButtons(accPage.view).contains { $0.title == "备份…" }, "AccountsPage header must remove legacy 备份… button")
-        check(!accPage.exportBackupButton.isHidden && accPage.exportBackupButton.title == "导出备份…" && accPage.exportBackupButton.toolTip == nil, "AccountsPage header must expose 导出备份… button with zero toolTip when accounts exist")
-        var exportedCommandPayload: [String: Any]? = nil
-        let prevReplyForExport = assistant.bridge.fixtureReply
-        assistant.bridge.fixtureReply = { payload in
-            if (payload["command"] as? String) == "account_export_backup" {
-                exportedCommandPayload = payload
-                return ["ok": true, "path": payload["path"] as? String ?? "", "count": 3]
-            }
-            return prevReplyForExport?(payload) ?? ["ok": true]
-        }
-        accPage.exportConfirmHook = { true }
-        accPage.exportSavePanelHook = { defaultName in
-            check(defaultName.hasPrefix("gravitybox-accounts-backup-") && defaultName.hasSuffix(".json"), "Export backup default filename must match gravitybox-accounts-backup-YYYYMMDD.json")
-            return URL(fileURLWithPath: "/tmp/\(defaultName)")
-        }
-        accPage.exportAccountsBackup(); pump()
-        assistant.bridge.fixtureReply = prevReplyForExport
-        check((exportedCommandPayload?["confirmed"] as? Bool) == true && (exportedCommandPayload?["path"] as? String)?.hasPrefix("/tmp/gravitybox-accounts-backup-") == true, "Export backup action must send account_export_backup with confirmed: true")
+        check(!allAccButtons(accPage.view).contains { $0.title == "备份…" || $0.title == "导出备份…" }, "AccountsPage header must remove standalone 备份… and 导出备份… buttons")
+        check(accPage.manageAccountsButton.title == "管理账号…" && accPage.manageAccountsButton.toolTip == nil, "AccountsPage header must expose 管理账号… button")
         check((accPage.toggleCollapseAllButton as? DesignButton)?.isQuietAccessory == false, "AccountsPage 收起配额/展开配额 button must match global capsule button style")
         check(accPage.autoSwitchStatusBadge.title == "已停用", "Smart switch disabled state must retain 已停用 pill badge")
         let offSubtitle = accPage.policySubtitleLabel.stringValue
-        check(offSubtitle.contains("需确认后切换"), "Smart switch subtitle must clarify manual confirmation before switching: \(offSubtitle)")
+        check(offSubtitle.contains("需手动确认切换"), "Standby advisor subtitle must clarify manual confirmation before switching: \(offSubtitle)")
         accPage.autoSwitchToggle.state = .on
         accPage.updateAutoSwitchState()
         check(accPage.autoSwitchStatusBadge.title.hasPrefix("已启用"), "Smart switch enabled state must display 已启用 pill badge")
@@ -1387,6 +1403,10 @@ import Cocoa
         stableAccounts.updateAutoSwitchState()
         check(stableAccounts.autoSwitchToggle.isEnabled && stableAccounts.configButton.isEnabled, "All account switch controls must remain enabled for stable Antigravity")
         check(!allTextValues(stableAccounts.view).contains { $0.localizedCaseInsensitiveContains("Insiders") }, "Accounts UI must not mention Insiders")
+        check(Assistant.desiredActivationPolicy(isWindowVisible: false, isWindowMiniaturized: false, isQuitting: false) == .accessory, "Closed main window must return to .accessory menu-bar-only mode")
+        check(Assistant.desiredActivationPolicy(isWindowVisible: true, isWindowMiniaturized: false, isQuitting: false) == .regular, "Visible main window must use .regular mode for Stage Manager and Dock")
+        check(Assistant.desiredActivationPolicy(isWindowVisible: false, isWindowMiniaturized: true, isQuitting: false) == .regular, "Miniaturized main window must stay .regular instead of dropping Dock association")
+        check(Assistant.desiredActivationPolicy(isWindowVisible: true, isWindowMiniaturized: false, isQuitting: true) == .accessory, "Quitting app must revert to .accessory")
         let stableAdd = AddAccountSheet(app: assistant) {}
         check(stableAdd.currentButton.isEnabled, "Save current account must remain enabled")
         stableAdd.busy(false)
@@ -2039,7 +2059,24 @@ import Cocoa
             mPanel.selectTab(2, persist: false); mPanel.panelWillOpen(); pump()
             check(allTextValues(mPanel.accountsCardsStack).contains("推荐备用"), "P0-07: MenuPanel must read cachedRecommendedAccountId even before AccountsPage opens")
             p1Host.setGlobalLanguage("en"); pump()
-            check(p1Host.menuPanelController == nil && p1Host.menuPopover?.contentViewController == nil, "P0-07: Closed popover controller and contentViewController must clear on language switch")
+            check(p1Host.menuPanelController == nil && p1Host.menuPanel?.contentView == nil && p1Host.menuPanel?.contentViewController == nil, "P0-07: Closed panel controller and contentView must clear on language switch")
+            let panelCtrlForTest = p1Host.ensureMenuPanelController()
+            let floatingPanel = p1Host.ensureMenuPanel(hosting: panelCtrlForTest)
+            check(floatingPanel.styleMask.contains(.nonactivatingPanel) && floatingPanel.canBecomeKey && !floatingPanel.canBecomeMain && !floatingPanel.hidesOnDeactivate, "MenuFloatingPanel must use non-activating keyable panel so background/Stage Manager clicks open reliably without pulling main window")
+            check(floatingPanel.contentViewController == nil && floatingPanel.contentView === panelCtrlForTest.view, "MenuFloatingPanel must attach controller.view directly without contentViewController to prevent preferredContentSize layout conflicts")
+            check(panelCtrlForTest.preferredContentSize == .zero, "MenuPanelController hosted in MenuFloatingPanel must clear preferredContentSize so AppKit does not install priority-501 height constraints")
+            check(floatingPanel.collectionBehavior.contains(.canJoinAllSpaces) && floatingPanel.collectionBehavior.contains(.fullScreenAuxiliary) && floatingPanel.collectionBehavior.contains(.canJoinAllApplications) && floatingPanel.collectionBehavior.contains(.ignoresCycle), "MenuFloatingPanel must stay reachable across Spaces, full-screen apps, and Stage Manager")
+            check(floatingPanel.level == .statusBar && floatingPanel.level.rawValue < NSWindow.Level.popUpMenu.rawValue, "MenuFloatingPanel must sit at .statusBar level (25) so screenshot tools can snap to it and NSMenu layers above it")
+            let rootView = panelCtrlForTest.view as? MenuPanelRootView
+            check(rootView != nil && rootView?.maskImage != nil && (rootView?.layer?.cornerRadius ?? -1) == 0 && (rootView?.layer?.borderWidth ?? -1) == 0 && rootView?.subviews.last is MenuPanelRimOverlayView, "MenuPanelRootView must use maskImage rounded clipping and top MenuPanelRimOverlayView without layer cornerRadius/border artifacts")
+            floatingPanel.setFrame(NSRect(x: 400, y: 300, width: MenuPanelController.panelWidth, height: 420), display: false)
+            let anchoredMaxY = floatingPanel.frame.maxY
+            p1Host.resizeMenuPanel(to: NSSize(width: MenuPanelController.panelWidth, height: 500), animate: false)
+            check(abs(floatingPanel.frame.maxY - anchoredMaxY) <= 1 && abs(floatingPanel.frame.height - 500) <= 1, "Resizing MenuFloatingPanel upward must keep top edge anchored below menu bar (beforeMaxY=\(anchoredMaxY), after=\(floatingPanel.frame))")
+            p1Host.resizeMenuPanel(to: NSSize(width: MenuPanelController.panelWidth, height: 360), animate: false)
+            check(abs(floatingPanel.frame.maxY - anchoredMaxY) <= 1 && abs(floatingPanel.frame.height - 360) <= 1, "Resizing MenuFloatingPanel downward must keep top edge anchored below menu bar (beforeMaxY=\(anchoredMaxY), after=\(floatingPanel.frame))")
+            p1Host.menuPanelController = nil
+            p1Host.menuPanel?.contentView = nil
             let reopenedPanel = p1Host.ensureMenuPanelController()
             reopenedPanel.selectTab(2, persist: false); reopenedPanel.panelWillOpen(); pump()
             check(allTextValues(reopenedPanel.accountsCardsStack).contains("Recommended") && !allTextValues(reopenedPanel.accountsCardsStack).contains("推荐备用"), "P0-07: Recreated MenuPanel must preserve recommendation badge in English")
@@ -2570,11 +2607,29 @@ import Cocoa
             dynAccountsPage.view.frame = NSRect(x: 0, y: 0, width: 920, height: 760)
             dynAccountsPage.fetch(["accounts": [ultraAcc, proAcc], "activeId": "ultra-1"]); pump()
             dynAccountsPage.fetchPolicy(); pump()
-            check(dynAccountsPage.policySubtitleLabel.stringValue == "监测 Gemini · 剩余 ≤ 10% 时推荐候选（≥ 30%，需确认后切换）", "Ultra active account must display pooled Gemini summary even if saved policy says argon")
+            check(dynAccountsPage.policySubtitleLabel.stringValue == "监测 Gemini · 剩余 ≤ 10% 时推荐备用（≥ 30%，需手动确认切换）", "Ultra active account must display pooled Gemini summary even if saved policy says argon")
+            check((dynAccountsPage.policySubtitleLabel.toolTip ?? "").contains("自适应为 Gemini"), "Ultra active account policy subtitle tooltip explains cross-tier adaptation")
+            var capturedSavedMonitored: String?
+            let prevDynFixture = dynAccountsHost.bridge.fixtureReply
+            dynAccountsHost.bridge.fixtureReply = { request in
+                if (request["command"] as? String) == "auto_switch_set",
+                   let cfg = request["config"] as? [String: Any] {
+                    capturedSavedMonitored = cfg["monitored_model"] as? String
+                }
+                return prevDynFixture?(request) ?? ["ok": true]
+            }
             let ultraScopedPolicy = AccountPolicySheet(app: dynAccountsHost, config: ["strategy": "priority", "monitored_model": "argon", "reserve_percentage": 10, "candidate_min_percentage": 30], saved: {})
             ultraScopedPolicy.window.contentView?.layoutSubtreeIfNeeded()
             check((ultraScopedPolicy.modelPopup.menu?.items ?? []).filter { !$0.isSeparatorItem }.map(\.title) == ["全部可用模型", "Gemini", "Claude/GPT"], "Ultra active account policy popup must not leak standby Pro account's Gemini 4 Argon")
             check(ultraScopedPolicy.modelPopup.selectedItem?.title == "Gemini", "Ultra active account policy popup must remap argon selection to Gemini")
+            ultraScopedPolicy.save(); pump()
+            check(capturedSavedMonitored == "argon", "Saving Ultra policy sheet without modifying monitored scope must preserve underlying argon config")
+            dynAccountsHost.bridge.fixtureReply = prevDynFixture
+            var ultraWithNeon = ultraAcc
+            ultraWithNeon["models"] = [
+                ["name": "gemini-4-neon", "model_id": "gemini-4-neon", "display_name": "Gemini 4 Neon", "disabled": false]
+            ]
+            check(QuotaPresentation.monitoredScopeSubtitle(for: "gemini", activeAccount: ultraWithNeon) == "Ultra 套餐已将 Argon、Carbon 与 Neon 并入此共享池，一并监测", "Ultra gemini subtitle dynamically lists newly pooled Neon model")
             check(ultraScopedPolicy.strategyPopup.frame.width == ultraScopedPolicy.modelPopup.frame.width, "Ultra policy popups must share uniform width")
             check(ultraScopedPolicy.modelPopup.frame.width <= 130 && ultraScopedPolicy.modelPopup.frame.width >= Design.fittedPopUpWidth(ultraScopedPolicy.modelPopup) - 0.5, "Ultra policy popups must shrink tightly to longest option without 220pt bloat (got \(ultraScopedPolicy.modelPopup.frame.width))")
             check((ultraScopedPolicy.window.contentView?.frame.height ?? 999) < 395 && ultraScopedPolicy.fieldsCard.frame.height <= (groupStack(ultraScopedPolicy.fieldsCard)?.fittingSize.height ?? 0) + 34, "Ultra policy sheet must hug content without bottom blank space (contentH=\(ultraScopedPolicy.window.contentView?.frame.height ?? -1), cardH=\(ultraScopedPolicy.fieldsCard.frame.height))")
@@ -2622,6 +2677,10 @@ import Cocoa
             assistant.reachable = true
             assistant.statusValue = LiveStatus(["mode": "connected", "windows": 1, "entries": 4300])
 
+            let dbgStatusBtn = NSButton(frame: NSRect(x: 0, y: 0, width: 22, height: 22))
+            assistant.updateStatusItemState(buttonOverride: dbgStatusBtn)
+            check(dbgStatusBtn.subviews.first(where: { $0.identifier?.rawValue == "status-item-attention-dot" })?.isHidden == true, "Menu bar attention dot must stay hidden when connected")
+
             let dbgMenu = MenuPanelController(app: assistant)
             let dbgPanelHost = makeHeadlessHostWindow(width: MenuPanelController.panelWidth, height: MenuPanelController.defaultPanelHeight)
             dbgPanelHost.contentViewController = dbgMenu
@@ -2636,53 +2695,57 @@ import Cocoa
             check(dbgOverview.debugPortBannerBox.isHidden == true && dbgOverview.safeRelaunchButton.isHidden == true, "DashboardPage must hide debugPortBannerBox and safeRelaunchButton when connected")
 
             assistant.statusValue = LiveStatus(["mode": "debug-port-missing", "running": true])
+            assistant.updateStatusItemState(buttonOverride: dbgStatusBtn)
+            check(dbgStatusBtn.subviews.first(where: { $0.identifier?.rawValue == "status-item-attention-dot" })?.isHidden == false, "Menu bar attention dot must appear in amber orange when mode is debug-port-missing")
+            check(dbgStatusBtn.image?.isTemplate == true, "Base menu bar icon must remain a template image while showing attention dot")
             dbgMenu.syncFromAssistant(); pump()
             dbgPanelHost.setContentSize(dbgMenu.preferredContentSize)
             dbgPanelHost.contentView?.layoutSubtreeIfNeeded(); pump()
             check(dbgMenu.debugPortBannerBox.isHidden == false && dbgMenu.safeRelaunchBtn.isHidden == false, "MenuPanel must display debugPortBannerBox and safeRelaunchBtn in debug-port-missing mode")
-            check(dbgMenu.safeRelaunchBtn.title == "安全重启 Antigravity 以连接", "MenuPanel safeRelaunchBtn title must match requirement")
+            check(dbgMenu.safeRelaunchBtn.title == "安全重启以连接", "MenuPanel safeRelaunchBtn title must match requirement")
+            check(dbgMenu.safeRelaunchBtn.bezelColor == nil && dbgMenu.safeRelaunchBtn.intrinsicContentSize.height == 24, "MenuPanel safeRelaunchBtn must use compact 24pt translucent glass style without heavy blue fill")
             check(dbgMenu.safeRelaunchBtn.toolTip == nil, "MenuPanel safeRelaunchBtn must not set tooltip")
             check(dbgMenu.openAntigravityBtn.isHidden == false && dbgMenu.openAntigravityBtn.title == "打开 Antigravity", "MenuPanel openAntigravityBtn must remain unaffected in debug-port-missing mode")
             let dbgMenuTexts = allTextValues(dbgMenu.debugPortBannerBox)
-            check(dbgMenuTexts.contains("未开启调试端口") && dbgMenuTexts.contains(where: { $0.contains("未开启调试端口") }), "MenuPanel debug banner must present clear cause copy")
+            check(dbgMenuTexts.contains("未开启调试端口") && dbgMenuTexts.contains(where: { $0.contains("调试端口") }), "MenuPanel debug banner must present clear cause copy")
 
             dbgOverview.update(); pump()
             dbgOverview.view.layoutSubtreeIfNeeded(); pump()
             check(dbgOverview.debugPortBannerBox.isHidden == false && dbgOverview.safeRelaunchButton.isHidden == false, "DashboardPage must display debugPortBannerBox and safeRelaunchButton in debug-port-missing mode")
-            check(dbgOverview.safeRelaunchButton.title == "安全重启 Antigravity 以连接", "DashboardPage safeRelaunchButton title must match requirement")
+            check(dbgOverview.safeRelaunchButton.bezelColor == nil && dbgOverview.safeRelaunchButton.intrinsicContentSize.height == 24, "DashboardPage safeRelaunchButton must use compact 24pt glass style without heavy blue fill")
+            check(dbgOverview.safeRelaunchButton.title == "安全重启以连接", "DashboardPage safeRelaunchButton title must match requirement")
             check(dbgOverview.safeRelaunchButton.toolTip == nil, "DashboardPage safeRelaunchButton must not set tooltip")
             let dbgOverviewTexts = allTextValues(dbgOverview.debugPortBannerBox)
-            check(dbgOverviewTexts.contains("未开启调试端口") && dbgOverviewTexts.contains(where: { $0.contains("未开启调试端口") }), "DashboardPage debug banner must present clear cause copy")
+            check(dbgOverviewTexts.contains("未开启调试端口") && dbgOverviewTexts.contains(where: { $0.contains("调试端口") }), "DashboardPage debug banner must present clear cause copy")
 
             check(Assistant.remoteDebuggingArguments == ["--remote-debugging-port=0"], "Cold launch and relaunch must inject --remote-debugging-port=0")
 
-            // Test safeRelaunchAntigravityForDebug confirmation cancel path, graceful exit + relaunch path, and timeout path
+            // Test safeRelaunchAntigravityForDebug direct execution (no secondary confirmation modal or forced main window pop), graceful exit + relaunch path, and timeout path
             var simulatedRunning = true
             var terminateCalls = 0
-            var alertTitleCaptured = ""
-            var alertBodyCaptured = ""
-            var alertButtonsCaptured: [String] = []
-            let opensBeforeSafeCancel = assistant.openedApplications
+            let opensBeforeMenuClick = assistant.openedApplications
+            let mainWinVisibleBeforeMenuClick = assistant.window?.isVisible == true
             assistant.setSafeRelaunchTestingHooks(SafeRelaunchTestingHooks(
-                confirm: { alert, reply in
-                    alertTitleCaptured = alert.messageText
-                    alertBodyCaptured = alert.informativeText
-                    alertButtonsCaptured = alert.buttons.map(\.title)
-                    reply(false)
-                },
                 isRunning: { simulatedRunning },
-                terminate: { terminateCalls += 1 },
-                timeoutSeconds: 0.4,
+                terminate: {
+                    terminateCalls += 1
+                    DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(30)) {
+                        simulatedRunning = false
+                    }
+                },
+                timeoutSeconds: 2.0,
                 pollIntervalMilliseconds: 20
             ))
-            dbgMenu.safeRelaunchBtn.performClick(nil); pump()
-            check(alertTitleCaptured.contains("安全重启") && alertBodyCaptured.contains("未保存"), "Safe relaunch confirmation must remind user to save unsaved work")
-            check(alertButtonsCaptured == ["安全重启并连接", "取消"], "Safe relaunch confirmation buttons must be 安全重启并连接 and 取消 (got \(alertButtonsCaptured))")
-            check(terminateCalls == 0 && assistant.openedApplications == opensBeforeSafeCancel, "Cancelling safe relaunch must not terminate or reopen Antigravity")
+            dbgMenu.safeRelaunchBtn.performClick(nil)
+            waitUntil(description: "safeRelaunchAntigravityForDebug direct menu banner execution") {
+                assistant.openedApplications == opensBeforeMenuClick + 1
+            }
+            check(terminateCalls == 1 && assistant.openedApplications == opensBeforeMenuClick + 1, "Menu banner safe relaunch must directly terminate gracefully and reopen Antigravity without a redundant modal alert")
+            check((assistant.window?.isVisible == true) == mainWinVisibleBeforeMenuClick, "Menu banner safe relaunch must not force-open the main window")
 
+            simulatedRunning = true
             let opensBeforeSafeConfirm = assistant.openedApplications
             assistant.setSafeRelaunchTestingHooks(SafeRelaunchTestingHooks(
-                confirm: { _, reply in reply(true) },
                 isRunning: { simulatedRunning },
                 terminate: {
                     terminateCalls += 1
@@ -2697,14 +2760,13 @@ import Cocoa
             waitUntil(description: "safeRelaunchAntigravityForDebug graceful exit and relaunch") {
                 assistant.openedApplications == opensBeforeSafeConfirm + 1
             }
-            check(terminateCalls == 1 && assistant.openedApplications == opensBeforeSafeConfirm + 1, "Confirmed safe relaunch must terminate gracefully and reopen Antigravity with --remote-debugging-port=0")
+            check(terminateCalls == 2 && assistant.openedApplications == opensBeforeSafeConfirm + 1, "Overview safe relaunch must terminate gracefully and reopen Antigravity with --remote-debugging-port=0")
 
             // Timeout path: Antigravity stays running past timeout, must report manual quit guidance and never reopen or force-kill
             var stuckRunning = true
             let opensBeforeTimeout = assistant.openedApplications
             assistant.showMessage("", error: false)
             assistant.setSafeRelaunchTestingHooks(SafeRelaunchTestingHooks(
-                confirm: { _, reply in reply(true) },
                 isRunning: { stuckRunning },
                 terminate: { terminateCalls += 1 },
                 timeoutSeconds: 0.2,
@@ -2725,7 +2787,6 @@ import Cocoa
             var launchAttemptsSeen: [Int] = []
             let opensBeforeSubprocDrain = assistant.openedApplications
             assistant.setSafeRelaunchTestingHooks(SafeRelaunchTestingHooks(
-                confirm: { _, reply in reply(true) },
                 isRunning: { mainAppAlive },
                 hasSubprocesses: {
                     if !mainAppAlive && helperSubprocessAlive {
@@ -2760,7 +2821,6 @@ import Cocoa
             assistant.showMessage("", error: false)
             var failedAttempts = 0
             assistant.setSafeRelaunchTestingHooks(SafeRelaunchTestingHooks(
-                confirm: { _, reply in reply(true) },
                 isRunning: { false },
                 hasSubprocesses: { false },
                 terminate: {},
@@ -3186,6 +3246,118 @@ import Cocoa
             check(intVal(folded[0], "requestCount") == 6, "Folded requestCount must sum to 6")
             check(abs(doubleVal(folded[0], "estimatedUsd") - 0.48) < 1e-6, "Folded estimatedUsd must sum to 0.48")
             check((folded[1]["model"] as? String) == "gemini-3.8-flash-n", "Non-thinking -n suffix must remain distinct")
+        }
+
+        // OPT-08 / OPT-11 / OPT-12 / OPT-16: Claude Fable/Mythos & GPT-6+ safe sorting, MenuPanel warningSummary/outdated footer/15s refresh & keyboard navigation
+        do {
+            L10n.shared.setLanguage("zh-Hans", notify: false)
+            let futureHost = Assistant(state: state.appendingPathComponent("opt-future-pricing"))
+            futureHost.configuration = try ConfigurationStore(state: futureHost.state)
+            futureHost.bridge = BackendBridge(resources: state, state: futureHost.state)
+            futureHost.reachable = true
+            let futureSheet = PricingSyncSheetController(app: futureHost)
+            let futurePayload: [String: Any] = [
+                "synced": true,
+                "status": ["lastCheckAt": 1794539910722.0, "modelCount": 5],
+                "prices": [
+                    "claude-opus-5-5": ["input": 4.0, "output": 20.0, "cached": 0.2],
+                    "claude-fable-5-2": ["input": 8.0, "output": 40.0, "cached": 0.2],
+                    "claude-mythos-5-2": ["input": 8.0, "output": 40.0, "cached": 0.2],
+                    "gpt-6.2-astra": ["input": 8.0, "output": 40.0, "cached": 0.4],
+                    "gpt-6-luna": ["input": 0.1, "output": 0.5, "cached": 0.01],
+                ],
+                "pricingStatus": [
+                    "claude-opus-5-5": "confirmed",
+                    "claude-fable-5-2": "confirmed",
+                    "claude-mythos-5-2": "confirmed",
+                    "gpt-6.2-astra": "confirmed",
+                    "gpt-6-luna": "confirmed",
+                ],
+                "modelCatalogState": [
+                    "claude-opus-5-5": ["availability": "available", "displayName": "Claude Opus 5.5"],
+                    "claude-fable-5-2": ["availability": "available", "displayName": "Claude Fable 5.2"],
+                    "claude-mythos-5-2": ["availability": "available", "displayName": "Claude Mythos 5.2"],
+                    "gpt-6.2-astra": ["availability": "available", "displayName": "GPT-6.2 Astra"],
+                    "gpt-6-luna": ["availability": "available", "displayName": "GPT-6 Luna"],
+                ]
+            ]
+            futureSheet.show(in: window, payload: futurePayload)
+            pump()
+            let sortedFutureKeys = futureSheet.renderedSummaryLines.compactMap { $0.split(separator: " ").first.map(String.init) }
+            check(sortedFutureKeys.count == 5, "Future models must render without NSRangeException crash (got \(sortedFutureKeys.count))")
+            if let opusIdx = sortedFutureKeys.firstIndex(of: "claude-opus-5-5"),
+               let fableIdx = sortedFutureKeys.firstIndex(of: "claude-fable-5-2"),
+               let astraIdx = sortedFutureKeys.firstIndex(of: "gpt-6.2-astra"),
+               let lunaIdx = sortedFutureKeys.firstIndex(of: "gpt-6-luna") {
+                check(opusIdx < fableIdx, "Claude 5.5 must sort before Claude Fable 5.2")
+                check(astraIdx < lunaIdx, "GPT-6.2 Astra must sort before GPT-6 Luna")
+            } else {
+                check(false, "Expected all future model keys in renderedSummaryLines: \(sortedFutureKeys)")
+            }
+            futureSheet.closeSheet(); waitForSheetDetach(on: window, description: "Future PricingSyncSheetController to detach")
+
+            let optHost = Assistant(state: state.appendingPathComponent("opt-menu-panel"))
+            optHost.configuration = try ConfigurationStore(state: optHost.state)
+            optHost.bridge = BackendBridge(resources: state, state: optHost.state)
+            optHost.reachable = true
+            optHost.menuTracking = true
+            var usageCalls = 0
+            var recommendCalls = 0
+            optHost.bridge.fixtureReply = { req in
+                let cmd = req["command"] as? String ?? ""
+                if cmd == "usage_summary" {
+                    usageCalls += 1
+                    return [
+                        "ok": true, "period": "today", "snapshotId": "opt11-snap-\(usageCalls)",
+                        "summary": ["availability": "complete", "totalTokens": 1200, "requestCount": 2, "estimatedUsd": 0.25, "pricedModels": 1, "unpricedModels": 0],
+                        "byModel": [["model": "gemini-3.6-flash", "totalTokens": 1200, "requestCount": 2, "estimatedUsd": 0.25, "priced": true, "pricingStatus": "expired"]],
+                        "dailyTrends": [], "todayHourly": []
+                    ]
+                }
+                if cmd == "auto_switch_best" {
+                    recommendCalls += 1
+                    return ["ok": true, "shouldSwitch": true, "account": ["id": "opt-b"]]
+                }
+                return ["ok": true]
+            }
+            optHost.cachedAccounts = [
+                [
+                    "id": "opt-a", "email": "opta@example.invalid", "subscription_tier": "PRO",
+                    "quotaWarnings": ["NO_MODEL_RECORDS: 未返回模型配额记录"],
+                    "quotaWarningCodes": ["NO_MODEL_RECORDS"]
+                ],
+                ["id": "opt-b", "email": "optb@example.invalid", "subscription_tier": "PRO"]
+            ]
+            optHost.activeAccountId = "opt-a"
+            optHost.lastFetchedAccountsRevision = "rev-opt-1"
+            let optMenu = optHost.ensureMenuPanelController()
+            optMenu.selectTab(0, persist: false); pump()
+            let callsAfterOpen = usageCalls
+            check(callsAfterOpen >= 1, "OPT-11: Initial MenuPanel Tab 0 should fetch usage_summary")
+            optHost.usageLastFetchTimeByPeriod["today"] = Date(timeIntervalSinceNow: -20)
+            optMenu.syncFromAssistant(updateSize: false)
+            pump()
+            check(usageCalls > callsAfterOpen, "OPT-11: Stale 15s usage cache while MenuPanel Tab 0 is shown must auto-refresh usage_summary")
+            check(optMenu.usageFooterLabel.stringValue.contains("价格待核对") || optMenu.usageFooterLabel.stringValue.contains("定价已过期"), "OPT-11: MenuPanel usage footer must indicate expired model pricing")
+
+            optMenu.selectTab(1, persist: false); pump()
+            check(!optMenu.quotaWarningLabel.isHidden && !optMenu.quotaWarningLabel.stringValue.isEmpty, "OPT-11: MenuPanel quota tab must display QuotaPresentation.warningSummary")
+
+            optMenu.selectTab(2, persist: false); pump()
+            check(recommendCalls == 1 && optHost.cachedRecommendedAccountId == "opt-b", "OPT-12: MenuPanel standalone mode must query auto_switch_best(preview) and populate cachedRecommendedAccountId")
+            check(allTextValues(optMenu.accountsCardsStack).contains("推荐备用"), "OPT-12: MenuPanel accounts card must show 推荐备用 badge without opening AccountsPage")
+            let optACard = optMenu.accountsCardsStack.arrangedSubviews.compactMap { $0 as? MenuExpandableAccountCardView }.first { $0.accountId == "opt-a" }
+            check((optACard?.warningLabel.isHidden == false) && !(optACard?.warningLabel.stringValue.isEmpty ?? true), "OPT-11: MenuExpandableAccountCardView must display QuotaPresentation.warningSummary")
+
+            // OPT-16: Segmented tabs left/right keyboard navigation
+            let segTabs = MenuSegmentedTabsView(items: ["A", "B", "C"], style: .primaryTabs, accessibilityLabel: "TestTabs")
+            segTabs.moveSelection(by: 1)
+            check(segTabs.selectedIndex == 1, "OPT-16: MenuSegmentedTabsView right arrow moves selection to index 1")
+            segTabs.moveSelection(by: -1)
+            check(segTabs.selectedIndex == 0, "OPT-16: MenuSegmentedTabsView left arrow moves selection back to index 0")
+            let designSeg = DesignSegmentedControl(labels: ["One", "Two", "Three"])
+            designSeg.moveSelection(by: 2)
+            check(designSeg.selectedSegment == 2, "OPT-16: DesignSegmentedControl right arrow moves selection to index 2")
         }
 
         let result:[String:Any] = ["stableOnlySelectionPassed":true,"nativeLayouts":captures.count,"captures":captures,"enCaptures":enCaptures,"menuCaptures":6,"safeSwitchSharedFlowPassed":true,"emailWidthPassed":true,"partialPricingPassed":true,"headlessNoVisibleWindowLeaksPassed":true,"nativeAssertions":assertionCount,"scope":"isolated synthetic AppKit fixture; not installed-app acceptance"]

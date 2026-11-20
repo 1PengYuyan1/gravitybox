@@ -242,6 +242,7 @@ extension Assistant {
         scheduleUIBootstrapSave()
     }
 
+    /// @testonly 保留供 test/native-ui.swift 验证菜单切号状态机，生产环境已统一由 MenuPanelController 承载。
     func buildAccountSwitchMenu() -> NSMenu {
         let switchSubmenu = NSMenu(title: L10n.t("assistant_account.switch_submenu"))
         switchSubmenu.showsStateColumn = true
@@ -301,13 +302,14 @@ extension Assistant {
         if contentVisible && currentPage == 2 {
             usagePage?.fetch()
         }
-        if menuTracking || menuPopover?.isShown == true {
+        if menuTracking || isMenuPanelShown {
             let periodKey = menuPanelController.map { MenuPanelController.periods[$0.selectedPeriod] } ?? "today"
             fetchUsageSummary(period: periodKey, force: true, allowCached: false)
             menuPanelController?.syncFromAssistant()
         }
     }
 
+    /// @testonly 保留供 test/native-ui.swift 验证菜单切号状态机，生产环境已统一由 MenuPanelController 承载。
     @objc func switchAccountFromMenu(_ sender: NSMenuItem) {
         guard let id = sender.representedObject as? String else { return }
         switchAccountByIdFromMenu(id)
@@ -457,7 +459,7 @@ extension Assistant {
         }
         apply(pageHost)
         updateStatusItemState()
-        if menuTracking || menuPopover?.isShown == true {
+        if menuTracking || isMenuPanelShown {
             menuPanelController?.syncFromAssistant()
         }
     }
@@ -532,9 +534,43 @@ extension Assistant {
                 self.updateQuotaRefreshControls()
                 self.menuPanelController?.syncFromAssistant()
                 if shouldNotifyPage { self.accountsPage?.fetch(val) }
+                self.refreshRecommendedAccountIfNeeded()
                 self.checkAndTriggerOverdueQuotaRefreshIfNeeded()
             }
             for waiter in waiters { waiter(res) }
+        }
+    }
+
+    func refreshRecommendedAccountIfNeeded(force: Bool = false) {
+        if cachedAccounts.count <= 1 {
+            if cachedRecommendedAccountId != nil {
+                cachedRecommendedAccountId = nil
+                accountsPage?.recommendedAccountId = nil
+                menuPanelController?.syncFromAssistant(updateSize: true)
+            }
+            return
+        }
+        guard reachable,
+              !(contentVisible && currentPage == 1),
+              (menuTracking || isMenuPanelShown),
+              !recommendationPreviewInFlight else { return }
+        let fingerprint = "\(lastFetchedAccountsRevision)|\(activeAccountId)|\(cachedAccounts.count)"
+        guard force || fingerprint != lastRecommendedAccountsFingerprint else { return }
+        recommendationPreviewInFlight = true
+        bridge.send(["command": "auto_switch_best", "preview": true]) { [weak self] res in
+            guard let self else { return }
+            self.recommendationPreviewInFlight = false
+            guard case .success(let value) = res else { return }
+            self.lastRecommendedAccountsFingerprint = fingerprint
+            let candidate = value["account"] as? [String: Any]
+            let candidateId = candidate?["id"] as? String
+            let shouldSwitch = value["shouldSwitch"] as? Bool ?? false
+            let nextId = (shouldSwitch && candidateId != nil && candidateId != self.activeAccountId) ? candidateId : nil
+            if self.cachedRecommendedAccountId != nextId {
+                self.cachedRecommendedAccountId = nextId
+                self.accountsPage?.recommendedAccountId = nextId
+                self.menuPanelController?.syncFromAssistant(updateSize: true)
+            }
         }
     }
     func failPendingQuotaRefresh(_ message: String, cancelBackendTask: Bool = false) {

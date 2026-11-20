@@ -257,6 +257,12 @@ import Cocoa
         check(QuotaPresentation.effectiveMonitoredModelKey("gemini_all", activeAccount: ultraAccPayload) == "gemini", "Ultra remaps gemini_all to shared gemini pool")
         check(QuotaPresentation.monitoredScopeSubtitle(for: "gemini", activeAccount: ultraAccPayload).contains("Argon 与 Carbon 并入此共享池"), "Ultra gemini subtitle explains pooled Argon/Carbon")
         check(QuotaPresentation.monitoredModelDisplayName("argon", activeAccount: ultraAccPayload) == "Gemini", "Ultra display name resolves argon to Gemini")
+        var ultraWithNeonPayload = ultraAccPayload
+        ultraWithNeonPayload["models"] = [
+            ["name": "gemini-pro-orchestrator-neon", "model_id": "gemini-pro-orchestrator-neon", "display_name": "Orchestrator (Neon)", "disabled": false]
+        ]
+        check(QuotaPresentation.monitoredScopeSubtitle(for: "gemini", activeAccount: ultraWithNeonPayload).contains("Argon、Carbon 与 Neon 并入此共享池"), "Ultra gemini subtitle dynamically appends Neon when pooled")
+        check(QuotaPresentation.effectiveMonitoredModelKey("gemini-4-neon", activeAccount: ultraWithNeonPayload) == "gemini", "Ultra remaps neon to shared gemini pool")
 
         let freeChoices = QuotaPresentation.monitoredScopeChoices(for: freeAccPayload)
         check(freeChoices.filter { !$0.isSeparator }.map(\.title) == ["全部可用模型", "Gemini", "Claude/GPT"], "Free monitored choices expose only available core pools")

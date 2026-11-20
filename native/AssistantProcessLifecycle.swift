@@ -263,37 +263,13 @@ extension Assistant {
         guard !safeRelaunchInFlightIds.contains(key) else { return }
         safeRelaunchInFlightIds.insert(key)
 
-        let alert = NSAlert()
-        alert.alertStyle = .warning
-        alert.messageText = L10n.t("assistant.safe_relaunch_title", fallback: "安全重启 Antigravity 以开启调试连接？")
-        alert.informativeText = L10n.t("assistant.safe_relaunch_body", fallback: "Antigravity 当前未开启远程调试端口，需带调试参数重新启动。请先保存 Antigravity 中未保存的工作；确认后 GravityBox 将温和请求退出并带调试端口重新打开 Antigravity。")
-        alert.addButton(withTitle: L10n.t("assistant.safe_relaunch_confirm", fallback: "安全重启并连接"))
-        alert.addButton(withTitle: L10n.t("common.cancel", fallback: "取消"))
-
-        let execute: (Bool) -> Void = { [weak self] confirmed in
-            guard let self else {
-                safeRelaunchInFlightIds.remove(key)
-                return
-            }
-            guard confirmed else {
-                safeRelaunchInFlightIds.remove(key)
-                return
-            }
-            self.performSafeRelaunchAfterConfirm(key: key)
-        }
-
         #if NATIVE_UI_TEST
-        if let confirmHook = safeRelaunchTestingHooksById[key]?.confirm {
-            confirmHook(alert, execute)
-        } else {
+        guard safeRelaunchTestingHooksById[key] != nil else {
             safeRelaunchInFlightIds.remove(key)
-        }
-        return
-        #else
-        presentSheetAlert(alert) { response in
-            execute(response == .alertFirstButtonReturn)
+            return
         }
         #endif
+        performSafeRelaunchAfterConfirm(key: key)
     }
 
     private func performSafeRelaunchAfterConfirm(key: ObjectIdentifier) {
@@ -725,7 +701,7 @@ extension Assistant {
                     if self.contentVisible && self.currentPage == 2 {
                         self.usagePage?.fetch()
                     }
-                    if self.menuPopover?.isShown == true, let panel = self.menuPanelController {
+                    if self.isMenuPanelShown, let panel = self.menuPanelController {
                         let periodKey = MenuPanelController.periods[max(0, min(MenuPanelController.periods.count - 1, panel.selectedPeriod))]
                         self.fetchUsageSummary(period: periodKey, force: true, allowCached: false)
                     }

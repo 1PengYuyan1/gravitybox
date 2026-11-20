@@ -471,6 +471,7 @@ export class AccountsManager {
               custom_label: acc.custom_label,
               quota: acc.quota,
               quota_refresh_error: acc.quota_refresh_error,
+              quota_refresh_error_code: acc.quota_refresh_error_code ?? null,
               revision: computeAccountRevision(acc),
               quota_last_updated: acc.quota?.last_updated ?? 0,
             });
@@ -603,6 +604,7 @@ export class AccountsManager {
         custom_label: toSave.custom_label,
         quota: toSave.quota,
         quota_refresh_error: toSave.quota_refresh_error,
+        quota_refresh_error_code: toSave.quota_refresh_error_code ?? null,
         revision: computeAccountRevision(toSave),
         quota_last_updated: toSave.quota?.last_updated ?? 0,
       };
@@ -1059,6 +1061,7 @@ export class AccountsManager {
           custom_label: toSave.custom_label,
           quota: toSave.quota,
           quota_refresh_error: toSave.quota_refresh_error,
+          quota_refresh_error_code: toSave.quota_refresh_error_code ?? null,
           revision: computeAccountRevision(toSave),
           quota_last_updated: toSave.quota?.last_updated ?? 0,
         };
@@ -2150,6 +2153,7 @@ export class AccountsManager {
         ...acc,
         quota: saved?.quota ?? null,
         quota_refresh_error: cleanAndLocalizeRefreshError(saved?.quota_refresh_error),
+        quota_refresh_error_code: saved?.quota_refresh_error_code ?? acc.quota_refresh_error_code ?? null,
         revision: baseRevision + ':' + readiness.state,
         credentialReadiness: readiness,
         quota_last_updated: saved?.quota?.last_updated ?? 0,

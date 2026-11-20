@@ -5,10 +5,14 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { AccountsManager } from '../dist/accounts.js';
 import {
+  accountCredentialReadiness,
   buildAccountQuotaOverview,
   computeAccountRemaining,
   resolveEffectiveMonitoredModel,
+  subscriptionTierRank,
 } from '../dist/account-quota.js';
+import { normalizeCatalogTierLabel } from '../dist/pricing.js';
+import { resolveUnsavedLiveSubscriptionTier } from '../dist/main.js';
 import {
   projectAccountForIpcNormalized,
   projectQuotaContract,
@@ -921,6 +925,169 @@ test('1.1.1 终审回归: computeAccountRemaining 含 Argon 别名对齐与云�
   });
   assert.equal(partialRefreshed.quota?.refresh_state?.complete, false);
   assert.equal(partialRefreshed.quota?.subscription_tier, 'PRO', '不完整云端回退刷新不得把已存 PRO 误降级为 FREE');
+});
+
+test('新代号模型自动识别（gemini-pro-orchestrator-neon / Gemini 4 Neon）与跨套餐动态兜底', async t => {
+  const { classifyFamily } = await import('../dist/quota.js');
+  assert.equal(classifyFamily({ modelId: 'gemini-4-neon', displayName: 'Gemini 4 Neon' }), 'other');
+  assert.equal(classifyFamily({ modelId: 'gemini-pro-orchestrator-neon', displayName: 'Orchestrator (Neon)' }), 'other');
+  assert.equal(classifyFamily({ modelId: 'gemini-pro-orchestrator-neon' }), 'other');
+
+  const nowSec = Math.floor(Date.now() / 1000);
+  const reset5h = new Date((nowSec + 3600) * 1000).toISOString();
+  const reset7d = new Date((nowSec + 7 * 86400) * 1000).toISOString();
+
+  // 1. Pro 下拥有独立 quota_bucket_name: "Gemini 4 Neon" 或刚上线 100% 且无 reset_time 时不被共享池误吞
+  const proWithNeon = {
+    id: 'pro-neon',
+    email: 'pro-neon@example.invalid',
+    disabled: false,
+    protected_models: [],
+    created_at: nowSec,
+    last_used: nowSec,
+    quota: {
+      subscription_tier: 'PRO',
+      source: 'cloud',
+      last_updated: nowSec,
+      is_forbidden: false,
+      model_forwarding_rules: {},
+      quota_groups: [
+        {
+          display_name: 'Gemini Models',
+          family: 'gemini',
+          buckets: [{ bucket_id: 'g-5h', window: '5h', remaining_fraction: 1, remaining_fraction_known: true, reset_time: '' }],
+        },
+      ],
+      models: [
+        { name: 'gemini-3.8-flash', model_id: 'gemini-3.8-flash', family: 'gemini', percentage: 100, percentage_known: true, own_percentage: 100, own_percentage_known: true, own_reset_time: '', reset_time: '' },
+        { name: 'gemini-4-neon-high', model_id: 'gemini-4-neon-high', display_name: 'Gemini 4 Neon (High)', quota_bucket_name: 'Gemini 4 Neon', percentage: 100, percentage_known: true, own_percentage: 100, own_percentage_known: true, own_reset_time: '', reset_time: '' },
+      ],
+    },
+  };
+  const proOverview = buildAccountQuotaOverview(proWithNeon);
+  assert.deepEqual(proOverview.standaloneModels.map(m => m.key), ['gemini-4-neon']);
+  assert.equal(resolveEffectiveMonitoredModel(proWithNeon, 'gemini-4-neon'), 'gemini-4-neon');
+  assert.equal(computeAccountRemaining(proWithNeon, 'gemini-4-neon'), 100);
+
+  // 2. 切到 Ultra（Neon 已并入 Gemini 池）与 Free（无 Neon 权限）时，运行时自动映射/兜底至 gemini
+  const ultraWithPooledNeon = {
+    id: 'ultra-neon',
+    email: 'ultra-neon@example.invalid',
+    disabled: false,
+    protected_models: [],
+    created_at: nowSec,
+    last_used: nowSec,
+    quota: {
+      subscription_tier: 'ULTRA',
+      source: 'live',
+      last_updated: nowSec,
+      is_forbidden: false,
+      model_forwarding_rules: {},
+      quota_groups: [
+        {
+          display_name: 'Gemini Models',
+          family: 'gemini',
+          buckets: [{ bucket_id: 'g-5h', window: '5h', remaining_fraction: 0.72, remaining_fraction_known: true, reset_time: reset5h }],
+        },
+      ],
+      models: [
+        { name: 'gemini-3.8-flash', model_id: 'gemini-3.8-flash', family: 'gemini', percentage: 72, percentage_known: true, own_percentage: 72, own_percentage_known: true, own_reset_time: reset5h, reset_time: reset5h },
+        { name: 'gemini-pro-orchestrator-neon', model_id: 'gemini-pro-orchestrator-neon', display_name: 'Orchestrator (Neon)', percentage: 72, percentage_known: true, own_percentage: 72, own_percentage_known: true, own_reset_time: reset5h, reset_time: reset5h },
+      ],
+    },
+  };
+  const freeWithoutNeon = {
+    id: 'free-no-neon',
+    email: 'free@example.invalid',
+    disabled: false,
+    protected_models: [],
+    created_at: nowSec,
+    last_used: nowSec,
+    quota: {
+      subscription_tier: 'FREE',
+      source: 'cloud',
+      last_updated: nowSec,
+      is_forbidden: false,
+      model_forwarding_rules: {},
+      quota_groups: [
+        {
+          display_name: 'Gemini Models',
+          family: 'gemini',
+          buckets: [{ bucket_id: 'g-wk', window: 'weekly', remaining_fraction: 0.05, remaining_fraction_known: true, reset_time: reset7d }],
+        },
+      ],
+      models: [
+        { name: 'gemini-3.8-flash', model_id: 'gemini-3.8-flash', family: 'gemini', percentage: 5, percentage_known: true, own_percentage: 5, own_percentage_known: true, own_reset_time: reset7d, reset_time: reset7d },
+        { name: 'gemini-4-neon', model_id: 'gemini-4-neon', disabled: true, percentage: 0, percentage_known: false, reset_time: '' },
+      ],
+    },
+  };
+
+  assert.equal(resolveEffectiveMonitoredModel(ultraWithPooledNeon, 'gemini-4-neon'), 'gemini');
+  assert.equal(resolveEffectiveMonitoredModel(freeWithoutNeon, 'gemini-4-neon'), 'gemini');
+  assert.equal(computeAccountRemaining(ultraWithPooledNeon, 'gemini-4-neon'), 72);
+  assert.equal(computeAccountRemaining(freeWithoutNeon, 'gemini-4-neon'), null);
+});
+
+test('OPT-03 & OPT-10：错误码透传防超时误判重新授权、PRO 词边界、hydrogen 品牌与未保存层级对称对齐', async (t) => {
+  const { manager, acc } = await createTempManager(t);
+  acc.quota_refresh_error = 'context deadline expired';
+  acc.quota_refresh_error_code = 'network';
+  await manager.saveAccount(acc);
+
+  // 验证 saveAccount -> loadIndex -> listAccounts 全链路保留 quota_refresh_error_code 且不误判 needs_authorization
+  const listed = await manager.listAccounts();
+  const item = listed.accounts.find(a => a.id === acc.id);
+  assert.equal(item?.quota_refresh_error_code, 'network');
+  assert.notEqual(item?.credentialReadiness?.state, 'needs_authorization');
+
+  // 显式鉴权失败码仍判 needs_authorization
+  assert.equal(
+    accountCredentialReadiness({
+      ...acc,
+      quota_refresh_error_code: 'refresh_failed',
+      quota_refresh_error: 'transient text',
+    }).state,
+    'needs_authorization'
+  );
+  // 无结构化错误码时，TLS 证书过期不误判，refresh token 过期正确判 needs_authorization
+  assert.notEqual(
+    accountCredentialReadiness({
+      ...acc,
+      quota_refresh_error_code: null,
+      quota_refresh_error: 'TLS certificate has expired',
+    }).state,
+    'needs_authorization'
+  );
+  assert.equal(
+    accountCredentialReadiness({
+      ...acc,
+      quota_refresh_error_code: null,
+      quota_refresh_error: 'refresh token has expired',
+    }).state,
+    'needs_authorization'
+  );
+
+  // OPT-10：PRO 词边界防护 & hydrogen 品牌映射 & 未保存账号层级对称判定
+  assert.equal(normalizeCatalogTierLabel('Prototype Internal'), '');
+  assert.equal(normalizeCatalogTierLabel('Google AI Pro'), 'PRO');
+  assert.notEqual(subscriptionTierRank({ quota: { subscription_tier: 'Prototype' } }), 3);
+  assert.equal(subscriptionTierRank({ quota: { subscription_tier: 'PRO' } }), 3);
+
+  assert.equal(
+    resolveUnsavedLiveSubscriptionTier(
+      { tier: 'FREE', accountType: 'consumer' },
+      { subscriptionTier: 'FREE', models: [{ name: 'gemini-3.8-flash' }] }
+    ),
+    'FREE'
+  );
+  assert.equal(
+    resolveUnsavedLiveSubscriptionTier(
+      { tier: 'FREE', accountType: 'enterprise_vertex' },
+      { subscriptionTier: 'FREE', models: [{ name: 'gemini-3.8-flash' }] }
+    ),
+    '待确认'
+  );
 });
 
 

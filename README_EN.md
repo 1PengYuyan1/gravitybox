@@ -197,14 +197,15 @@ Hover over (or click to pin) any capsule to open its detailed breakdown card:
 
 ---
 
-### 3. Accounts (`Accounts`) — Multi-Account Pool & Smart Switch
-- **Add Account…**:
+### 3. Accounts (`Accounts`) — Multi-Account Pool & Standby Advisor
+- **Manage Accounts…**:
   - **Save Current Account** *(zero setup)*: One-click import of the account currently signed in to Antigravity. To add and switch between multiple accounts, simply switch accounts in Antigravity first and import each one—no extra setup required.
+  - **Import Accounts / Export Accounts**: Batch-import GravityBox backups, single-account JSON files, or folders, and export saved accounts to a JSON file after an explicit security confirmation.
 - **Collapse / Expand Quotas**: Condenses multi-account cards into compact single-line summary pills (e.g., `Gemini 91%`).
-- **Smart Switch (Toggle + `Configure…` button)**:
+- **Standby Advisor (Toggle + `Configure…` button)**:
   Evaluates saved accounts and highlights a **`Recommended`** standby candidate when your current account runs low (**never force-kills Antigravity; switching always requires your confirmation**). Clicking **`Configure…`** exposes 4 rules:
 
-  | Smart Switch Rule | What It Controls |
+  | Standby Advisor Rule | What It Controls |
   | :--- | :--- |
   | **Recommendation Order** | • **`Highest Quota First`** (default): Prioritizes higher subscription tiers (Ultra > Pro), then highest remaining percentage.<br>• **`Round Robin`**: Rotates evenly across qualifying standby accounts in list order. |
   | **Monitored Scope** | Chooses which quota pool triggers a switch alert (adapts to your Free / Pro / Ultra tier): e.g., **Core Shared Pools (Gemini + Claude/GPT)**, **All Gemini (incl. Argon weekly)**, **Gemini Base Pool Only**, or **Claude/GPT Pool Only**. |

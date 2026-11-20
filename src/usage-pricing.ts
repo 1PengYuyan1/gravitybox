@@ -69,7 +69,12 @@ export function compareFeedFreshness(
 export async function loadRawPricingTable(
   remotePricingCachePath: string,
   pricingCachePath: string
-): Promise<{ merged: Record<string, ApiPricingEntry>; warnings: string[]; publicKeys: Set<string> }> {
+): Promise<{
+  merged: Record<string, ApiPricingEntry>;
+  billingPrices: Record<string, ApiPricingEntry>;
+  warnings: string[];
+  publicKeys: Set<string>;
+}> {
   const warnings: string[] = [];
   const merged: Record<string, ApiPricingEntry> = Object.assign(Object.create(null), DEFAULT_API_PRICES);
   const publicKeys = new Set<string>(FEED_MODEL_KEYS);
@@ -142,7 +147,13 @@ export async function loadRawPricingTable(
     }
   }
 
-  return { merged, warnings, publicKeys };
+  const billingPrices: Record<string, ApiPricingEntry> = Object.assign(
+    Object.create(null),
+    DEFAULT_API_PRICES,
+    merged
+  );
+
+  return { merged, billingPrices, warnings, publicKeys };
 }
 
 export function resolvePricingTableFromRaw(

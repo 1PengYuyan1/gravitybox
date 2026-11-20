@@ -35,6 +35,17 @@ const UUID_REGEX_GLOBAL = /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a
 const ACTIVE_STEP_STATUSES = new Set([1, 2, 8, 9]);
 const RUNNING_SUBAGENT_STEP_STATUSES = new Set([1, 2, 8]);
 const TRANSPARENT_HANDOFF_STEP_TYPES = new Set([81, 98, 99, 101, 102, 104]);
+
+function findLastSubstantiveStep<T extends { stepType?: number; step_type?: number }>(
+  steps: readonly T[]
+): T | undefined {
+  for (let i = steps.length - 1; i >= 0; i--) {
+    const candidate = steps[i]!;
+    const st = candidate.step_type ?? candidate.stepType ?? 0;
+    if (!TRANSPARENT_HANDOFF_STEP_TYPES.has(st)) return candidate;
+  }
+  return steps[steps.length - 1];
+}
 const SUBAGENT_TOOL_NAMES = new Set([
   'invoke_subagent',
   'default_api:invoke_subagent',
@@ -1885,7 +1896,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   const uncachedBarRatio = stepUncached / denominator * 100;
   const latestOutput = safeTokens(latestStep?.outputTokens);
   let latestActiveForegroundKind: 'model' | 'tool' | null = null;
-  const lastCtx = contextSteps[contextSteps.length - 1];
+  const lastCtx = findLastSubstantiveStep(contextSteps);
   const lastCtxType = lastCtx ? (lastCtx.step_type ?? lastCtx.stepType ?? 0) : 0;
   const lastCtxStatus = lastCtx?.status ?? 3;
   const lastTurnAborted = Boolean(!input.isStreaming && lastCtx && lastCtxType !== 14 && (lastCtxStatus === 4 || lastCtxStatus === 6 || lastCtxStatus === 7));
@@ -2076,7 +2087,7 @@ export function buildConversationHudMetrics(input: ComputeHudMetricsInput): Conv
   let hasSubagentStepInTurn = false;
   const nowSeconds = nowMs / 1000;
   const allowActiveInference = availability !== 'cached' && input.allowDbActiveStepInference !== false;
-  const lastTurnStep = turnSteps[turnSteps.length - 1];
+  const lastTurnStep = findLastSubstantiveStep(turnSteps);
   const lastTurnStepAborted =
     lastTurnStep !== undefined &&
     (lastTurnStep.status === 4 || lastTurnStep.status === 6 || lastTurnStep.status === 7);
@@ -3460,6 +3471,13 @@ export class ConversationMetricsEngine {
         sniffed: !mainState.childConversationIds.has(childId) && !indexedSummaryChildren.has(childId),
       }));
       const processedEdges = new Set<string>();
+      const verifiedChildRecords: Array<{
+        childId: string;
+        childDbPath: string;
+        childState: CachedConversationState;
+        latestChildMtime: number;
+        recent: boolean;
+      }> = [];
       const SUBAGENT_READ_CONCURRENCY = 4;
       while (pendingChildren.length > 0) {
         const wave: Array<{
@@ -3567,92 +3585,47 @@ export class ConversationMetricsEngine {
           totalSubagentSteps += childState.steps.length;
           const latestChildMtime = Math.max(childState.mtimeMs, childState.walMtimeMs);
           const recent = nowMs - latestChildMtime <= ACTIVE_DB_RECENCY_MS;
-          if (recent) {
-            let childActive = false;
-            let childTurnTerminated = terminalSummaryChildren.has(childId);
-            let sawWaitingTailStep = false;
-            let tailInspectionDone = false;
-            for (let idx = childState.steps.length - 1; idx >= 0; idx--) {
-              const step = childState.steps[idx]!;
-              if (step.stepType === 14) break;
-              if (step.stepType === 2 && (step.status === 3 || step.status === 5)) {
-                childTurnTerminated = true;
-                break;
-              }
-              if (idx === childState.steps.length - 1 && (step.status === 4 || step.status === 6 || step.status === 7)) {
-                childTurnTerminated = true;
-                break;
-              }
-              if (!tailInspectionDone && !TRANSPARENT_HANDOFF_STEP_TYPES.has(step.stepType)) {
-                tailInspectionDone = true;
-                if (isWaitingSubagentToolName(step.toolCallName)) {
-                  childTurnTerminated = true;
-                  break;
-                }
-                if (step.status === 9) {
-                  sawWaitingTailStep = true;
-                }
-              }
-              if (isWaitingSubagentToolName(step.toolCallName)) {
-                if (ACTIVE_STEP_STATUSES.has(step.status)) {
-                  childTurnTerminated = true;
-                  break;
-                }
-                continue;
-              }
-              if (RUNNING_SUBAGENT_STEP_STATUSES.has(step.status)) {
-                childActive = true;
-                break;
-              }
-            }
-            if (!childActive && sawWaitingTailStep) {
-              childTurnTerminated = true;
-            }
-            if (!childTurnTerminated && runningSummaryChildren.has(childId)) {
-              childActive = true;
-            }
-            if (childActive) {
-              if (this.recentActiveChildUntilByDb.has(item.childDbPath)) {
-                this.recentActiveChildUntilByDb.delete(item.childDbPath);
-              } else if (this.recentActiveChildUntilByDb.size >= MAX_CACHED_CONVERSATIONS * 2) {
-                const oldestActiveKey = this.recentActiveChildUntilByDb.keys().next().value;
-                if (oldestActiveKey !== undefined) this.recentActiveChildUntilByDb.delete(oldestActiveKey);
-              }
-              this.recentActiveChildUntilByDb.set(item.childDbPath, nowMs + 12_000);
-  // 在活跃多子智能体并行期内，只要还有兄弟子库真正处于运行中且主库无否定收尾，保留刚写入且无 step_type=2 终结符的子库短过渡窗（仅防 15s 步间落库抖动，避免兄弟已彻底落定很久后拖尾虚高）
-            } else if (!childTurnTerminated && childState.steps.length > 0) {
-              const holdUntil = this.recentActiveChildUntilByDb.get(item.childDbPath) ?? 0;
-              const parentCorroboratesActive = Boolean(
-                isSubagentRunning || hasActiveSubagentStep || activeChildSubagents > 0 || runningSummaryChildren.size > 0
-              );
-              const childMidStepTransition =
-                nowMs - latestChildMtime <= 15_000 && parentCorroboratesActive;
-              if ((holdUntil > nowMs && parentCorroboratesActive) || childMidStepTransition) {
-                childActive = true;
-              } else if (holdUntil > 0 && !parentCorroboratesActive) {
-                this.recentActiveChildUntilByDb.delete(item.childDbPath);
-              }
-            } else if (childTurnTerminated) {
-              this.recentActiveChildUntilByDb.delete(item.childDbPath);
-            }
-            if (childActive) {
-              activeChildSubagents++;
-              activeVerifiedChildIds.add(childId);
-            }
-          }
+          verifiedChildRecords.push({
+            childId,
+            childDbPath: item.childDbPath,
+            childState,
+            latestChildMtime,
+            recent,
+          });
           const cg = childState.genMetadata;
-          const childFallbackGen: ParsedGenMetadata | undefined =
-            cg && (cg.responseModel || cg.modelDisplayName || cg.plannerModelName || cg.modelEnum)
-              ? {
-                  ...(cg.responseModel ? { responseModel: cg.responseModel } : {}),
-                  ...(cg.modelDisplayName ? { modelDisplayName: cg.modelDisplayName } : {}),
-                  ...(cg.plannerModelName ? { plannerModelName: cg.plannerModelName } : {}),
-                  ...(cg.modelEnum ? { modelEnum: cg.modelEnum } : {}),
-                }
-              : undefined;
+          const hasGenModel = (g: ParsedGenMetadata | undefined): boolean =>
+            Boolean(g && (g.responseModel || g.modelDisplayName || g.plannerModelName || g.modelEnum));
+          const sameChildStepModel = (() => {
+            for (const cs of childState.steps) {
+              const g = cs.generation;
+              if (g && hasGenModel(g)) {
+                return {
+                  ...(g.responseModel ? { responseModel: g.responseModel } : {}),
+                  ...(g.modelDisplayName ? { modelDisplayName: g.modelDisplayName } : {}),
+                  ...(g.plannerModelName ? { plannerModelName: g.plannerModelName } : {}),
+                  ...(g.modelEnum ? { modelEnum: g.modelEnum } : {}),
+                };
+              }
+              if (cs.modelName) {
+                return { plannerModelName: cs.modelName };
+              }
+            }
+            return undefined;
+          })();
+          const childFallbackGen: ParsedGenMetadata | undefined = cg && hasGenModel(cg)
+            ? {
+                ...(cg.responseModel ? { responseModel: cg.responseModel } : {}),
+                ...(cg.modelDisplayName ? { modelDisplayName: cg.modelDisplayName } : {}),
+                ...(cg.plannerModelName ? { plannerModelName: cg.plannerModelName } : {}),
+                ...(cg.modelEnum ? { modelEnum: cg.modelEnum } : {}),
+              }
+            : sameChildStepModel;
           for (const cStep of childState.steps) {
-            if (childFallbackGen && cStep.stepType === 15 && cStep.hasUsage && !cStep.generation && !cStep.modelName) {
-              descendants.push({ ...cStep, generation: childFallbackGen });
+            if (childFallbackGen && cStep.stepType === 15 && cStep.hasUsage && !hasGenModel(cStep.generation) && !cStep.modelName) {
+              descendants.push({
+                ...cStep,
+                generation: cStep.generation ? { ...childFallbackGen, ...cStep.generation } : childFallbackGen,
+              });
             } else {
               descendants.push(cStep);
             }
@@ -3667,6 +3640,100 @@ export class ConversationMetricsEngine {
           for (const nested of childState.childConversationIds) {
             pendingChildren.push({ childId: nested, parentId: childId, explicit: true, indexed: false, sniffed: false });
           }
+        }
+      }
+
+      // 第一阶段：跨全部分波扫描所有近期子库，先确立实锤活跃子库数量，消除并发分波/数组顺序造成的兄弟漏计竞态
+      let confirmedActiveChildCount = 0;
+      const evaluatedRecentChildren: Array<{
+        record: (typeof verifiedChildRecords)[number];
+        explicitActive: boolean;
+        childTurnTerminated: boolean;
+      }> = [];
+      for (const record of verifiedChildRecords) {
+        if (!record.recent) continue;
+        const { childId, childState } = record;
+        let explicitActive = false;
+        let childTurnTerminated = terminalSummaryChildren.has(childId);
+        let sawWaitingTailStep = false;
+        let tailInspectionDone = false;
+        for (let idx = childState.steps.length - 1; idx >= 0; idx--) {
+          const step = childState.steps[idx]!;
+          if (step.stepType === 14) break;
+          if (step.stepType === 2 && (step.status === 3 || step.status === 5)) {
+            childTurnTerminated = true;
+            break;
+          }
+          if (!tailInspectionDone && !TRANSPARENT_HANDOFF_STEP_TYPES.has(step.stepType)) {
+            tailInspectionDone = true;
+            if (step.status === 4 || step.status === 6 || step.status === 7) {
+              childTurnTerminated = true;
+              break;
+            }
+            if (isWaitingSubagentToolName(step.toolCallName)) {
+              childTurnTerminated = true;
+              break;
+            }
+            if (step.status === 9) {
+              sawWaitingTailStep = true;
+            }
+          }
+          if (isWaitingSubagentToolName(step.toolCallName)) {
+            if (ACTIVE_STEP_STATUSES.has(step.status)) {
+              childTurnTerminated = true;
+              break;
+            }
+            continue;
+          }
+          if (RUNNING_SUBAGENT_STEP_STATUSES.has(step.status)) {
+            explicitActive = true;
+            break;
+          }
+        }
+        if (!explicitActive && sawWaitingTailStep) {
+          childTurnTerminated = true;
+        }
+        if (!childTurnTerminated && runningSummaryChildren.has(childId)) {
+          explicitActive = true;
+        }
+        if (explicitActive) {
+          confirmedActiveChildCount++;
+        }
+        evaluatedRecentChildren.push({ record, explicitActive, childTurnTerminated });
+      }
+      // 第二阶段：基于全局实锤活跃兄弟数统一结算过渡防抖保活（绝不混入前台 isStreaming）
+      for (const { record, explicitActive, childTurnTerminated } of evaluatedRecentChildren) {
+        const { childId, childDbPath, childState, latestChildMtime } = record;
+        let childActive = explicitActive;
+        if (childActive) {
+          if (this.recentActiveChildUntilByDb.has(childDbPath)) {
+            this.recentActiveChildUntilByDb.delete(childDbPath);
+          } else if (this.recentActiveChildUntilByDb.size >= MAX_CACHED_CONVERSATIONS * 2) {
+            const oldestActiveKey = this.recentActiveChildUntilByDb.keys().next().value;
+            if (oldestActiveKey !== undefined) this.recentActiveChildUntilByDb.delete(oldestActiveKey);
+          }
+          this.recentActiveChildUntilByDb.set(childDbPath, nowMs + 12_000);
+        } else if (!childTurnTerminated && childState.steps.length > 0) {
+          const holdUntil = this.recentActiveChildUntilByDb.get(childDbPath) ?? 0;
+          const parentCorroboratesActive = Boolean(
+            isSubagentRunning ||
+              hasActiveSubagentStep ||
+              confirmedActiveChildCount > 0 ||
+              runningSummaryChildren.size > 0
+          );
+          const childMidStepTransition =
+            nowMs - latestChildMtime <= 15_000 && parentCorroboratesActive;
+          if ((holdUntil > nowMs && parentCorroboratesActive) || childMidStepTransition) {
+            childActive = true;
+          } else if (holdUntil > 0 && !parentCorroboratesActive) {
+            this.recentActiveChildUntilByDb.delete(childDbPath);
+          }
+        } else if (childTurnTerminated) {
+          this.recentActiveChildUntilByDb.delete(childDbPath);
+        }
+        if (childActive) {
+          activeChildSubagents++;
+          activeVerifiedChildIds.add(childId);
         }
       }
       if (!mainState.fromErrorFallback && this.cache.has(dbPath)) {
@@ -3732,7 +3799,7 @@ export class ConversationMetricsEngine {
           (selfSummaryRunning &&
             mainIsRecent &&
             !(() => {
-              const tail = normalizedContextSteps[normalizedContextSteps.length - 1];
+              const tail = findLastSubstantiveStep(normalizedContextSteps);
               if (!tail) return false;
               if (tail.stepType === 2 && (tail.status === 3 || tail.status === 5)) return true;
               return tail.status === 4 || tail.status === 6 || tail.status === 7;

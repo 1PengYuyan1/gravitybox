@@ -98,6 +98,26 @@ function mergeLiveQuotaWithSaved(
   return merged;
 }
 
+export function resolveUnsavedLiveSubscriptionTier(
+  liveLs: { tier?: string | null; accountType?: 'consumer' | 'enterprise_vertex' | 'unknown' | null } | null | undefined,
+  quotaOverview: { subscriptionTier?: string | null; models?: unknown[] | null } | null | undefined
+): string {
+  if (liveLs?.tier && !/starter|free/i.test(liveLs.tier)) {
+    return normalizeSubscriptionTier(liveLs.tier);
+  }
+  if (quotaOverview?.subscriptionTier && quotaOverview.subscriptionTier !== 'FREE') {
+    return normalizeSubscriptionTier(quotaOverview.subscriptionTier);
+  }
+  if (
+    liveLs?.accountType !== 'enterprise_vertex' &&
+    quotaOverview?.subscriptionTier === 'FREE' &&
+    (quotaOverview.models?.length ?? 0) > 0
+  ) {
+    return 'FREE';
+  }
+  return normalizeSubscriptionTier(bt('quota.tier.pending'));
+}
+
 export type DashboardAggregateDeps = {
   listAccounts: () => Promise<any>;
   getAutoSwitchConfig: () => Promise<any>;
@@ -166,7 +186,7 @@ export async function buildDashboardAggregate(deps: DashboardAggregateDeps): Pro
         const quotaOverview = sourceAcc ? deps.getAccountQuotaOverview(sourceAcc, { nowMs: dashboardNowMs }) : null;
         // 有账号但套餐缺失/空串时回落到“待确认”；完全无账号时才保留 FREE 的既有语义。
         const activeTier = (!isLiveVerified && liveAccountEmail && !currentAccountId)
-          ? normalizeSubscriptionTier((liveLs?.tier && !/starter|free/i.test(liveLs.tier)) ? liveLs.tier : (quotaOverview?.subscriptionTier || bt('quota.tier.pending')))
+          ? resolveUnsavedLiveSubscriptionTier(liveLs, quotaOverview)
           : (quotaOverview ? normalizeSubscriptionTier(quotaOverview.subscriptionTier) : 'FREE');
 
         const resetTimeStr = formatResetTime(quotaOverview?.resetTime);
@@ -733,7 +753,7 @@ async function run() {
                   activeAccountEmail = liveLs.email;
                   const q = accountsManager.getAccountQuotaOverview({ quota: liveLs.quota });
                   activeFiveHourQuota = q.fiveHourRemaining;
-                  activeSubscriptionTier = normalizeSubscriptionTier((liveLs.tier && !/starter|free/i.test(liveLs.tier)) ? liveLs.tier : (q.subscriptionTier !== 'FREE' ? q.subscriptionTier : bt('quota.tier.pending')));
+                  activeSubscriptionTier = resolveUnsavedLiveSubscriptionTier(liveLs, q);
                 }
               } else if (listRes.active_account) {
                 usageManager.setCurrentAccountContext(undefined);
@@ -897,6 +917,7 @@ async function run() {
           let insidersRunning = false;
           let hasRunningTask = false;
           let taskReason = '';
+          let maxLsCpu = 0;
           const insidersPrefix = '/Applications/Antigravity - Insiders.app/Contents/';
           const stablePrefix = `${target.appPath}/Contents/`;
           try {
@@ -916,53 +937,39 @@ async function run() {
               } else {
                 continue;
               }
-              if (/language_server/i.test(args) && cpu >= 3.0) {
-                hasRunningTask = true;
-                taskReason = bt('main.task.active_inference');
-              } else if (/Helper \((?:Plugin|Renderer)\)/i.test(args) && cpu >= 15.0) {
-                hasRunningTask = true;
-                taskReason = bt('main.task.active_inference');
+              if (/language_server/i.test(args) && cpu > maxLsCpu) {
+                maxLsCpu = cpu;
               }
             }
           } catch {}
-          if (appRunning && !hasRunningTask) {
-            const cdpState = await controller.hasRunningAgentTask().catch(() => ({ busy: false, reason: '' }));
+          let cdpChecked = false;
+          if (appRunning) {
+            const cdpState = await controller.hasRunningAgentTask().catch(() => ({ busy: false, checked: false, reason: '' }));
+            cdpChecked = cdpState.checked === true;
             if (cdpState.busy) {
               hasRunningTask = true;
               taskReason = cdpState.reason || bt('main.task.active_inference');
             }
           }
-          if (appRunning && !hasRunningTask) {
+          // Only fall back to active trajectory write + high LS CPU when CDP is not connected to any page.
+          if (appRunning && !cdpChecked && !hasRunningTask && maxLsCpu >= 20.0) {
             try {
               const nowMs = Date.now();
               const allowedDataDirs = new Set<string>(ALLOWED_DATA_DIRECTORY_NAMES);
               const entries = await readdir(geminiDir, { withFileTypes: true }).catch(() => [] as any[]);
               for (const entry of entries) {
                 if (!entry.isDirectory() || !allowedDataDirs.has(entry.name)) continue;
-                const summariesDb = join(geminiDir, entry.name, 'conversation_summaries.db');
-                const [sumSt, sumWalSt] = await Promise.all([
-                  lstat(summariesDb).catch(() => null),
-                  lstat(`${summariesDb}-wal`).catch(() => null),
-                ]);
-                if ((sumSt && nowMs - sumSt.mtimeMs < 15000) || (sumWalSt && nowMs - sumWalSt.mtimeMs < 15000)) {
-                  hasRunningTask = true;
-                  taskReason = bt('main.task.active_session');
-                  break;
-                }
-                for (const sub of ['conversations', 'brain']) {
-                  const subDir = join(geminiDir, entry.name, sub);
-                  const dirSt = await lstat(subDir).catch(() => null);
-                  if (!dirSt) continue;
-                  const files = await readdir(subDir).catch(() => [] as string[]);
-                  for (let i = 0; i < files.length; i += 32) {
-                    const stats = await Promise.all(files.slice(i, i + 32).map(f => lstat(join(subDir, f)).catch(() => null)));
-                    if (stats.some(st => st && nowMs - st.mtimeMs < 15000)) {
-                      hasRunningTask = true;
-                      taskReason = bt('main.task.active_session');
-                      break;
-                    }
+                const convDir = join(geminiDir, entry.name, 'conversations');
+                const dirSt = await lstat(convDir).catch(() => null);
+                if (!dirSt) continue;
+                const files = (await readdir(convDir).catch(() => [] as string[])).filter(f => f.endsWith('.pb'));
+                for (let i = 0; i < files.length; i += 32) {
+                  const stats = await Promise.all(files.slice(i, i + 32).map(f => lstat(join(convDir, f)).catch(() => null)));
+                  if (stats.some(st => st && nowMs - st.mtimeMs < 3000)) {
+                    hasRunningTask = true;
+                    taskReason = bt('main.task.active_session');
+                    break;
                   }
-                  if (hasRunningTask) break;
                 }
                 if (hasRunningTask) break;
               }

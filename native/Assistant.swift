@@ -43,7 +43,12 @@ extension Assistant {
 }
 #endif
 
-final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopoverDelegate, NSTableViewDataSource, NSTableViewDelegate {
+final class MenuFloatingPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+    override var canBecomeMain: Bool { false }
+}
+
+final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTableViewDataSource, NSTableViewDelegate {
     var names: [String] {
         [
             L10n.t("nav.overview"),
@@ -56,7 +61,14 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
     var bridge: BackendBridge!
     var configuration: ConfigurationStore!
     var item: NSStatusItem!
-    var menuPopover: NSPopover?
+    var menuPanel: MenuFloatingPanel?
+    private var isClosingMenuPanel = false
+    private var menuPanelVisibilityGeneration = 0
+    private var menuPanelAnchorMaxY: CGFloat?
+    private(set) var menuPanelTargetSize: NSSize?
+    private var menuPanelResizeMotion: DesignMotion?
+    private var menuPanelFadeMotion: DesignMotion?
+    var isMenuPanelShown: Bool { menuPanel?.isVisible == true && !isClosingMenuPanel }
     var menuPanelController: MenuPanelController?
     private var activeSheetControllers: [ObjectIdentifier: AnyObject] = [:]
     var window: NSWindow?
@@ -85,6 +97,8 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
     var cachedAccounts: [[String: Any]] = []
     var activeAccountId: String = ""
     var cachedRecommendedAccountId: String? = nil
+    var recommendationPreviewInFlight = false
+    var lastRecommendedAccountsFingerprint = ""
     var pendingAccountTaskId: String?
     var accountSwitchInFlight = false
     var menuTracking = false
@@ -100,7 +114,10 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
     var usageAutoHealPendingPeriods = Set<String>()
     var singleAccountRefreshErrors: [String: String] = [:]
     private var popoverGlobalClickMonitor: Any?
+    private var popoverLocalClickMonitor: Any?
     private var popoverLocalKeyMonitor: Any?
+    private var popoverWorkspaceObservers: [NSObjectProtocol] = []
+    private var popoverAppObservers: [NSObjectProtocol] = []
     var quotaRefreshStartedAt: Date?
     var recoveryAttempts = 0
     var autoRestartAttempts = 0
@@ -239,7 +256,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
         item.button?.setAccessibilityLabel("GravityBox")
         item.button?.target = self
         item.button?.action = #selector(statusItemClicked(_:))
-        item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+        item.button?.sendAction(on: [.leftMouseDown, .rightMouseDown])
         updateStatusItemState()
         DistributedNotificationCenter.default().addObserver(self, selector: #selector(showPanel), name: NSNotification.Name("local.gravitybox.show-panel"), object: nil)
         bridge.launch { [weak self] result in
@@ -352,14 +369,58 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
     }
 
     private var cachedBaseMenuIcon: NSImage?
+    private weak var statusItemAttentionBadgeView: StatusItemAttentionDotView?
+
+    private final class StatusItemAttentionDotView: NSView {
+        override var isOpaque: Bool { false }
+        override var allowsVibrancy: Bool { false }
+        override func hitTest(_ point: NSPoint) -> NSView? { nil }
+
+        override func viewDidChangeEffectiveAppearance() {
+            super.viewDidChangeEffectiveAppearance()
+            needsDisplay = true
+        }
+
+        override func draw(_ dirtyRect: NSRect) {
+            let dotSize: CGFloat = 4.0
+            let originX = bounds.width - dotSize - 2.0
+            let originY = isFlipped ? 2.5 : (bounds.height - dotSize - 2.5)
+            let dotRect = NSRect(x: originX, y: originY, width: dotSize, height: dotSize)
+            let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
+            let dotColor = isDark
+                ? NSColor(srgbRed: 1.0, green: 0.624, blue: 0.039, alpha: 1.0)
+                : NSColor(srgbRed: 0.945, green: 0.455, blue: 0.045, alpha: 1.0)
+            dotColor.setFill()
+            NSBezierPath(ovalIn: dotRect).fill()
+        }
+    }
 
     func baseMenuConnectedIcon() -> NSImage? {
         if let cached = cachedBaseMenuIcon { return cached }
         guard let base = NSImage(contentsOf: resources.appendingPathComponent("icons/menu-connected.png")) else { return nil }
-        base.size = NSSize(width: 18, height: 18)
+        base.size = NSSize(width: 20, height: 20)
         base.isTemplate = true
         cachedBaseMenuIcon = base
         return base
+    }
+
+    private func ensureStatusItemAttentionBadge(in button: NSButton) -> StatusItemAttentionDotView {
+        if let existing = button.subviews.compactMap({ $0 as? StatusItemAttentionDotView }).first {
+            if existing.frame != button.bounds {
+                existing.frame = button.bounds
+            }
+            return existing
+        }
+        let dotView = StatusItemAttentionDotView(frame: button.bounds)
+        dotView.identifier = NSUserInterfaceItemIdentifier("status-item-attention-dot")
+        dotView.autoresizingMask = [.width, .height]
+        dotView.isHidden = true
+        dotView.setAccessibilityElement(false)
+        button.addSubview(dotView)
+        if button === item?.button {
+            statusItemAttentionBadgeView = dotView
+        }
+        return dotView
     }
 
     func updateStatusItemState(buttonOverride: NSButton? = nil) {
@@ -367,6 +428,13 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
         let baseIcon = baseMenuConnectedIcon()
         if button.image !== baseIcon {
             button.image = baseIcon
+        }
+
+        let needsDebugPortAttention = reachable && statusValue.mode == "debug-port-missing"
+        let dotView = ensureStatusItemAttentionBadge(in: button)
+        if dotView.isHidden == needsDebugPortAttention {
+            dotView.isHidden = !needsDebugPortAttention
+            dotView.needsDisplay = true
         }
 
         let targetAlpha: CGFloat = reachable ? 1.0 : 0.50
@@ -421,7 +489,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
     }
 
     func toggleMenuPopover() {
-        if menuPopover?.isShown == true {
+        if isMenuPanelShown {
             closeMenuPopover()
         } else {
             openMenuPopover()
@@ -433,6 +501,96 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
         let controller = MenuPanelController(app: self)
         menuPanelController = controller
         return controller
+    }
+
+    private func attachMenuPanelContent(_ controller: MenuPanelController, to panel: MenuFloatingPanel) {
+        let view = controller.view
+        if controller.preferredContentSize != .zero {
+            controller.preferredContentSize = .zero
+        }
+        view.translatesAutoresizingMaskIntoConstraints = true
+        view.autoresizingMask = [.width, .height]
+        let contentSize = panel.contentRect(forFrameRect: panel.frame).size
+        if abs(view.frame.width - contentSize.width) > 0.5 || abs(view.frame.height - contentSize.height) > 0.5 || view.frame.origin != .zero {
+            view.frame = NSRect(origin: .zero, size: contentSize)
+        }
+        if panel.contentView !== view {
+            panel.contentView = view
+        }
+    }
+
+    func ensureMenuPanel(hosting controller: MenuPanelController) -> MenuFloatingPanel {
+        if let existing = menuPanel {
+            attachMenuPanelContent(controller, to: existing)
+            return existing
+        }
+        let panel = MenuFloatingPanel(
+            contentRect: NSRect(x: 0, y: 0, width: MenuPanelController.panelWidth, height: MenuPanelController.defaultPanelHeight),
+            styleMask: [.nonactivatingPanel, .borderless],
+            backing: .buffered,
+            defer: false
+        )
+        panel.isFloatingPanel = true
+        panel.becomesKeyOnlyIfNeeded = false
+        panel.hidesOnDeactivate = false
+        panel.isReleasedWhenClosed = false
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        // Match NSPopover/statusBar layer (25) so screenshot window pickers (e.g. WeChat) can snap to the card while NSMenu popups (.popUpMenu) remain above it.
+        panel.level = .statusBar
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .canJoinAllApplications, .ignoresCycle]
+        #if NATIVE_UI_TEST
+        Assistant.configureHeadlessWindowIfNeeded(panel)
+        #endif
+        attachMenuPanelContent(controller, to: panel)
+        menuPanel = panel
+        return panel
+    }
+
+    func resizeMenuPanel(to newSize: NSSize, animate: Bool) {
+        menuPanelResizeMotion?.cancel()
+        menuPanelResizeMotion = nil
+        menuPanelTargetSize = newSize
+        guard let panel = menuPanel else { return }
+        let current = panel.frame
+        let anchorMaxY = menuPanelAnchorMaxY ?? current.maxY
+        let screenFrame = (item?.button?.window?.screen ?? panel.screen ?? NSScreen.main)?.visibleFrame
+            ?? NSScreen.screens.first?.visibleFrame
+        var nextX = current.origin.x
+        if let screenFrame {
+            nextX = min(max(screenFrame.minX + 8, nextX), screenFrame.maxX - newSize.width - 8)
+        }
+        let minAllowedY = screenFrame.map { $0.minY + 8 } ?? -CGFloat.greatestFiniteMagnitude
+        let maxAllowedH = screenFrame.map { max(300, anchorMaxY - ($0.minY + 8)) } ?? CGFloat.greatestFiniteMagnitude
+        let frameForHeight: (CGFloat) -> NSRect = { rawH in
+            let clampedH = round(min(rawH, maxAllowedH))
+            let nextY = max(minAllowedY, round(anchorMaxY - clampedH))
+            return NSRect(x: nextX, y: nextY, width: newSize.width, height: clampedH)
+        }
+        let targetFrame = frameForHeight(newSize.height)
+        if abs(current.width - targetFrame.width) <= 0.5
+            && abs(current.height - targetFrame.height) <= 0.5
+            && abs(current.origin.x - targetFrame.origin.x) <= 0.5
+            && abs(current.origin.y - targetFrame.origin.y) <= 0.5 {
+            return
+        }
+        guard animate, Design.shouldAnimate(in: panel.contentView), panel.isVisible else {
+            panel.setFrame(targetFrame, display: true)
+            panel.invalidateShadow()
+            return
+        }
+        let motion = DesignMotion()
+        menuPanelResizeMotion = motion
+        motion.animate(in: panel.contentView, from: current.height, to: targetFrame.height, curve: .slide, threshold: 0.5) { [weak panel] h in
+            guard let panel else { return }
+            panel.setFrame(frameForHeight(h), display: true)
+        } completion: { [weak self, weak panel] in
+            self?.menuPanelResizeMotion = nil
+            guard let panel else { return }
+            panel.setFrame(targetFrame, display: true)
+            panel.invalidateShadow()
+        }
     }
 
     func retainSheetController(_ controller: AnyObject, for sheetWindow: NSWindow) {
@@ -449,6 +607,9 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
         in parent: NSWindow,
         completionHandler: ((NSApplication.ModalResponse) -> Void)? = nil
     ) {
+        if isMenuPanelShown {
+            closeMenuPopover(animated: false)
+        }
         retainSheetController(controller, for: sheetWindow)
         #if NATIVE_UI_TEST
         Assistant.configureHeadlessWindowIfNeeded(parent)
@@ -464,60 +625,162 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
 
     func openMenuPopover() {
         guard let button = item?.button else { return }
+        menuPanelVisibilityGeneration &+= 1
+        let openGen = menuPanelVisibilityGeneration
+        isClosingMenuPanel = false
+        menuPanelResizeMotion?.cancel()
+        menuPanelResizeMotion = nil
+        menuPanelFadeMotion?.cancel()
+        menuPanelFadeMotion = nil
+
         let controller = ensureMenuPanelController()
-        let popover = menuPopover ?? {
-            let p = NSPopover()
-            p.contentViewController = controller
-            p.behavior = .transient
-            p.delegate = self
-            menuPopover = p
-            return p
-        }()
-        if popover.contentViewController !== controller {
-            popover.contentViewController = controller
-        }
-        popover.animates = true
+        let panel = ensureMenuPanel(hosting: controller)
         menuTracking = true
         configureRefreshTimer()
         controller.panelWillOpen()
-        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
-        controller.view.window?.makeKey()
+
+        let desiredSize = controller.measuredPanelSize
+        var finalFrame = NSRect(origin: panel.frame.origin, size: desiredSize)
+        var resolvedTopY: CGFloat?
+        if let btnWin = button.window {
+            let btnRect = btnWin.convertToScreen(button.convert(button.bounds, to: nil))
+            let screenFrame = (btnWin.screen ?? NSScreen.main)?.visibleFrame
+                ?? NSScreen.screens.first?.visibleFrame
+                ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+            let topY = min(round(btnRect.minY - 5), round(screenFrame.maxY - 4))
+            let maxAvailableH = max(300, topY - (screenFrame.minY + 8))
+            let finalSize = NSSize(width: desiredSize.width, height: min(desiredSize.height, maxAvailableH))
+            let x = min(max(screenFrame.minX + 8, round(btnRect.midX - finalSize.width / 2)), screenFrame.maxX - finalSize.width - 8)
+            let y = round(topY - finalSize.height)
+            finalFrame = NSRect(origin: NSPoint(x: x, y: y), size: finalSize)
+            resolvedTopY = topY
+        }
+        menuPanelAnchorMaxY = resolvedTopY
+        menuPanelTargetSize = finalFrame.size
+
+        #if !NATIVE_UI_TEST
+        let shouldFade = !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if panel.isVisible {
+            NSAnimationContext.runAnimationGroup { ctx in
+                ctx.duration = 0
+                ctx.allowsImplicitAnimation = false
+                panel.animator().alphaValue = shouldFade ? 0.0 : 1.0
+            }
+        }
+        if shouldFade {
+            panel.alphaValue = 0.0
+            panel.setFrame(NSRect(x: finalFrame.origin.x, y: finalFrame.origin.y + 4, width: finalFrame.width, height: finalFrame.height), display: true)
+            panel.orderFrontRegardless()
+            panel.makeKey()
+            panel.invalidateShadow()
+            let fadeMotion = DesignMotion()
+            menuPanelFadeMotion = fadeMotion
+            fadeMotion.animate(in: panel.contentView, from: 0.0, to: 1.0, curve: .press, threshold: 0.005) { [weak self, weak panel] t in
+                guard let self, self.menuPanelVisibilityGeneration == openGen, let panel else { return }
+                panel.alphaValue = t
+                panel.setFrameOrigin(NSPoint(x: finalFrame.origin.x, y: round(finalFrame.origin.y + 4.0 * (1.0 - t))))
+            } completion: { [weak self, weak panel] in
+                guard let self, self.menuPanelVisibilityGeneration == openGen else { return }
+                self.menuPanelFadeMotion = nil
+                guard let panel else { return }
+                panel.alphaValue = 1.0
+                panel.setFrameOrigin(finalFrame.origin)
+                panel.invalidateShadow()
+            }
+        } else {
+            panel.alphaValue = 1.0
+            panel.setFrame(finalFrame, display: true)
+            panel.orderFrontRegardless()
+            panel.makeKey()
+            panel.invalidateShadow()
+        }
+        button.highlight(true)
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.menuPanelVisibilityGeneration == openGen, self.isMenuPanelShown else { return }
+            self.item?.button?.highlight(true)
+        }
+        #else
+        panel.setFrame(finalFrame, display: false)
+        panel.alphaValue = Assistant.headlessOffscreenUI ? 0.0 : 1.0
+        #endif
+
         controller.view.window?.makeFirstResponder(nil)
         installPopoverMonitors()
         refresh()
     }
 
-    func closeMenuPopover() {
+    func closeMenuPopover(animated: Bool = true) {
+        menuPanelVisibilityGeneration &+= 1
+        let closeGen = menuPanelVisibilityGeneration
+        menuPanelResizeMotion?.cancel()
+        menuPanelResizeMotion = nil
+        menuPanelFadeMotion?.cancel()
+        menuPanelFadeMotion = nil
+        menuPanelAnchorMaxY = nil
+        menuPanelTargetSize = nil
         removePopoverMonitors()
-        if menuPopover?.isShown == true {
-            menuPopover?.performClose(nil)
-        }
+        item?.button?.highlight(false)
         if menuTracking {
             menuTracking = false
             configureRefreshTimer()
             menuPanelController?.panelDidClose()
         }
-    }
-
-    func popoverDidClose(_ notification: Notification) {
-        removePopoverMonitors()
-        menuTracking = false
-        configureRefreshTimer()
-        menuPanelController?.panelDidClose()
+        guard let panel = menuPanel, panel.isVisible else {
+            isClosingMenuPanel = false
+            return
+        }
+        #if !NATIVE_UI_TEST
+        if animated && !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion {
+            isClosingMenuPanel = true
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.10
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeIn)
+                panel.animator().alphaValue = 0.0
+            }, completionHandler: { [weak self, weak panel] in
+                DispatchQueue.main.async {
+                    guard let self, self.menuPanelVisibilityGeneration == closeGen else { return }
+                    self.isClosingMenuPanel = false
+                    panel?.orderOut(nil)
+                    panel?.alphaValue = 1.0
+                }
+            })
+            return
+        }
+        #endif
+        isClosingMenuPanel = false
+        panel.orderOut(nil)
+        #if NATIVE_UI_TEST
+        panel.alphaValue = Assistant.headlessOffscreenUI ? 0.0 : 1.0
+        #else
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0
+            ctx.allowsImplicitAnimation = false
+            panel.animator().alphaValue = 1.0
+        }
+        panel.alphaValue = 1.0
+        #endif
     }
 
     private func installPopoverMonitors() {
         removePopoverMonitors()
         popoverGlobalClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] _ in
-            guard let self, self.menuPopover?.isShown == true else { return }
+            guard let self, self.isMenuPanelShown else { return }
             let mouseLoc = NSEvent.mouseLocation
-            if let popWin = self.menuPanelController?.view.window, popWin.frame.contains(mouseLoc) { return }
+            if let popWin = self.menuPanel, popWin.frame.contains(mouseLoc) { return }
             if let btnWin = self.item?.button?.window, btnWin.frame.contains(mouseLoc) { return }
             self.closeMenuPopover()
         }
+        popoverLocalClickMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown, .otherMouseDown]) { [weak self] event in
+            guard let self, self.isMenuPanelShown else { return event }
+            if event.window === self.menuPanel { return event }
+            if let btnWin = self.item?.button?.window, event.window === btnWin { return event }
+            if let win = event.window, win.level.rawValue >= NSWindow.Level.popUpMenu.rawValue { return event }
+            self.closeMenuPopover()
+            return event
+        }
         popoverLocalKeyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
-            guard let self, self.menuPopover?.isShown == true,
-                  let popWin = self.menuPanelController?.view.window,
+            guard let self, self.isMenuPanelShown,
+                  let popWin = self.menuPanel,
                   event.window === popWin else { return event }
             if event.keyCode == 53 { // Escape
                 self.closeMenuPopover()
@@ -526,6 +789,15 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
             if event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
                let key = event.charactersIgnoringModifiers?.lowercased() {
                 switch key {
+                case "1":
+                    self.menuPanelController?.selectTab(0, persist: true)
+                    return nil
+                case "2":
+                    self.menuPanelController?.selectTab(1, persist: true)
+                    return nil
+                case "3":
+                    self.menuPanelController?.selectTab(2, persist: true)
+                    return nil
                 case ",":
                     self.closeMenuPopover()
                     self.showSettings()
@@ -546,6 +818,38 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
             }
             return event
         }
+        let wsCenter = NSWorkspace.shared.notificationCenter
+        let myPid = ProcessInfo.processInfo.processIdentifier
+        popoverWorkspaceObservers = [
+            wsCenter.addObserver(forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main) { [weak self] note in
+                guard let self, self.isMenuPanelShown else { return }
+                let activeApp = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                guard let activePid = activeApp?.processIdentifier, activePid != myPid else { return }
+                // Allow non-activating overlay/screenshot capture utilities (WeChat capture, macOS Screenshot, CleanShot, Xnip) to inspect and snap to the menu panel without auto-closing it; real clicks outside are already handled by popoverGlobalClickMonitor.
+                let bundleId = (activeApp?.bundleIdentifier ?? "").lowercased()
+                let isOverlayCaptureHelper = activeApp?.activationPolicy != .regular
+                    || bundleId.contains("screencapture")
+                    || bundleId.contains("screenshot")
+                    || bundleId.contains("cleanshot")
+                    || bundleId.contains("snip")
+                    || bundleId.contains("xnip")
+                if !isOverlayCaptureHelper {
+                    self.closeMenuPopover()
+                }
+            },
+            wsCenter.addObserver(forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main) { [weak self] _ in
+                guard let self, self.isMenuPanelShown else { return }
+                self.closeMenuPopover()
+            }
+        ]
+        popoverAppObservers = [
+            NotificationCenter.default.addObserver(forName: NSWindow.didBecomeKeyNotification, object: nil, queue: .main) { [weak self] note in
+                guard let self, self.isMenuPanelShown,
+                      let win = note.object as? NSWindow,
+                      win === self.window else { return }
+                self.closeMenuPopover()
+            }
+        ]
     }
 
     private func removePopoverMonitors() {
@@ -553,10 +857,19 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
             NSEvent.removeMonitor(monitor)
             popoverGlobalClickMonitor = nil
         }
+        if let monitor = popoverLocalClickMonitor {
+            NSEvent.removeMonitor(monitor)
+            popoverLocalClickMonitor = nil
+        }
         if let monitor = popoverLocalKeyMonitor {
             NSEvent.removeMonitor(monitor)
             popoverLocalKeyMonitor = nil
         }
+        let wsCenter = NSWorkspace.shared.notificationCenter
+        for obs in popoverWorkspaceObservers { wsCenter.removeObserver(obs) }
+        popoverWorkspaceObservers.removeAll()
+        for obs in popoverAppObservers { NotificationCenter.default.removeObserver(obs) }
+        popoverAppObservers.removeAll()
     }
 
     func buildMoreMenu() -> NSMenu {
@@ -605,17 +918,17 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
     }
 
     @objc func showSettingsFromMenuPanel() {
-        closeMenuPopover()
+        closeMenuPopover(animated: false)
         showSettings()
     }
 
     @objc func quitFromMenuPanel() {
-        closeMenuPopover()
+        closeMenuPopover(animated: false)
         quit()
     }
 
     func openMainWindowFromMenuPanel(tab: Int, usagePeriod: Int) {
-        closeMenuPopover()
+        closeMenuPopover(animated: false)
         switch tab {
         case 0:
             let targetPeriod = max(0, min(3, usagePeriod))
@@ -638,6 +951,9 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
 
     @objc func showPanel() {
         guard !quitting else { return }
+        if isMenuPanelShown {
+            closeMenuPopover(animated: false)
+        }
         if window == nil {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 1024, height: 710),
@@ -836,6 +1152,12 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
             #endif
         }
         #if !NATIVE_UI_TEST
+        if NSApp.activationPolicy() != .regular {
+            NSApp.setActivationPolicy(.regular)
+        }
+        if window?.isMiniaturized == true {
+            window?.deminiaturize(nil)
+        }
         window?.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         #endif
@@ -962,14 +1284,19 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
             aboutPage = nil
             navigate(currentPage, force: true)
         }
-        if menuPopover?.isShown == true {
+        menuPanelResizeMotion?.cancel()
+        menuPanelResizeMotion = nil
+        menuPanelFadeMotion?.cancel()
+        menuPanelFadeMotion = nil
+        if isMenuPanelShown, let panel = menuPanel {
             menuPanelController = nil
             let refreshed = ensureMenuPanelController()
-            menuPopover?.contentViewController = refreshed
+            attachMenuPanelContent(refreshed, to: panel)
             refreshed.panelWillOpen()
+            resizeMenuPanel(to: refreshed.measuredPanelSize, animate: false)
         } else {
             menuPanelController = nil
-            menuPopover?.contentViewController = nil
+            menuPanel?.contentView = nil
         }
         updateViews()
     }
@@ -1147,9 +1474,27 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
         timer=Timer.scheduledTimer(withTimeInterval:visible ? 3:12,repeats:true){[weak self]_ in self?.refresh()};timer?.tolerance=visible ? 0.5:3
         if let timer { RunLoop.main.add(timer, forMode: .common) }
     }
-    func windowWillClose(_ notification:Notification){DispatchQueue.main.async{[weak self]in self?.configureRefreshTimer()}}
-    func windowDidMiniaturize(_ notification:Notification){configureRefreshTimer()}
-    func windowDidDeminiaturize(_ notification:Notification){configureRefreshTimer();refresh()}
+    static func desiredActivationPolicy(isWindowVisible: Bool, isWindowMiniaturized: Bool, isQuitting: Bool) -> NSApplication.ActivationPolicy {
+        guard !isQuitting else { return .accessory }
+        return (isWindowVisible || isWindowMiniaturized) ? .regular : .accessory
+    }
+
+    private func syncActivationPolicy() {
+        #if !NATIVE_UI_TEST
+        let desired = Self.desiredActivationPolicy(
+            isWindowVisible: window?.isVisible == true,
+            isWindowMiniaturized: window?.isMiniaturized == true,
+            isQuitting: quitting
+        )
+        if NSApp.activationPolicy() != desired {
+            NSApp.setActivationPolicy(desired)
+        }
+        #endif
+    }
+
+    func windowWillClose(_ notification:Notification){DispatchQueue.main.async{[weak self]in guard let self else{return};self.configureRefreshTimer();self.syncActivationPolicy()}}
+    func windowDidMiniaturize(_ notification:Notification){configureRefreshTimer();syncActivationPolicy()}
+    func windowDidDeminiaturize(_ notification:Notification){configureRefreshTimer();syncActivationPolicy();refresh()}
     func windowDidChangeOcclusionState(_ notification:Notification){configureRefreshTimer()}
 
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool { showPanel(); return true }
@@ -1371,6 +1716,9 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSPopo
         return merged
     }
     func presentSheetAlert(_ alert: NSAlert, completion: @escaping (NSApplication.ModalResponse) -> Void) {
+        if isMenuPanelShown {
+            closeMenuPopover(animated: false)
+        }
         if window == nil || window?.isVisible != true {
             showPanel()
         }

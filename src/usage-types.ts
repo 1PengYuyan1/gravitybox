@@ -1,5 +1,5 @@
 import type { ApiPricing } from './pricing.js';
-import { stripModelProviderPrefix } from './model-identity.js';
+import { stripModelProviderPrefix, THINKING_EFFORT_SUFFIX_RE } from './model-identity.js';
 import { getEffectiveModelAliasKeys, getEffectiveModelPriceAlias } from './model-catalog.js';
 import type { LedgerEvent } from './usage-ledger.js';
 import { USAGE_PROJECTION_VERSION } from './protobuf-projection.js';
@@ -133,7 +133,7 @@ export function isUnknownModelName(name: string | null | undefined): boolean {
   return clean === CANONICAL_UNKNOWN_MODEL || clean.toLowerCase() === 'unknown model';
 }
 
-const ORCHESTRATOR_THINKING_SUFFIX_RE = /-(?:extra-high|extra-low|xhigh|high|medium|low|thinking)$/i;
+const ORCHESTRATOR_THINKING_SUFFIX_RE = THINKING_EFFORT_SUFFIX_RE;
 
 /**
  * 动态识别尚未入库的新代号 Orchestrator（如 gemini-pro-orchestrator-<codename> 或 Orchestrator (<Codename>)），
@@ -236,8 +236,8 @@ export function resolveDatabaseModelFullName(
 
   const normalizeDisplayLabel = (lbl: string): string =>
     lbl
-      .replace(/\s*[（(]\s*(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|thinking|max)\s*[）)]\s*$/i, '')
-      .replace(/\s+(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|thinking|max)\s*$/i, '')
+      .replace(/\s*[（(]\s*(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|minimal|thinking|max)\s*[）)]\s*$/i, '')
+      .replace(/\s+(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|minimal|thinking|max)\s*$/i, '')
       .trim() || lbl;
 
   if (cleanId) {

@@ -17,7 +17,7 @@ struct LiveStatus {
     var message = L10n.t("assistant.starting_service", fallback: "正在连接本机服务…")
     var dictionaryVersion = ""
     var dictionaryError = ""
-    var baseVersion = "2.23.0"
+    var baseVersion = ""
     var rss: Double = 0
     var updatedAt = ""
     var pending = 0
@@ -45,7 +45,7 @@ struct LiveStatus {
         message = raw["message"] as? String ?? L10n.t("assistant.starting_service", fallback: "正在连接本机服务…")
         dictionaryVersion = raw["dictionaryVersion"] as? String ?? ""
         dictionaryError = raw["dictionaryError"] as? String ?? ""
-        baseVersion = raw["dictionaryBaseVersion"] as? String ?? "2.23.0"
+        baseVersion = raw["dictionaryBaseVersion"] as? String ?? ""
         rss = (raw["rssMB"] as? NSNumber)?.doubleValue ?? 0
         updatedAt = raw["updatedAt"] as? String ?? ""
         pending = raw["newStringsCount"] as? Int ?? 0

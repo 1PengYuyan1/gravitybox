@@ -26,7 +26,7 @@
 | **主窗口 · 用量** | `usage.png` | `dark-usage.png` | `2200×1520` | 分周期 Token 核算、API 费用估算与缓存命中率趋势 |
 | **主窗口 · 设置** | `settings.png` | `dark-settings.png` | `2200×1520` | 显示语言（跟随系统 / 简体中文 / English）、界面汉化、对话状态栏、自动更新价格基准与存储管理 |
 | **主窗口 · 关于** | `about.png` | `dark-about.png` | `2200×1520` | 版本信息（v1.1.3）、应用内更新检测与目标版本状态 |
-| **菜单栏 · 用量** | `menubar.png` | `dark-menubar.png` | `792×1288` | 菜单栏面板默认“用量”视图 |
-| **菜单栏 · 配额** | `menubar-quota.png` | `dark-menubar-quota.png` | `792×1118` | 菜单栏面板“配额”与备用账号推荐 |
-| **菜单栏 · 账号** | `menubar-accounts.png` | `dark-menubar-accounts.png` | `792×1162` | 菜单栏面板一键安全切号入口 |
-| **存储瘦身与清理** | `maintenance.png` | `dark-maintenance.png` | `1480×1448` | 无损缓存评估、废纸篓移入清理与快照一键还原 |
+| **菜单栏 · 用量** | `menubar.png` | `dark-menubar.png` | `848×1280` | 菜单栏面板默认“用量”视图 |
+| **菜单栏 · 配额** | `menubar-quota.png` | `dark-menubar-quota.png` | `848×994` | 菜单栏面板“配额”与备用账号推荐 |
+| **菜单栏 · 账号** | `menubar-accounts.png` | `dark-menubar-accounts.png` | `848×1082` | 菜单栏面板一键安全切号入口 |
+| **存储瘦身与清理** | `maintenance.png` | `dark-maintenance.png` | `1240×928` | 无损缓存评估、废纸篓移入清理与快照一键还原 |

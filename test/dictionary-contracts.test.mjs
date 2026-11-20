@@ -366,6 +366,8 @@ test('P1-37/P1-39：dict/base.json 无首尾空格，HUD 与 engine.js 术语和
   assert.match(engineSrc, /function syncElementLocFlag/);
   assert.match(engineSrc, /⚠️ Failed to render LaTeX: \{reason\}/);
   assert.match(engineSrc, /Working directory: \{path\}/);
+  assert.match(engineSrc, /function isElapsedDurationNode/);
+  assert.match(engineSrc, /key:\s*"\{count\}\{timeUnit\}",\s*pattern:\s*\/\^\(\\d\+\)\(m\|h\|d\|w\|mo\|y\)\$\//);
 });
 
 test('P2-3：loadDictionaryLayers 支持声明式 template-rules.json 热编译且拦截非锚定或嵌套量词风险正则', async () => {

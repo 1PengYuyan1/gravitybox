@@ -1,4 +1,4 @@
-import { normalizeModelId, stripModelProviderPrefix } from './model-identity.js';
+import { normalizeModelId, stripModelProviderPrefix, THINKING_EFFORT_SUFFIX_RE } from './model-identity.js';
 import {
   MODEL_PRICES,
   getEffectiveModelPriceAlias,
@@ -210,7 +210,7 @@ export function priceStatus(price: ApiPricing | ApiPricingInterval[], now = Date
 
 const SORTED_DEFAULT_PRICE_KEYS = Object.keys(DEFAULT_API_PRICES).sort((a, b) => b.length - a.length);
 const PRICING_TABLE_SORTED_KEYS_CACHE = new WeakMap<object, readonly string[]>();
-const SUFFIX_VARIANT_RE = /^(?:xhigh|extra-high|extra-low|high|medium|low|thinking|latest|preview|trial|\d{8}|\d{4}-\d{2}-\d{2}|\d{3})(?:-thinking)?(?:-(?:\d{8}|\d{4}-\d{2}-\d{2}|\d{2}-\d{2}))?$/;
+const SUFFIX_VARIANT_RE = /^(?:extra-high|extra-low|xhigh|high|medium|low|minimal|max|thinking|latest|preview|trial|\d{8}|\d{4}-\d{2}-\d{2}|\d{3})(?:-thinking)?(?:-(?:\d{8}|\d{4}-\d{2}-\d{2}|\d{2}-\d{2}))?$/;
 
 function getSortedPricingTableKeys(pricingTable: Record<string, ApiPricingEntry>): readonly string[] {
   if (pricingTable === DEFAULT_API_PRICES) return SORTED_DEFAULT_PRICE_KEYS;
@@ -576,7 +576,7 @@ export function normalizeCatalogTierLabel(rawTier: unknown): string {
   if (/enterprise/i.test(text)) return 'ENTERPRISE';
   if (/\b(?:team|teams|business|workspace)\b/i.test(text)) return 'TEAM';
   if (/\bplus\b/i.test(text)) return 'PLUS';
-  if (/pro/i.test(text)) return 'PRO';
+  if (/\bpro\b/i.test(text)) return 'PRO';
   if (/\b(?:free|starter|trial)\b/i.test(text)) return 'FREE';
   return '';
 }
@@ -613,30 +613,34 @@ interface ExtractedCatalogCandidate {
 }
 
 const UNPRICED_THINKING_SUFFIX_LABELS: Record<string, string> = {
+  minimal: 'Minimal',
+  'extra-low': 'Extra Low',
   low: 'Low',
   medium: 'Medium',
   high: 'High',
   xhigh: 'XHigh',
   'extra-high': 'Extra High',
-  'extra-low': 'Extra Low',
+  max: 'Max',
   thinking: 'Thinking',
 };
 
 const UNPRICED_VARIANT_ORDER: Record<string, number> = {
+  Minimal: -1,
   Low: 0,
   Medium: 1,
   High: 2,
   XHigh: 3,
   'Extra High': 4,
   'Extra Low': 5,
-  Thinking: 6,
-  Orchestrator: 7,
+  Max: 6,
+  Thinking: 7,
+  Orchestrator: 8,
 };
 
 function stripDisplayTierSuffix(displayName: string): string {
   const cleaned = displayName
-    .replace(/\s*[（(]\s*(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|thinking)\s*[）)]\s*$/i, '')
-    .replace(/\s+(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|thinking)\s*$/i, '')
+    .replace(/\s*[（(]\s*(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|minimal|max|thinking)\s*[）)]\s*$/i, '')
+    .replace(/\s+(?:extra[\s-]*high|extra[\s-]*low|xhigh|high|medium|low|minimal|max|thinking)\s*$/i, '')
     .trim();
   return cleaned || displayName;
 }
@@ -658,7 +662,7 @@ function foldUnpricedLiveCandidate(
     };
   }
   if (/^(?:gemini|claude|gpt|o[1-9])/.test(canonicalKey)) {
-    const suffixMatch = canonicalKey.match(/^(.+)-(extra-high|extra-low|xhigh|high|medium|low|thinking)$/i);
+    const suffixMatch = canonicalKey.match(/^(.+)-(extra-high|extra-low|xhigh|high|medium|low|minimal|max|thinking)$/i);
     if (suffixMatch) {
       const baseKey = suffixMatch[1]!;
       const rawSuffix = suffixMatch[2]!.toLowerCase();
@@ -718,7 +722,7 @@ function extractCatalogModels(
     const rawId = String(m.model_id ?? m.id ?? m.name ?? m.model_or_alias ?? m.modelOrAlias ?? '').trim();
     if (!rawId) continue;
     const cleaned = normalizeModelId(rawId.replace(/(?:^|[-_])disabled$/i, '').trim())
-      .replace(/-(?:extra-high|extra-low|xhigh|high|medium|low|thinking)$/i, '');
+      .replace(THINKING_EFFORT_SUFFIX_RE, '');
     if (cleaned) siblingNormIds.add(cleaned);
   }
   const parsed: ExtractedCatalogCandidate[] = [];

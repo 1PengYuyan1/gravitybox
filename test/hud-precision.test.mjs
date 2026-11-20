@@ -2107,6 +2107,178 @@ test('Swarm 1 Working + 2 Standing by (swarm_wait / WAITING) + Needs you 仅计 
   assert.equal(resumedAfterPriorSwarmWait.runningSubagentCount, 1);
 });
 
+test('OPT-02：尾部透明交接步 (stepType=101/98) 不破坏轮次闭合、中止识别与子库终结判定', async (t) => {
+  const nowSec = Date.now() / 1000;
+  // 1. 主轮次已明确以 stepType=2 收尾，末尾紧跟透明步 101 时，即使 isStreaming=true 也不得外推跑表
+  const closedWithTransparentTail = buildConversationHudMetrics({
+    conversationId: 'opt02-closed-tail',
+    isStreaming: true,
+    steps: [
+      { idx: 0, stepType: 14, status: 3, startTimeSeconds: nowSec - 60, endTimeSeconds: nowSec - 60 },
+      { idx: 1, stepType: 15, status: 3, startTimeSeconds: nowSec - 60, endTimeSeconds: nowSec - 55, outputTokens: 100 },
+      { idx: 2, stepType: 2, status: 3, startTimeSeconds: nowSec - 55, endTimeSeconds: nowSec - 54 },
+      { idx: 3, stepType: 101, status: 3, startTimeSeconds: nowSec - 54 },
+    ],
+  });
+  assert.ok(
+    closedWithTransparentTail.session.currentTurnDurationSeconds <= 6.5,
+    `尾部透明步 101 不得让已闭合轮次跑表外推至 60s (实际 ${closedWithTransparentTail.session.currentTurnDurationSeconds})`
+  );
+
+  // 2. 用户中止后末尾紧跟透明步 101，仍必须准确识别 turnAborted === true
+  const abortedWithTransparentTail = buildConversationHudMetrics({
+    conversationId: 'opt02-aborted-tail',
+    isStreaming: false,
+    steps: [
+      { idx: 0, stepType: 14, status: 3, startTimeSeconds: nowSec - 20, endTimeSeconds: nowSec - 20 },
+      { idx: 1, stepType: 15, status: 4, startTimeSeconds: nowSec - 20, endTimeSeconds: nowSec - 15 },
+      { idx: 2, stepType: 101, status: 3, startTimeSeconds: nowSec - 15 },
+    ],
+  });
+  assert.equal(abortedWithTransparentTail.session.turnAborted, true);
+
+  // 3. 独立子智能体分栏尾部为 stepType=2(status=3) + stepType=98(status=2) 时，即使 summaries 暂报 RUNNING 也应停流
+  const subDir = fs.mkdtempSync(path.join(os.tmpdir(), 'gb-opt02-sub-'));
+  const dbs = [];
+  t.after(() => {
+    for (const db of dbs) db.close();
+    fs.rmSync(subDir, { recursive: true, force: true });
+  });
+  const mainId = '77777777-7777-4777-8777-777777777777';
+  const subId = '88888888-8888-4888-8888-888888888888';
+  const sumDb = new DatabaseSync(path.join(subDir, 'conversation_summaries.db'));
+  dbs.push(sumDb);
+  sumDb.exec(`
+    CREATE TABLE conversation_summaries (
+      conversation_id TEXT PRIMARY KEY,
+      parent_conversation_id TEXT,
+      root_conversation_id TEXT,
+      status TEXT,
+      updated_at INTEGER
+    );
+  `);
+  sumDb.prepare('INSERT INTO conversation_summaries VALUES (?, ?, ?, ?, ?)').run(
+    subId, mainId, mainId, 'CASCADE_RUN_STATUS_RUNNING', Math.floor(nowSec)
+  );
+  const subDb = new DatabaseSync(path.join(subDir, `${subId}.db`));
+  dbs.push(subDb);
+  subDb.exec(`
+    PRAGMA journal_mode = WAL;
+    CREATE TABLE steps (idx INTEGER PRIMARY KEY, step_type INTEGER NOT NULL, status INTEGER NOT NULL, metadata BLOB, render_info BLOB, step_payload BLOB);
+    CREATE TABLE gen_metadata (idx INTEGER PRIMARY KEY, data BLOB, size INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE trajectory_meta (trajectory_id TEXT PRIMARY KEY, cascade_id TEXT, trajectory_type INTEGER);
+    CREATE TABLE trajectory_metadata_blob (id TEXT PRIMARY KEY, data BLOB);
+  `);
+  subDb.prepare('INSERT INTO trajectory_meta VALUES (?, ?, ?)').run(subId, subId, 0);
+  subDb.prepare('INSERT INTO trajectory_metadata_blob VALUES (?, ?)').run('main', parentMetadata(mainId, mainId));
+  subDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (0, 14, 3, ?)').run(Buffer.from(seconds(1, nowSec - 10)));
+  subDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (1, 2, 3, ?)').run(Buffer.from([...seconds(1, nowSec - 8), ...seconds(7, nowSec - 5)]));
+  subDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (2, 98, 2, ?)').run(Buffer.from(seconds(1, nowSec - 4)));
+
+  const engine = new ConversationMetricsEngine({ conversationsDir: subDir });
+  const subMetrics = await engine.getConversationMetrics({ conversationId: subId, isStreaming: false });
+  assert.equal(subMetrics.isStreaming, false, '尾部透明步 98 不得遮蔽前面 stepType=2 的终结状态');
+});
+
+test('OPT-05 & OPT-06：跨 4 并发波次子代理两阶段防抖 + 同子库模型回退且严禁借用父模型', async (t) => {
+  const { create, engine } = databaseFixture(t);
+  const zeroUsage = usage({
+    rawInputTokens: 0,
+    cachedReadTokens: 0,
+    cacheWriteTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    candidateTokens: 0,
+  });
+  const mainId = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+  const childIds = [
+    'bbbbbbbb-1111-4111-8111-000000000001',
+    'bbbbbbbb-1111-4111-8111-000000000002',
+    'bbbbbbbb-1111-4111-8111-000000000003',
+    'bbbbbbbb-1111-4111-8111-000000000004',
+    'bbbbbbbb-1111-4111-8111-000000000005',
+  ];
+  const mainDb = create(mainId);
+  mainDb.prepare('INSERT INTO steps (idx, step_type, status) VALUES (0, 14, 3)').run();
+  invoke(mainDb, 1, childIds);
+  // 主库模型设为较贵的 claude-opus-5-5（1M input = $4）
+  const parentGen = Buffer.from([
+    ...message(1, [
+      ...message(4, usageBytes(zeroUsage)),
+      ...string(19, 'claude-opus-5-5'),
+    ]),
+    ...message(2, varint(0)),
+  ]);
+  mainDb.prepare('INSERT INTO gen_metadata VALUES (1, ?, ?)').run(parentGen, parentGen.length);
+
+  // 第 1 波（前 4 个）处于两步间短暂空档（status=3 且无 stepType=2）；第 5 个处于第 2 波且正在 status=2 运行
+  for (let i = 0; i < 4; i++) {
+    const cDb = create(childIds[i], { parentBlob: parentMetadata(mainId, mainId) });
+    cDb.prepare('INSERT INTO steps (idx, step_type, status) VALUES (0, 14, 3)').run();
+    if (i === 0) {
+      // Child 0：第 1 步记录了自己的 gemini-3.8-flash（无费用），第 2 步刚落盘 1M input 但尚未写 generation
+      const meta1 = Buffer.from([
+        ...message(9, usageBytes(zeroUsage)),
+        ...string(19, 'gemini-3.8-flash'),
+      ]);
+      // 将模型显式挂在 step_payload/generation 同子库回退场景：给 step 1 写入独立 gen_metadata
+      cDb.prepare('INSERT INTO steps (idx, step_type, status, metadata) VALUES (1, 15, 3, ?)').run(meta1);
+      const childOwnGen = Buffer.from([
+        ...message(1, [
+          ...message(4, usageBytes(zeroUsage)),
+          ...string(19, 'gemini-3.8-flash'),
+        ]),
+        ...message(2, varint(1)),
+      ]);
+      cDb.prepare('INSERT INTO gen_metadata VALUES (1, ?, ?)').run(childOwnGen, childOwnGen.length);
+      insertStep(cDb, {
+        idx: 2,
+        status: 3,
+        value: usage({
+          rawInputTokens: 1_000_000,
+          cachedReadTokens: 0,
+          cacheWriteTokens: 0,
+          outputTokens: 0,
+          reasoningTokens: 0,
+          candidateTokens: 0,
+        }),
+      });
+    } else {
+      // Child 1..3：无任何模型元数据（验证绝不借用父会话 Opus 模型）
+      insertStep(cDb, {
+        idx: 1,
+        status: 3,
+        value: usage({
+          rawInputTokens: 100,
+          cachedReadTokens: 0,
+          cacheWriteTokens: 0,
+          outputTokens: 10,
+          reasoningTokens: 0,
+          candidateTokens: 0,
+        }),
+      });
+    }
+  }
+  // 第 5 个子库（第 2 波）实锤 RUNNING(2)
+  const c5 = create(childIds[4], { parentBlob: parentMetadata(mainId, mainId) });
+  c5.prepare('INSERT INTO steps (idx, step_type, status) VALUES (0, 14, 3)').run();
+  insertStep(c5, { idx: 1, status: 2, value: zeroUsage });
+
+  const metricsCrossWave = await engine.getConversationMetrics({
+    conversationId: mainId,
+    isStreaming: false,
+    isSubagentRunning: false,
+    runningSubagentCount: 0,
+  });
+  assert.equal(metricsCrossWave.runningSubagentCount, 5, '跨 4 并发波次时，第 2 波活跃兄弟必须能保活第 1 波处于步间空档的 4 个兄弟');
+  assert.equal(metricsCrossWave.tokens.hasUnpricedSteps, true, '无模型元数据的子库绝不可借用父会话模型，必须保留 hasUnpricedSteps=true');
+  // Child 0 按同子库 gemini-3.8-flash ($0.75/1M input) 计费，而不是按父会话 Opus ($4.00/1M) 虚增
+  assert.ok(
+    Math.abs(metricsCrossWave.tokens.estimatedCostUsd - 0.75) < 1e-6,
+    `Child 0 应按同子库 gemini-3.8-flash 估算为 $0.75，实际 $${metricsCrossWave.tokens.estimatedCostUsd}`
+  );
+});
+
 
 
 

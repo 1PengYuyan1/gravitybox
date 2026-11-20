@@ -210,7 +210,7 @@ export function looksLikeNoise(text: string): boolean {
   /* 5. 快捷键组合（空格写法）、CSS 过渡片段与模型代号：都不是界面文案，不参与翻译与门禁 */
   if (/^(?:Command|Cmd|Ctrl|Control|Option|Alt|Shift)(?:\s+(?:Command|Cmd|Ctrl|Control|Option|Alt|Shift))*\s+[A-Z0-9]$/.test(text)) return true;
   if (/^(?:(?:height|width|min-height|max-height|opacity|transform|filter|all|color|background(?:-color)?|visibility)\s+\d*\.?\d+m?s(?:\s+(?:ease(?:-(?:in|out|in-out))?|linear))?(?:\s+\d*\.?\d+m?s)?(?:\s*,\s*|$))+$/.test(text)) return true;
-  if (/^(?:Flash|Gemini|Claude|GPT|Gemma)(?:\s+(?:Lite|Pro|Flash|Max|Ultra|Mini|Nano|Thinking|High|Medium|Low|Argon)){0,3}$/.test(text)) return true;
+  if (/^(?:Flash|Gemini|Claude|GPT|Gemma)(?:\s+(?:Lite|Pro|Flash|Max|Ultra|Mini|Nano|Thinking|High|Medium|Low|Argon|Carbon|Neon|Hydrogen|Fable|Mythos|Astra|Sol|Luna)){0,3}$/.test(text)) return true;
   /* 6. 代码示例字面量、过滤语法示例与键值调试前缀：非界面文案 */
   if (/^`[^`]*`$/.test(text.trim())) return true;
   if (/^[a-z_][a-z0-9_]*\s+in\s+\[[^\]]*\]$/.test(text.trim())) return true;

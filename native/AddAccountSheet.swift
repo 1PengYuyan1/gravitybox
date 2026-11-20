@@ -3,12 +3,12 @@ import UniformTypeIdentifiers
 
 final class AddAccountSheet: NSObject {
     static let sheetWidth: CGFloat = 460
-    static let collapsedHeight: CGFloat = 294
-    static let expandedHeight: CGFloat = 338
+    static let initialHeight: CGFloat = 370
 
     unowned let app: Assistant
+    let accountCount: Int
     let window = NSWindow(
-        contentRect: NSRect(x: 0, y: 0, width: AddAccountSheet.sheetWidth, height: AddAccountSheet.collapsedHeight),
+        contentRect: NSRect(x: 0, y: 0, width: AddAccountSheet.sheetWidth, height: AddAccountSheet.initialHeight),
         styleMask: [.titled],
         backing: .buffered,
         defer: false
@@ -17,6 +17,7 @@ final class AddAccountSheet: NSObject {
     let spinner = NSProgressIndicator()
     let currentButton = button(L10n.t("add_account.save_current", fallback: "保存当前账号"), target: nil, action: #selector(saveCurrent))
     let importJsonButton = button(L10n.t("add_account.import_json_btn", fallback: "选择文件…"), target: nil, action: #selector(importFromJson))
+    let exportButton = button(L10n.t("add_account.export_btn", fallback: "导出文件…"), target: nil, action: #selector(exportAccounts))
     let cancelButton = button(L10n.t("common.cancel", fallback: "取消"), target: nil, action: #selector(cancel))
     private var feedback: NSStackView!
     private var languageObserver: NSObjectProtocol?
@@ -25,6 +26,8 @@ final class AddAccountSheet: NSObject {
     private var saveCurrentSubLabel: NSTextField!
     private var importJsonTitleLabel: NSTextField!
     private var importJsonSubLabel: NSTextField!
+    private var exportTitleLabel: NSTextField!
+    private var exportSubLabel: NSTextField!
     private var saveEmailCopyTitle: NSTextField?
     private var contentViewRef: NSView?
     var closing = false
@@ -32,12 +35,22 @@ final class AddAccountSheet: NSObject {
     var onDismiss: (() -> Void)?
     var filePickerHook: (() -> [URL]?)?
     var expiredNoticeHook: ((String, String) -> Void)?
+    var exportConfirmHook: (() -> Bool)?
+    var exportSavePanelHook: ((String) -> URL?)?
 
-    init(app: Assistant, saved: @escaping () -> Void) {
+    private static let exportDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyyMMdd"
+        return f
+    }()
+
+    init(app: Assistant, accountCount: Int? = nil, saved: @escaping () -> Void) {
         self.app = app
+        self.accountCount = max(0, accountCount ?? app.cachedAccounts.count)
         self.saved = saved
         super.init()
-        window.title = L10n.t("add_account.title", fallback: "添加账号")
+        window.title = L10n.t("add_account.title", fallback: "管理账号")
         window.isReleasedWhenClosed = false
 
         let currentEmail = app.statusValue.liveAccountEmail.isEmpty ? app.statusValue.activeAccountEmail : app.statusValue.liveAccountEmail
@@ -55,9 +68,17 @@ final class AddAccountSheet: NSObject {
         importJsonButton.title = L10n.t("add_account.import_json_btn", fallback: "选择文件…")
         importJsonButton.isEnabled = true
         importJsonButton.toolTip = nil
-        importJsonButton.setAccessibilityLabel(L10n.t("add_account.import_json_title", fallback: "从 JSON 导入账号"))
+        importJsonButton.setAccessibilityLabel(L10n.t("add_account.import_json_title", fallback: "导入账号"))
         importJsonButton.setContentHuggingPriority(.required, for: .horizontal)
         importJsonButton.setContentCompressionResistancePriority(.required, for: .horizontal)
+
+        exportButton.target = self
+        exportButton.title = L10n.t("add_account.export_btn", fallback: "导出文件…")
+        exportButton.isEnabled = self.accountCount > 0
+        exportButton.toolTip = nil
+        exportButton.setAccessibilityLabel(L10n.t("accounts.a11y.export_backup", fallback: "导出全部已保存账号为 JSON 文件"))
+        exportButton.setContentHuggingPriority(.required, for: .horizontal)
+        exportButton.setContentCompressionResistancePriority(.required, for: .horizontal)
 
         cancelButton.title = L10n.t("common.cancel", fallback: "取消")
         cancelButton.target = self
@@ -76,13 +97,37 @@ final class AddAccountSheet: NSObject {
             spinner.heightAnchor.constraint(equalToConstant: 16)
         ])
 
+        func makeActionCard(
+            icon: String,
+            title: String,
+            subtitle: String,
+            extraViews: [NSView] = [],
+            actionButton: NSButton
+        ) -> (card: NSBox, titleLbl: NSTextField, subLbl: NSTextField) {
+            let titleLbl = text(title, size: 13, weight: .semibold, color: .labelColor)
+            let subLbl = text(subtitle, size: 11, color: Design.secondary, wrap: true)
+            subLbl.setContentHuggingPriority(.defaultLow, for: .horizontal)
+            subLbl.setContentHuggingPriority(.required, for: .vertical)
+            subLbl.setContentCompressionResistancePriority(.required, for: .vertical)
+            let textViews: [NSView] = [titleLbl, subLbl] + extraViews
+            let textCol = vertical(textViews, spacing: 2.5)
+            textCol.alignment = .leading
+            textCol.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+            textCol.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+            for v in textViews {
+                v.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+                fillWidth(v, in: textCol)
+            }
+            let row = horizontal([iconBadge(icon, tint: Design.blue, size: 30), textCol, actionButton], spacing: 12)
+            row.alignment = .centerY
+            let card = group([row], inset: 12)
+            card.setContentHuggingPriority(.required, for: .vertical)
+            card.setContentCompressionResistancePriority(.required, for: .vertical)
+            return (card, titleLbl, subLbl)
+        }
+
         // 第一卡：保存当前 Antigravity 登录账号（主操作）
-        let titleLbl = text(L10n.t("add_account.current_card_title", fallback: "当前 Antigravity 账号"), size: 13, weight: .semibold, color: .labelColor)
-        let subLbl = text(L10n.t("add_account.save_current_sub", fallback: "导入当前 Antigravity 登录账号"), size: 11, color: Design.secondary, wrap: true)
-        subLbl.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        subLbl.setContentHuggingPriority(.required, for: .vertical)
-        subLbl.setContentCompressionResistancePriority(.required, for: .vertical)
-        var textViews: [NSView] = [titleLbl, subLbl]
+        var saveExtras: [NSView] = []
         if !currentEmail.isEmpty {
             let emailLbl = text(currentEmail, size: 10.5, color: .secondaryLabelColor)
             enableTextCopy(emailLbl, title: L10n.t("common.copy_full_email", fallback: "复制完整邮箱"))
@@ -91,46 +136,43 @@ final class AddAccountSheet: NSObject {
             emailLbl.setContentHuggingPriority(.defaultLow, for: .horizontal)
             emailLbl.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
             saveEmailCopyTitle = emailLbl
-            textViews.append(emailLbl)
+            saveExtras.append(emailLbl)
         }
-        let textCol = vertical(textViews, spacing: 2.5)
-        textCol.alignment = .leading
-        textCol.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        textCol.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        for v in textViews {
-            v.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-            fillWidth(v, in: textCol)
-        }
-        let saveCardRow = horizontal([iconBadge("person.crop.rectangle", tint: Design.blue, size: 30), textCol, currentButton], spacing: 12)
-        saveCardRow.alignment = .centerY
-        let saveCard = group([saveCardRow], inset: 12)
-        saveCard.setContentHuggingPriority(.required, for: .vertical)
-        saveCard.setContentCompressionResistancePriority(.required, for: .vertical)
-        saveCurrentTitleLabel = titleLbl
-        saveCurrentSubLabel = subLbl
+        let saveCardBuilt = makeActionCard(
+            icon: "person.crop.rectangle",
+            title: L10n.t("add_account.current_card_title", fallback: "当前 Antigravity 账号"),
+            subtitle: L10n.t("add_account.save_current_sub", fallback: "导入当前 Antigravity 登录账号"),
+            extraViews: saveExtras,
+            actionButton: currentButton
+        )
+        let saveCard = saveCardBuilt.card
+        saveCurrentTitleLabel = saveCardBuilt.titleLbl
+        saveCurrentSubLabel = saveCardBuilt.subLbl
 
         // 第二卡：从 JSON 批量导入账号（迁移/恢复）
-        let importTitle = text(L10n.t("add_account.import_json_title", fallback: "从 JSON 导入账号"), size: 13, weight: .semibold, color: .labelColor)
-        let importSub = text(L10n.t("add_account.import_json_sub", fallback: "支持导入 GravityBox 备份文件、单账号 JSON 或账号文件夹"), size: 11, color: Design.secondary, wrap: true)
-        importSub.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        importSub.setContentHuggingPriority(.required, for: .vertical)
-        importSub.setContentCompressionResistancePriority(.required, for: .vertical)
-        let importTextViews: [NSView] = [importTitle, importSub]
-        let importTextCol = vertical(importTextViews, spacing: 2.5)
-        importTextCol.alignment = .leading
-        importTextCol.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-        importTextCol.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-        for v in importTextViews {
-            v.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
-            fillWidth(v, in: importTextCol)
-        }
-        let importCardRow = horizontal([iconBadge("doc.badge.plus", tint: Design.blue, size: 30), importTextCol, importJsonButton], spacing: 12)
-        importCardRow.alignment = .centerY
-        let importCard = group([importCardRow], inset: 12)
-        importCard.setContentHuggingPriority(.required, for: .vertical)
-        importCard.setContentCompressionResistancePriority(.required, for: .vertical)
-        importJsonTitleLabel = importTitle
-        importJsonSubLabel = importSub
+        let importCardBuilt = makeActionCard(
+            icon: "doc.badge.plus",
+            title: L10n.t("add_account.import_json_title", fallback: "导入账号"),
+            subtitle: L10n.t("add_account.import_json_sub", fallback: "支持导入 GravityBox 备份文件、单账号 JSON 或账号文件夹"),
+            actionButton: importJsonButton
+        )
+        let importCard = importCardBuilt.card
+        importJsonTitleLabel = importCardBuilt.titleLbl
+        importJsonSubLabel = importCardBuilt.subLbl
+
+        // 第三卡：导出已保存账号为 JSON 备份
+        let exportSubtitle = self.accountCount > 0
+            ? L10n.t("add_account.export_sub", ["count": self.accountCount], fallback: "将已保存的 \(self.accountCount) 个账号导出为 JSON 文件（含登录凭据，请妥善保管）")
+            : L10n.t("add_account.export_sub_empty", fallback: "暂无已保存账号，添加账号后可导出为 JSON 备份")
+        let exportCardBuilt = makeActionCard(
+            icon: "square.and.arrow.up",
+            title: L10n.t("add_account.export_title", fallback: "导出账号"),
+            subtitle: exportSubtitle,
+            actionButton: exportButton
+        )
+        let exportCard = exportCardBuilt.card
+        exportTitleLabel = exportCardBuilt.titleLbl
+        exportSubLabel = exportCardBuilt.subLbl
 
         status.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
         status.setContentHuggingPriority(.required, for: .vertical)
@@ -138,7 +180,7 @@ final class AddAccountSheet: NSObject {
         feedback = horizontal([spinner, status], spacing: 8)
         feedback.isHidden = true
         let headerBadge = iconBadge("person.badge.plus", tint: Design.blue, size: 32)
-        let headerTitle = text(L10n.t("add_account.title", fallback: "添加账号"), size: 16, weight: .semibold, color: .labelColor)
+        let headerTitle = text(L10n.t("add_account.title", fallback: "管理账号"), size: 16, weight: .semibold, color: .labelColor)
         headerTitleLabel = headerTitle
         let headerRow = horizontal([headerBadge, headerTitle, flexibleSpace()], spacing: 10)
         headerRow.alignment = .centerY
@@ -146,7 +188,7 @@ final class AddAccountSheet: NSObject {
         let footer = horizontal([flexibleSpace(), cancelButton], spacing: 8)
         footer.alignment = .centerY
 
-        let root = vertical([headerRow, saveCard, importCard, feedback, footer], spacing: 10)
+        let root = vertical([headerRow, saveCard, importCard, exportCard, feedback, footer], spacing: 10)
         root.detachesHiddenViews = true
         let surface = SheetVisualEffectView()
         let content = fixedPage(root)
@@ -215,17 +257,23 @@ final class AddAccountSheet: NSObject {
     }
 
     private func syncLocalizedChrome() {
-        let title = L10n.t("add_account.title", fallback: "添加账号")
+        let title = L10n.t("add_account.title", fallback: "管理账号")
         window.title = title
         headerTitleLabel.stringValue = title
         saveCurrentTitleLabel.stringValue = L10n.t("add_account.current_card_title", fallback: "当前 Antigravity 账号")
         saveCurrentSubLabel.stringValue = L10n.t("add_account.save_current_sub", fallback: "导入当前 Antigravity 登录账号")
-        importJsonTitleLabel.stringValue = L10n.t("add_account.import_json_title", fallback: "从 JSON 导入账号")
+        importJsonTitleLabel.stringValue = L10n.t("add_account.import_json_title", fallback: "导入账号")
         importJsonSubLabel.stringValue = L10n.t("add_account.import_json_sub", fallback: "支持导入 GravityBox 备份文件、单账号 JSON 或账号文件夹")
+        exportTitleLabel.stringValue = L10n.t("add_account.export_title", fallback: "导出账号")
+        exportSubLabel.stringValue = accountCount > 0
+            ? L10n.t("add_account.export_sub", ["count": accountCount], fallback: "将已保存的 \(accountCount) 个账号导出为 JSON 文件（含登录凭据，请妥善保管）")
+            : L10n.t("add_account.export_sub_empty", fallback: "暂无已保存账号，添加账号后可导出为 JSON 备份")
         currentButton.title = L10n.t("add_account.save_current", fallback: "保存当前账号")
         currentButton.setAccessibilityLabel(currentButton.title)
         importJsonButton.title = L10n.t("add_account.import_json_btn", fallback: "选择文件…")
-        importJsonButton.setAccessibilityLabel(L10n.t("add_account.import_json_title", fallback: "从 JSON 导入账号"))
+        importJsonButton.setAccessibilityLabel(L10n.t("add_account.import_json_title", fallback: "导入账号"))
+        exportButton.title = L10n.t("add_account.export_btn", fallback: "导出文件…")
+        exportButton.setAccessibilityLabel(L10n.t("accounts.a11y.export_backup", fallback: "导出全部已保存账号为 JSON 文件"))
         cancelButton.title = L10n.t("common.cancel", fallback: "取消")
         cancelButton.setAccessibilityLabel(cancelButton.title)
         if let saveEmailCopyTitle {
@@ -252,6 +300,7 @@ final class AddAccountSheet: NSObject {
         resizeSheetToFit()
         currentButton.isEnabled = !value
         importJsonButton.isEnabled = !value
+        exportButton.isEnabled = !value && accountCount > 0
         spinner.isHidden = !value
         if value {
             spinner.startAnimation(nil)
@@ -376,6 +425,82 @@ final class AddAccountSheet: NSObject {
                 }
             case .failure(let error):
                 self.fail(error.localizedDescription)
+            }
+        }
+    }
+
+    @objc func exportAccounts() {
+        guard accountCount > 0 else { return }
+        if let confirmHook = exportConfirmHook {
+            guard confirmHook() else { return }
+            presentExportSavePanel()
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = L10n.t("accounts.export.confirm_title", fallback: "导出未加密的账号凭据？")
+        alert.informativeText = L10n.t("accounts.export.confirm_body", fallback: "导出的 JSON 文件包含未加密的 OAuth 登录凭据（access_token 与 refresh_token）。请妥善保管在安全的本地位置，切勿上传至公开网盘或分享给他人。")
+        alert.addButton(withTitle: L10n.t("accounts.export.confirm_action", fallback: "继续导出…"))
+        alert.addButton(withTitle: L10n.t("common.cancel", fallback: "取消"))
+        if window.sheetParent != nil {
+            alert.beginSheetModal(for: window) { [weak self] resp in
+                guard let self, resp == .alertFirstButtonReturn else { return }
+                DispatchQueue.main.async {
+                    self.presentExportSavePanel()
+                }
+            }
+        } else if alert.runModal() == .alertFirstButtonReturn {
+            presentExportSavePanel()
+        }
+    }
+
+    private func presentExportSavePanel() {
+        let dateTag = Self.exportDateFormatter.string(from: Date())
+        let defaultFileName = "gravitybox-accounts-backup-\(dateTag).json"
+        if let saveHook = exportSavePanelHook {
+            guard let url = saveHook(defaultFileName) else { return }
+            executeExportAccounts(to: url)
+            return
+        }
+        let panel = NSSavePanel()
+        panel.title = L10n.t("accounts.export.panel_title", fallback: "导出账号")
+        panel.nameFieldStringValue = defaultFileName
+        panel.canCreateDirectories = true
+        panel.isExtensionHidden = false
+        if #available(macOS 11.0, *) {
+            panel.allowedContentTypes = [.json]
+        } else {
+            panel.allowedFileTypes = ["json"]
+        }
+        let handleSave: (NSApplication.ModalResponse) -> Void = { [weak self] resp in
+            guard let self, resp == .OK, let url = panel.url else { return }
+            self.executeExportAccounts(to: url)
+        }
+        if window.sheetParent != nil {
+            panel.beginSheetModal(for: window, completionHandler: handleSave)
+        } else {
+            handleSave(panel.runModal())
+        }
+    }
+
+    private func executeExportAccounts(to url: URL) {
+        status.stringValue = L10n.t("add_account.status.exporting_json", fallback: "正在导出账号…")
+        status.textColor = Design.secondary
+        busy(true)
+        cancelButton.isEnabled = false
+        app.bridge.send([
+            "command": "account_export_backup",
+            "path": url.path,
+            "confirmed": true
+        ]) { [weak self] response in
+            guard let self else { return }
+            switch response {
+            case .success(let value):
+                let count = intVal(value, "count", fallback: self.accountCount)
+                self.app.showMessage(L10n.t("accounts.export.success", ["count": count, "name": url.lastPathComponent], fallback: "已导出 \(count) 个账号至 \(url.lastPathComponent)"))
+                self.dismiss()
+            case .failure(let error):
+                self.fail(L10n.t("accounts.export.failed", ["error": error.localizedDescription], fallback: "导出账号失败：\(error.localizedDescription)"))
             }
         }
     }

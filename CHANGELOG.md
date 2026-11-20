@@ -6,16 +6,23 @@
 
 ## [Unreleased]
 
-## [1.1.3] - 2026-11-19
+## [1.1.3] - 2026-11-20
 
 ### Added
-- **JSON Account Import & `0600` Backup Export (`#20`)**：`AddAccountSheet` 升级为「保存当前账号 + 从 JSON 导入账号」双卡布局，`AccountsPage` 头部新增「导出备份…」入口；后端 `importAccountsFromJson` / `exportAccountsBackup` 支持单文件、多文件与目录批量导入（单锁批量事务、按标准化邮箱去重以隔离外部 ID 碰撞），导出需经二次交互确认并由后端直接以 `0600` 权限原子落盘（IPC 零凭据返回）。
+- **JSON Account Import & `0600` Backup Export (`#20`)**：由账号页头部统一「管理账号…」入口唤起三卡式 `AddAccountSheet`（「保存当前账号 + 导入账号 + 导出账号」）；后端 `importAccountsFromJson` / `exportAccountsBackup` 支持单文件、多文件与目录批量导入（单锁批量事务、按标准化邮箱去重以隔离外部 ID 碰撞），导出需经二次交互确认并由后端直接以 `0600` 权限原子落盘（IPC 零凭据返回）。
 
 ### Changed
 - **Authoritative Remote Pricing Catalog & Official Host Watch**：`assets/pricing-feed.json`（保留 `schema: 1`）支持随包冷启动水合与完整生效快照接管，远端同步可直接热更新公开模型清单、别名、容量与中英定价依据（`ETag` / `304` + SHA-256 去重 + `pricingRevision` 实时联动界面与 HUD）；GitHub Actions 价格巡检改以 Antigravity 官方模型文档为权威真值源做原文精确核对与宿主过滤（忽略非宿主模型），核验通过后自动合入公开费率。
 - **Thinking-Variant Usage Summary Folding**：原生主窗口用量页、总览热门模型卡片及常驻菜单栏面板（`ModelUsageFold`）自动将同一基础模型的思考程度变体（`-low`、`-medium`、`-high`、`-xhigh`、`-extra-high`、`-extra-low`、`-thinking`、`-max`）合并汇总展示 Token、请求数与费用，同时保留请求明细流水原始模型标识。
 - **Same-Origin `agy` CLI Credential Sync & Compliant Switching (`#19`)**：切号与回滚时按非侵入原则同步已存在的同源 CLI 凭据文件（`~/.gemini/antigravity-cli/antigravity-oauth-token` 与 `~/.gemini/jetski-standalone-oauth-token`，不主动新建且完全隔离 `@google/gemini-cli` 凭据）；无 `.env` 凭据配置时允许持有有效 `refresh_token` 但 `access_token` 已过期的账号正常切号，并将 CLI 同步隔离于桌面端 7 天回滚文件摘要锁之外，确保 CLI 外部续期后仍可完整对称回滚。
 - **Three-Tier Periodic Quota Refresh & Dynamic Stale Threshold Alignment**：建立「后端过期待刷巡检（启动 5 秒 + 30 秒周期）+ 原生 `Assistant` 定时刷新与唤醒补刷 + 手动按需刷新」三层配额刷新机制；前后端统一将配额过期阈值动态对齐所选刷新间隔（`resolveQuotaStaleSeconds` / `quotaStaleThresholdSeconds`，默认 15 分钟，间隔大于 15 分钟时自动放宽为 `interval + 2m`），覆盖后端配额概览、主窗口账号卡片与常驻菜单栏面板并在切换刷新周期后即时生效。
+- **Menu Bar Floating Panel & Keyboard Polish (`MenuFloatingPanel`)**：将菜单栏展开面板由 `NSPopover` 重构为非激活可聚焦浮窗 `MenuFloatingPanel`（顶边锚定自适应平滑伸缩，保持 `.statusBar` 窗口层级，支持全屏、跨空间与台前调度可达），并新增主窗口与菜单面板 `⌘1/2/3` 快捷键、分段控件左右键切换与焦点环重绘、状态栏微点提示、15 秒用量缓存自动刷新及过期定价页脚提醒（`Assistant` / `MenuPanelController` / `MenuPanelComponents` / `DesignControls`）。
+- **Safe Relaunch Banner & Direct Trigger**：优化未开启调试端口提示横幅的紧凑排版，并将「安全重启以连接」精简为点击后直接优雅退出重连，移除冗余二次确认弹窗（`AssistantProcessLifecycle` / `MenuPanelController` / `Pages`）。
+- **Antigravity IDE Runtime Localization & Future Model Compatibility**：补充新增交互界面词典、上下文动态模板规则与模型名保护白名单，并支持动态识别 Ultra Gemini 共享池模型与未来世代模型（Claude Mythos / Fable、GPT-6+ 等）归类排序（`dict/base.json` / `runtime/engine.js` / `src/bundle.ts` / `PricingSyncSheetController` / `QuotaPresentation`）。
+
+### Fixed
+- **HUD Streaming & Multi-Subagent Wave Accuracy**：修正独立子代理分栏 `backendIsStreaming` 门控与退出复位、`findLastSubstantiveStep` 跳过尾部透明交接步（`101`/`98`），以及多子代理跨并发波次两阶段防抖保活与严格隔离父会话的同子库模型回退（`hud-instance.js` / `metrics-engine.ts`）。
+- **Account Readiness, Enterprise Boundary, Quota Warnings & Pricing Sources**：补齐 `quota_refresh_error_code` 四端投影并收敛非鉴权错误误报；抽取 `resolveUnsavedLiveSubscriptionTier` 防止未保存 `enterprise_vertex` 账号误判 `FREE`；补齐菜单栏单账号卡片 `QuotaPresentation.warningSummary` 渲染，并对齐 Claude API / Gemini Developer API 最新官方定价来源与生效区间（`account-quota.ts` / `accounts.ts` / `main.ts` / `model-identity.ts` / `model-catalog.json` / `pricing-feed.json`）。
 
 ## [1.1.2] - 2026-11-19
 

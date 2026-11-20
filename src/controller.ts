@@ -895,7 +895,8 @@ export class Controller {
     const scope=coverageScopes(entry)[0], normalized=key.replace(/\s+/g,' ').trim(), target=scope?scopedKey(normalized,scope.kind,scope.route):normalized;
     return{key:target,displayKey:key,context:scope?describeContext(scope):this.t('controller.coverage.general_context'),value:this.options.dictionary.entries[target]??entry.translation??'',version:this.options.dictionary.version};
   }
-  async hasRunningAgentTask(): Promise<{ busy: boolean; reason?: string }> {
+  async hasRunningAgentTask(): Promise<{ busy: boolean; checked?: boolean; reason?: string }> {
+    let checked = false;
     for (const page of this.pages.values()) {
       if (page.contextId === undefined) continue;
       try {
@@ -903,29 +904,43 @@ export class Controller {
           page.cdp.evaluate(
             `(() => {
               const engineState = globalThis.__GRAVITYBOX_ENGINE_V1__?.draftState?.();
-              if (engineState?.generating) return { busy: true, reason: ${JSON.stringify(this.t('controller.task.streaming_busy'))} };
+              if (engineState?.generating) return { busy: true, checked: true, reason: ${JSON.stringify(this.t('controller.task.streaming_busy'))} };
               const rendered = e => !!e?.getClientRects?.().length && getComputedStyle(e).visibility !== 'hidden';
-              const stopBtn = [...document.querySelectorAll('button,[role="button"],[data-testid*="stop"],[data-testid*="cancel"]')].some(e => {
+              const hasIdleBanner = [...document.querySelectorAll('[data-testid="idle-status-text"]')].some(e => rendered(e) && !!(e.textContent || '').trim());
+              const hasTurnSignal = [...document.querySelectorAll('[data-testid="input-cancel-button"],[data-state="streaming"],[data-streaming="true"],[data-testid="agent-loading"],[data-testid="browser-subagent-thinking"],[data-testid="running-subagent-steps-toggle"],[data-testid="running-subagent-browser-steps"]')].some(e => {
                 if (!rendered(e)) return false;
-                const label = (e.getAttribute('aria-label') || e.getAttribute('title') || e.getAttribute('data-tooltip-id') || e.textContent || '').trim();
-                if (/^(Stop generating|Stop|Cancel generation|Cancel|Abort|Interrupt|停止生成|停止|取消生成|终止生成|中断)$/i.test(label)) return true;
-                if (/(?:stop|cancel)\s*(?:generation|generating|streaming|agent|response|task)/i.test(label)) return true;
-                if (e.querySelector?.('.codicon-debug-stop, .codicon-stop-circle')) return true;
+                const tid = e.getAttribute('data-testid') || '';
+                if (tid === 'agent-loading' && hasIdleBanner) return false;
+                if (tid !== 'input-cancel-button' && e.closest?.('[data-testid="idle-status-text"],[data-testid="running-items-card"]')) return false;
+                return true;
+              });
+              if (hasTurnSignal) return { busy: true, checked: true, reason: ${JSON.stringify(this.t('controller.task.agent_busy'))} };
+              const stopBtn = [...document.querySelectorAll('button,[role="button"],[data-testid="input-cancel-button"]')].some(e => {
+                if (!rendered(e)) return false;
+                if (e.closest?.('[role="dialog"],[role="alertdialog"],[role="menu"],[role="listbox"],[data-select-popup],[data-testid="running-row"],[data-testid="running-selection-bar"]')) return false;
+                const tid = (e.getAttribute('data-testid') || '').toLowerCase();
+                if (tid === 'input-cancel-button') return true;
+                const cls = typeof e.className === 'string' ? e.className.toLowerCase() : '';
+                if (/(?:voice|dictat|microphone|audio-record|speech|record-audio)/i.test(tid + ' ' + cls)) return false;
+                const label = (e.getAttribute('aria-label') || e.getAttribute('title') || e.textContent || '').trim();
+                if (/(?:voice|dictat|recording|microphone|语音|录音|听写|麦克风)/i.test(label)) return false;
+                if (/^(?:Stop generating|Cancel generation|Stop subagent|Cancel\\s*[（(][^）)]+[）)]|停止生成|取消生成|终止生成|停止子智能体|取消\\s*[（(][^）)]+[）)])$/i.test(label)) return true;
+                if (/(?:stop|cancel)\\s*(?:generation|generating|streaming|agent|response)/i.test(label)) return true;
+                if (/^(?:Stop|Interrupt|停止|中断)$/i.test(label) && Boolean(e.closest?.('[data-testid="agent-input-box"],.surface-composer'))) return true;
                 return false;
               });
-              if (stopBtn) return { busy: true, reason: ${JSON.stringify(this.t('controller.task.agent_busy'))} };
-              const streaming = [...document.querySelectorAll('[data-state="streaming"],[data-streaming="true"],.codicon-loading')].some(rendered);
-              if (streaming) return { busy: true, reason: ${JSON.stringify(this.t('controller.task.agent_busy'))} };
-              return { busy: false };
+              if (stopBtn) return { busy: true, checked: true, reason: ${JSON.stringify(this.t('controller.task.agent_busy'))} };
+              return { busy: false, checked: true };
             })()`,
             page.contextId
           ),
-          new Promise<{ busy: boolean }>(resolve => setTimeout(() => resolve({ busy: false }), 600)),
+          new Promise<{ busy: boolean; checked: boolean }>(resolve => setTimeout(() => resolve({ busy: false, checked: false }), 600)),
         ]);
+        if (res?.checked) checked = true;
         if (res?.busy) return res;
       } catch {}
     }
-    return { busy: false };
+    return { busy: false, checked };
   }
   async maintenancePreflight(){
     if(!this.endpoint||!this.pages.size)return{ok:true,pid:0};

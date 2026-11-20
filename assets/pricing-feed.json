@@ -485,7 +485,7 @@
         "cached": 0.3,
         "cacheWrite": 3.75,
         "provenance": {
-          "sourceUrl": "https://www.anthropic.com/pricing",
+          "sourceUrl": "https://platform.claude.com/docs/en/about-claude/pricing",
           "platform": "Anthropic 标准 API",
           "conditions": "前期参考 Claude Sonnet 系列标准 API 文本基准估算",
           "checkedAt": "2026-10-23",
@@ -503,7 +503,7 @@
         "cached": 0.1,
         "cacheWrite": 2.5,
         "provenance": {
-          "sourceUrl": "https://www.anthropic.com/pricing",
+          "sourceUrl": "https://platform.claude.com/docs/en/about-claude/pricing",
           "platform": "Anthropic 标准 API",
           "conditions": "Anthropic 官方 Claude Sonnet 5.5 标准 API 最新降价",
           "checkedAt": "2026-11-02",
@@ -545,7 +545,7 @@
         "cached": 0.3,
         "cacheWrite": 3.75,
         "provenance": {
-          "sourceUrl": "https://www.anthropic.com/pricing",
+          "sourceUrl": "https://platform.claude.com/docs/en/about-claude/pricing",
           "platform": "Anthropic 标准 API",
           "conditions": "文本基准；缓存读取 $0.30/MTok，缓存写入 $3.75/MTok；不含工具费用",
           "checkedAt": "2026-10-23",

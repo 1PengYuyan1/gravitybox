@@ -252,7 +252,7 @@ enum InterfaceText {
 
 enum ModelUsageFold {
     private static let thinkingSuffixRegex = try? NSRegularExpression(
-        pattern: "(?:-(?:extra-high|extra-low|xhigh|high|medium|low|thinking|max))+$",
+        pattern: "(?:-(?:extra-high|extra-low|xhigh|high|medium|low|minimal|thinking|max))+$",
         options: [.caseInsensitive]
     )
 

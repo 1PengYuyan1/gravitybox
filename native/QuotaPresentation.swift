@@ -11,7 +11,11 @@ enum QuotaPresentation {
         L10n.t("quota.stale_data", fallback: "数据已过期")
     }
     private static let extraStandaloneGeminiRegex = try? NSRegularExpression(
-        pattern: "^gemini-[4-9](?:\\.[0-9]+)?-([a-z][a-z0-9]*?)(?:-(?:trial|preview|exp|disabled))?$",
+        pattern: "^gemini-[4-9](?:\\.[0-9]+)?-([a-z][a-z0-9]*?)(?:-(?:tiered|trial|preview|exp|disabled|extra-high|extra-low|low|medium|high|xhigh|minimal|max))?$",
+        options: [.caseInsensitive]
+    )
+    private static let extraOrchestratorRegex = try? NSRegularExpression(
+        pattern: "^(?:gemini-pro-)?orchestrator-([a-z][a-z0-9]*?)(?:-(?:tiered|trial|preview|exp|disabled|extra-high|extra-low|low|medium|high|xhigh|minimal|max))?$",
         options: [.caseInsensitive]
     )
 
@@ -350,7 +354,7 @@ enum QuotaPresentation {
     static func inferredBrands(for title: String) -> [String] {
         let lower = title.lowercased()
         if lower.contains("claude") && (lower.contains("gpt") || lower.contains("openai")) { return ["claude", "openai"] }
-        if lower.contains("gemini") || lower.contains("orchestrator") || lower.contains("argon") || lower.contains("carbon") { return ["gemini"] }
+        if lower.contains("gemini") || lower.contains("orchestrator") || lower.contains("argon") || lower.contains("carbon") || lower.contains("neon") || lower.contains("hydrogen") { return ["gemini"] }
         if lower.contains("claude") { return ["claude"] }
         if lower.contains("gpt") || lower.contains("openai") { return ["openai"] }
         return []
@@ -698,9 +702,16 @@ enum QuotaPresentation {
                 let rawId = (m["model_id"] as? String ?? (m["name"] as? String ?? "")).lowercased()
                 let family = (m["family"] as? String ?? "").lowercased()
                 let isExtraGemini4: Bool = {
-                    guard let match = extraStandaloneGeminiRegex?.firstMatch(in: rawId, range: NSRange(location: 0, length: (rawId as NSString).length)) else { return false }
-                    let code = (rawId as NSString).substring(with: match.range(at: 1)).lowercased()
-                    return !["argon", "carbon", "hydrogen", "pro", "flash", "ultra", "nano", "lite", "default"].contains(code)
+                    let excluded = ["argon", "carbon", "hydrogen", "pro", "flash", "ultra", "nano", "lite", "default", "g1"]
+                    if let match = extraStandaloneGeminiRegex?.firstMatch(in: rawId, range: NSRange(location: 0, length: (rawId as NSString).length)) {
+                        let code = (rawId as NSString).substring(with: match.range(at: 1)).lowercased()
+                        return !excluded.contains(code)
+                    }
+                    if let match = extraOrchestratorRegex?.firstMatch(in: rawId, range: NSRange(location: 0, length: (rawId as NSString).length)) {
+                        let code = (rawId as NSString).substring(with: match.range(at: 1)).lowercased()
+                        return !excluded.contains(code)
+                    }
+                    return false
                 }()
                 guard family == "other" || isExtraGemini4 else { continue }
                 let baseKey = rawId.replacingOccurrences(of: "-(?:trial|preview|exp|disabled|tiered|latest)$", with: "", options: .regularExpression)
@@ -1032,6 +1043,13 @@ enum QuotaPresentation {
         if let matched = choices.first(where: { $0.key.lowercased() == normLower || $0.title.lowercased() == normLower }) {
             return matched.key
         }
+        if let matchedByCodename = choices.first(where: {
+            let k = $0.key.lowercased()
+            let t = $0.title.lowercased()
+            return k == "gemini-4-\(normLower)" || normLower == "gemini-4-\(k)" || t == "gemini 4 \(normLower)"
+        }) {
+            return matchedByCodename.key
+        }
 
         if normLower == "gemini_all" || inferredBrands(for: normLower).contains("gemini") {
             if let activeAccount {
@@ -1058,6 +1076,47 @@ enum QuotaPresentation {
         return choices.first?.key ?? "all"
     }
 
+    private static func pooledUltraGeminiModelNames(_ activeAccount: [String: Any]?) -> [String] {
+        var names = ["Argon", "Carbon"]
+        var seen = Set(["argon", "carbon"])
+        let excludedShared: Set<String> = ["pro", "flash", "ultra", "nano", "lite", "default", "exp", "preview", "trial", "hydrogen", "g1"]
+        guard let activeAccount else { return names }
+        let parsed = contract(activeAccount)
+        let standaloneKeys = Set(parsed.standaloneGroups.map { $0.key.lowercased() })
+        let nested = dict(activeAccount["quota"])
+        let rawModels = (activeAccount["models"] as? [[String: Any]]) ?? (nested?["models"] as? [[String: Any]]) ?? []
+        for m in rawModels {
+            let rawId = (m["model_id"] as? String ?? (m["name"] as? String ?? "")).trimmingCharacters(in: .whitespacesAndNewlines)
+            let displayName = (m["display_name"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let isDisabled = (m["disabled"] as? Bool == true) || rawId.lowercased().contains("disabled")
+            if isDisabled { continue }
+            let combined = "\(rawId) \(displayName)".lowercased()
+            var codename: String?
+            if combined.contains("neon") {
+                codename = "neon"
+            } else if let match = extraStandaloneGeminiRegex?.firstMatch(in: rawId.lowercased(), range: NSRange(location: 0, length: (rawId.lowercased() as NSString).length)) {
+                codename = (rawId.lowercased() as NSString).substring(with: match.range(at: 1))
+            } else if let match = extraOrchestratorRegex?.firstMatch(in: rawId.lowercased(), range: NSRange(location: 0, length: (rawId.lowercased() as NSString).length)) {
+                codename = (rawId.lowercased() as NSString).substring(with: match.range(at: 1))
+            }
+            guard let rawCode = codename?.lowercased(), !rawCode.isEmpty, !excludedShared.contains(rawCode), !seen.contains(rawCode) else { continue }
+            if standaloneKeys.contains(rawCode) || standaloneKeys.contains("gemini-4-\(rawCode)") { continue }
+            seen.insert(rawCode)
+            names.append(rawCode.prefix(1).uppercased() + rawCode.dropFirst())
+        }
+        return names
+    }
+
+    private static func formatJoinedModelList(_ names: [String]) -> String {
+        guard names.count > 2 else {
+            return L10n.shared.isEnglish ? names.joined(separator: " and ") : names.joined(separator: " 与 ")
+        }
+        if L10n.shared.isEnglish {
+            return names.dropLast().joined(separator: ", ") + ", and " + names.last!
+        }
+        return names.dropLast().joined(separator: "、") + " 与 " + names.last!
+    }
+
     static func monitoredScopeSubtitle(for selectedKey: String, activeAccount: [String: Any]?) -> String {
         let profile = activeScopeProfile(activeAccount)
         let effective = effectiveMonitoredModelKey(selectedKey, activeAccount: activeAccount)
@@ -1070,7 +1129,12 @@ enum QuotaPresentation {
                 return L10n.t("policy.row.monitored.sub.dyn_all", fallback: "监测核心主力配额池，不受独立子模型单项限额影响")
             }
             if profile.isUltra {
-                return L10n.t("policy.row.monitored.sub.ultra_all", fallback: "同时监测 Gemini（已含 Argon / Carbon）与 Claude/GPT 配额池")
+                let pooledNames = pooledUltraGeminiModelNames(activeAccount)
+                if pooledNames == ["Argon", "Carbon"] {
+                    return L10n.t("policy.row.monitored.sub.ultra_all", fallback: "同时监测 Gemini（已含 Argon / Carbon）与 Claude/GPT 配额池")
+                }
+                let joined = pooledNames.joined(separator: " / ")
+                return L10n.t("policy.row.monitored.sub.ultra_all_models", ["models": joined], fallback: "同时监测 Gemini（已含 \(joined)）与 Claude/GPT 配额池")
             }
             if profile.isFree {
                 return L10n.t("policy.row.monitored.sub.free_all", fallback: "同时监测当前免费账号可用的基础 Gemini 与 Claude/GPT 配额池")
@@ -1089,7 +1153,12 @@ enum QuotaPresentation {
                 return L10n.t("policy.row.monitored.sub.dyn_gemini_base", fallback: "仅监测基础 Gemini 共享池，不含独立计费的子模型配额")
             }
             if profile.isUltra {
-                return L10n.t("policy.row.monitored.sub.ultra_gemini", fallback: "Ultra 套餐已将 Argon 与 Carbon 并入此共享池，一并监测")
+                let pooledNames = pooledUltraGeminiModelNames(activeAccount)
+                if pooledNames == ["Argon", "Carbon"] {
+                    return L10n.t("policy.row.monitored.sub.ultra_gemini", fallback: "Ultra 套餐已将 Argon 与 Carbon 并入此共享池，一并监测")
+                }
+                let joined = formatJoinedModelList(pooledNames)
+                return L10n.t("policy.row.monitored.sub.ultra_gemini_models", ["models": joined], fallback: "Ultra 套餐已将 \(joined) 并入此共享池，一并监测")
             }
             if profile.isFree {
                 return L10n.t("policy.row.monitored.sub.free_gemini", fallback: "仅监测免费套餐可用的基础 Gemini 配额池")

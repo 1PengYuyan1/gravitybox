@@ -439,7 +439,7 @@ export async function probeLiveLanguageServerOnce(
           carriedGroups: 0,
           refreshedAt: observedAt,
         },
-        quota_warnings: models.length === 0 ? [bt('account_probe.warn.no_model_records')] : undefined,
+        quota_warnings: models.length === 0 ? [`NO_MODEL_RECORDS:${bt('account_probe.warn.no_model_records')}`] : undefined,
       };
 
       return {

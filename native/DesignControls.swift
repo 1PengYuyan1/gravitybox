@@ -82,13 +82,16 @@ class DesignButton: NSButton {
     override func mouseExited(with event: NSEvent) { hovered = false }
 
     override var intrinsicContentSize: NSSize {
+        let isSmall = controlSize == .small
+        let btnHeight: CGFloat = isSmall ? 24 : 28
         if title.isEmpty, image != nil {
-            return NSSize(width: isQuietAccessory ? 26 : 30, height: isQuietAccessory ? 26 : 28)
+            return NSSize(width: isQuietAccessory ? 26 : 30, height: isQuietAccessory ? 26 : btnHeight)
         }
-        let width = (title as NSString).size(withAttributes: [.font: font ?? NSFont.systemFont(ofSize: 12, weight: .medium)]).width
-        let iconExtra: CGFloat = image != nil ? 18 : 0
-        let pad: CGFloat = isQuietAccessory ? 16 : 24
-        return NSSize(width: ceil(width) + pad + iconExtra, height: 28)
+        let defaultFont = NSFont.systemFont(ofSize: isSmall ? 11.5 : 12, weight: .medium)
+        let width = (title as NSString).size(withAttributes: [.font: font ?? defaultFont]).width
+        let iconExtra: CGFloat = image != nil ? 16 : 0
+        let pad: CGFloat = isQuietAccessory ? 16 : (isSmall ? 18 : 24)
+        return NSSize(width: ceil(width) + pad + iconExtra, height: btnHeight)
     }
 
     func drawButtonChromeAndLabel(spinnerLeftInset: CGFloat? = nil, centeredSpinnerWidth: CGFloat? = nil) {
@@ -650,16 +653,18 @@ final class DesignSegmentedControl: NSControl {
         override func resignFirstResponder() -> Bool { let result = super.resignFirstResponder(); needsDisplay = true; return result }
         override var allowsVibrancy: Bool { false }
         let index: Int
+        weak var owner: DesignSegmentedControl?
         var isSelectedSegment = false { didSet { if oldValue != isSelectedSegment { needsDisplay = true } } }
         private var hoverTracking: NSTrackingArea?
         var hovered = false { didSet { if oldValue != hovered { needsDisplay = true } } }
         private var minWidthConstraint: NSLayoutConstraint?
 
-        init(title: String, index: Int, target: AnyObject?, action: Selector) {
+        init(title: String, index: Int, owner: DesignSegmentedControl, action: Selector) {
             self.index = index
+            self.owner = owner
             super.init(frame: .zero)
             self.title = title
-            self.target = target
+            self.target = owner
             self.action = action
             bezelStyle = .inline
             isBordered = false
@@ -691,6 +696,15 @@ final class DesignSegmentedControl: NSControl {
         }
         override func mouseEntered(with event: NSEvent) { if isEnabled { hovered = true } }
         override func mouseExited(with event: NSEvent) { hovered = false }
+        override func keyDown(with event: NSEvent) {
+            if event.keyCode == 123 {
+                owner?.moveSelection(by: -1)
+            } else if event.keyCode == 124 {
+                owner?.moveSelection(by: 1)
+            } else {
+                super.keyDown(with: event)
+            }
+        }
 
         override func draw(_ dirtyRect: NSRect) {
             let isDark = effectiveAppearance.bestMatch(from: [.darkAqua, .aqua]) == .darkAqua
@@ -728,7 +742,7 @@ final class DesignSegmentedControl: NSControl {
         stack.distribution = .fillEqually
         stack.spacing = 2
         for (idx, item) in labels.enumerated() {
-            let btn = SegmentButton(title: item, index: idx, target: self, action: #selector(segmentClicked(_:)))
+            let btn = SegmentButton(title: item, index: idx, owner: self, action: #selector(segmentClicked(_:)))
             btn.isSelectedSegment = (idx == 0)
             btn.setAccessibilityValue(idx == 0 ? 1 : 0)
             segmentButtons.append(btn)
@@ -781,6 +795,19 @@ final class DesignSegmentedControl: NSControl {
         setSelected(sender.index, animated: Design.shouldAnimate(in: self))
         if let action {
             NSApp.sendAction(action, to: target, from: self)
+        }
+    }
+
+    func moveSelection(by delta: Int) {
+        guard !segmentButtons.isEmpty else { return }
+        let next = max(0, min(segmentButtons.count - 1, _selectedSegment + delta))
+        let targetBtn = segmentButtons[next]
+        window?.makeFirstResponder(targetBtn)
+        if next != _selectedSegment {
+            setSelected(next, animated: Design.shouldAnimate(in: self))
+            if let action {
+                NSApp.sendAction(action, to: target, from: self)
+            }
         }
     }
 

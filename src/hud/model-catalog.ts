@@ -1,4 +1,4 @@
-import { normalizeModelId } from '../model-identity.js';
+import { normalizeModelId, THINKING_EFFORT_OR_LATEST_SUFFIX_RE } from '../model-identity.js';
 import { getEffectiveModelPriceAlias, getRemoteModelSpec, MODEL_CAPACITIES, MODEL_NAMES } from '../model-catalog.js';
 import { resolveDatabaseModelFullName } from '../usage-types.js';
 import { bt } from '../i18n.js';
@@ -65,13 +65,13 @@ const MODEL_CAPACITY_RULES: readonly ModelFamilyRule[] = [
     defaultDisplayName: 'Gemini',
   },
   {
-    pattern: /^claude-(?:3|4|5)|^claude-(?:sonnet|opus|haiku)/i,
+    pattern: /^claude-(?:[3-9]|(?:opus|sonnet|haiku|[a-z]{3,16})-\d)|^claude-(?:sonnet|opus|haiku|fable|mythos)/i,
     capacityTokens: 200_000,
     capacityCompact: '200K',
     defaultDisplayName: 'Claude',
   },
   {
-    pattern: /^gpt-4o|^gpt-4\.1|^gpt-5|^o1|^o3|^o4/i,
+    pattern: /^gpt-4o|^gpt-4\.1|^gpt-[5-9]|^o1|^o3|^o4/i,
     capacityTokens: 128_000,
     capacityCompact: '128K',
     defaultDisplayName: 'GPT-4o',
@@ -119,10 +119,23 @@ function autoFormatDynamicModelName(normalizedId: string): string | null {
       : '';
     return `Gemini ${ver} ${code}${suffix}`;
   }
-  const claudeMatch = normalizedId.match(/^claude-(opus|sonnet|haiku)-(\d+)-(\d+)$/i);
+  const claudeMatch = normalizedId.match(
+    /^claude-((?!thinking|preview|trial|latest|high|medium|low|max|minimal|xhigh|extra|tiered|fast|batch|exp)[a-z]{3,16})-(\d+)-(\d+)$/i
+  );
   if (claudeMatch) {
     const tier = claudeMatch[1]!.charAt(0).toUpperCase() + claudeMatch[1]!.slice(1).toLowerCase();
     return `Claude ${tier} ${claudeMatch[2]}.${claudeMatch[3]}`;
+  }
+  const gptMatch = normalizedId.match(/^gpt-([5-9](?:\.\d+)?)(?:-([a-z][a-z0-9]*(?:-[a-z0-9]+)*))?$/i);
+  if (gptMatch) {
+    const ver = gptMatch[1]!;
+    const suffix = gptMatch[2]
+      ? ` ${gptMatch[2]
+          .split('-')
+          .map((part) => part.charAt(0).toUpperCase() + part.slice(1).toLowerCase())
+          .join(' ')}`
+      : '';
+    return `GPT-${ver}${suffix}`;
   }
   return null;
 }
@@ -146,8 +159,8 @@ export function resolveModelCapacity(rawModelInput?: string | null, depth = 0): 
   const withoutApiPrefix = raw.replace(/^models\//i, '').trim();
   const cleanedRaw = (withoutApiPrefix || raw)
     .replace(/^[+\s·•]+|[⌃⌄^\s]+$/g, '')
-    .replace(/[（(]\s*(?:Extra\s+High|Extra\s+Low|XHigh|High|Medium|Low|Max|Thinking|高|中|低|思考)\s*[）)]/gi, '')
-    .replace(/\s+(?:Extra\s+High|Extra\s+Low|XHigh|High|Medium|Low|Max|Thinking)\b.*$/i, '')
+    .replace(/[（(]\s*(?:Extra\s+High|Extra\s+Low|XHigh|High|Medium|Low|Minimal|Max|Thinking|高|中|低|思考)\s*[）)]/gi, '')
+    .replace(/\s+(?:Extra\s+High|Extra\s+Low|XHigh|High|Medium|Low|Minimal|Max|Thinking)\b.*$/i, '')
     .trim();
 
   if (depth < 2) {
@@ -172,7 +185,7 @@ export function resolveModelCapacity(rawModelInput?: string | null, depth = 0): 
     .replace(/^-+|-+$/g, '');
 
   normalizedId = normalizeModelId(normalizedId)
-    .replace(/(?:-(?:extra-high|extra-low|xhigh|high|medium|low|max|thinking|latest))+$/, '');
+    .replace(THINKING_EFFORT_OR_LATEST_SUFFIX_RE, '');
 
   if (depth < 2) {
     const normalizedAlias = getEffectiveModelPriceAlias(normalizedId);

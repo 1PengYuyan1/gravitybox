@@ -158,6 +158,22 @@ const SHARED_GEMINI_CODENAMES = new Set([
   'pro', 'flash', 'ultra', 'nano', 'lite', 'default', 'exp', 'preview', 'trial', 'hydrogen',
 ]);
 
+export function extractStandaloneGeminiCodename(raw: string): string | null {
+  const text = raw.trim().toLowerCase();
+  if (!text) return null;
+  const geminiMatch = text.match(/\bgemini[\s_-]*[4-9](?:\.\d+)?[\s_-]+([a-z][a-z0-9]*)\b/i);
+  if (geminiMatch) {
+    const codename = geminiMatch[1]!.toLowerCase();
+    if (!SHARED_GEMINI_CODENAMES.has(codename)) return codename;
+  }
+  const orchMatch = text.match(/\borchestrator(?:[\s_-]+|\s*\(\s*)([a-z][a-z0-9]*)\b/i);
+  if (orchMatch) {
+    const codename = orchMatch[1]!.toLowerCase();
+    if (!SHARED_GEMINI_CODENAMES.has(codename) && codename !== 'g1') return codename;
+  }
+  return null;
+}
+
 export function classifyFamily(input: {
   groupName?: unknown;
   description?: unknown;
@@ -176,14 +192,10 @@ export function classifyFamily(input: {
     : [input.groupName, identity, provider].map(value => String(value ?? '').toLowerCase()).join(' ');
   if (text.includes('argon')) return 'argon';
   if (text.includes('carbon')) return 'carbon';
-  // 自动识别未来新上线的 Gemini 4+ 独立代号模型（如 gemini-4-neon 等），归为独立 'other' 而不污染基础 Gemini 池；
-  // 明确归属基础 Gemini 共享池的型号（含 hydrogen）直接归为 'gemini'。
-  const standaloneGeminiMatch = text.match(/\bgemini[\s_-]*[4-9](?:\.\d+)?[\s_-]+([a-z][a-z0-9]*)\b/i);
-  if (standaloneGeminiMatch) {
-    const codename = standaloneGeminiMatch[1]!.toLowerCase();
-    if (!SHARED_GEMINI_CODENAMES.has(codename)) {
-      return 'other';
-    }
+  // 自动识别未来新上线的 Gemini 4+ / Orchestrator 独立代号模型（如 gemini-4-neon、gemini-pro-orchestrator-neon 等），
+  // 归为独立 'other' 而不污染基础 Gemini 池；明确归属基础 Gemini 共享池的型号（含 hydrogen）直接归为 'gemini'。
+  if (extractStandaloneGeminiCodename(text)) {
+    return 'other';
   }
   if (
     /claude|gpt|openai|anthropic|grok|xai|deepseek|mistral|llama|third[_-]?party|3p\b|\bo[1-9]\d*(?:$|[-_\s]|-(?:mini|pro|preview|high|low|medium))\b/.test(text)
@@ -872,7 +884,8 @@ function matchPoolByBucketName(
       return group.family;
     }
   }
-  if (/argon|carbon/i.test(norm)) return null;
+  const bucketFamily = classifyFamily({ groupName: quotaBucketName, bucketId: quotaBucketName });
+  if (bucketFamily === 'argon' || bucketFamily === 'carbon' || bucketFamily === 'other') return null;
   if (/claude|anthropic|openai|gpt|grok|xai|deepseek|mistral|llama|third[_-]?party|3p\b|\bo[1-9]\d*(?:$|[-_\s]|-(?:mini|pro|preview|high|low|medium))\b/i.test(norm)) return 'claude';
   if (/gemini|google/i.test(norm)) return 'gemini';
   return null;
@@ -890,7 +903,7 @@ function resetTimesMatch(left: string | null, right: string | null, allowMissing
 function isGeminiBrandModel(model: NormalizedModel): boolean {
   if (model.family === 'argon' || model.family === 'carbon' || model.family === 'gemini') return true;
   const text = `${model.model_id} ${model.name} ${model.display_name ?? ''} ${model.model_or_alias ?? ''}`.toLowerCase();
-  return /\bgemini\b|\bargon\b|\bcarbon\b|\borchestrator\b/.test(text);
+  return /\bgemini\b|\bargon\b|\bcarbon\b|\bneon\b|\bhydrogen\b|\borchestrator\b/.test(text);
 }
 
 function pickBestGeminiPoolCandidate(candidates: PoolCandidate[], fallbackModel: NormalizedModel): PoolCandidate {
@@ -958,6 +971,7 @@ export function matchModelToSharedPool(
     const matched = allowedCandidates.find(c => {
       const candPct = Math.round(c.status.remaining! * 100);
       if (Math.abs(candPct - modelPct) > 1) return false;
+      if (!isUltra && model.family === 'other' && !c.status.resetTime && !model.own_reset_time) return false;
       if (resetTimesMatch(c.status.resetTime, model.own_reset_time, isUltra)) return true;
       if (isUltra && (model.family === 'argon' || model.family === 'carbon')
         && modelPct === 100 && candPct === 100
@@ -986,6 +1000,7 @@ export function matchModelToSharedPool(
     const modelPct = Math.round(model.own_percentage);
     const matchesPeer = coSampledCoreGeminiPeers.some(peer =>
       Math.abs(Math.round(peer.own_percentage!) - modelPct) <= 1
+      && (isUltra || model.family !== 'other' || Boolean(peer.own_reset_time || model.own_reset_time))
       && resetTimesMatch(peer.own_reset_time, model.own_reset_time, isUltra));
     if (matchesPeer) {
       return pickBestGeminiPoolCandidate(allowedCandidates, model);
@@ -1116,7 +1131,25 @@ function autoPrettyModelTitle(rawIdOrName: string): string {
     const code = geminiMatch[2]!.charAt(0).toUpperCase() + geminiMatch[2]!.slice(1).toLowerCase();
     return `Gemini ${ver} ${code}`;
   }
+  const orchMatch = trimmed.match(/^(?:gemini[\s_-]*pro[\s_-]+)?orchestrator[\s_-]+([a-z][a-z0-9]*)(?:[\s_-]+(trial|preview|exp))?$/i);
+  if (orchMatch) {
+    const rawCode = orchMatch[1]!.toLowerCase();
+    if (!SHARED_GEMINI_CODENAMES.has(rawCode) && rawCode !== 'g1') {
+      const code = rawCode.charAt(0).toUpperCase() + rawCode.slice(1);
+      return `Orchestrator (${code})`;
+    }
+  }
   return trimmed;
+}
+
+export function normalizeBaseModelKey(rawId: string): string {
+  let baseKey = rawId.trim().toLowerCase();
+  while (/-(?:extra-high|extra-low|low|medium|high|xhigh|minimal|max|thinking|trial|preview|exp|disabled|tiered|latest)$/i.test(baseKey)) {
+    baseKey = baseKey.replace(/-(?:extra-high|extra-low|low|medium|high|xhigh|minimal|max|thinking|trial|preview|exp|disabled|tiered|latest)$/i, '');
+  }
+  return baseKey
+    .replace(/[^a-z0-9.]+/g, '-')
+    .replace(/^-+|-+$/g, '');
 }
 
 /**
@@ -1176,18 +1209,12 @@ export function buildStandaloneModels(
     if (model.family !== 'other' || model.disabled === true) continue;
     const rawId = (model.model_id || model.name || '').trim();
     if (!rawId) continue;
-    let baseKey = rawId.toLowerCase();
-    while (/-(?:low|medium|high|xhigh|minimal|thinking|trial|preview|exp|disabled|tiered|latest)$/i.test(baseKey)) {
-      baseKey = baseKey.replace(/-(?:low|medium|high|xhigh|minimal|thinking|trial|preview|exp|disabled|tiered|latest)$/i, '');
-    }
-    baseKey = baseKey
-      .replace(/[^a-z0-9.]+/g, '-')
-      .replace(/^-+|-+$/g, '');
+    const baseKey = normalizeBaseModelKey(rawId);
     if (!baseKey || seenKeys.has(baseKey)) continue;
     const displayName = model.display_name
       ? model.display_name
-        .replace(/\s*\((?:Low|Medium|High|XHigh|Minimal|Thinking)\)\s*$/i, '')
-        .replace(/\s+(?:Trial|Preview|Exp|Low|Medium|High|XHigh)$/i, '')
+        .replace(/\s*\((?:Extra\s+High|Extra\s+Low|Low|Medium|High|XHigh|Minimal|Max|Thinking)\)\s*$/i, '')
+        .replace(/\s+(?:Trial|Preview|Exp|Extra\s+High|Extra\s+Low|Low|Medium|High|XHigh|Minimal|Max|Thinking)$/i, '')
         .trim()
       : autoPrettyModelTitle(baseKey);
     const existing = extraByBaseKey.get(baseKey);
@@ -1259,8 +1286,9 @@ export function normalizeIndependentArgonQuota(payload: any, observedAt: number)
   const rows = (Array.isArray(payload?.buckets) ? payload.buckets : []).filter((b: any) => {
     if (typeof b?.modelId !== 'string' || normalizeFraction(b.remainingFraction) === null) return false;
     if (/argon|carbon/i.test(b.modelId)) return true;
-    const m = b.modelId.match(/^gemini-[4-9](?:\.\d+)?-([a-z][a-z0-9]*)(?:-|$)/i);
-    return Boolean(m && !SHARED_GEMINI_CODENAMES.has(m[1]!.toLowerCase()));
+    const m = b.modelId.match(/^gemini-[4-9](?:\.\d+)?-([a-z][a-z0-9]*)(?:-|$)/i)
+      ?? b.modelId.match(/^(?:gemini-pro-)?orchestrator-([a-z][a-z0-9]*)(?:-|$)/i);
+    return Boolean(m && m[1]!.toLowerCase() !== 'g1' && !SHARED_GEMINI_CODENAMES.has(m[1]!.toLowerCase()));
   });
   return normalizeCloudModels(
     {

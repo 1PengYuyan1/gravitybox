@@ -355,7 +355,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
     }
 
     private static let modelVersionRegex = try? NSRegularExpression(
-        pattern: "(?:gemini|gpt|opus|sonnet|haiku|claude)-(\\d+)(?:[.-](\\d+))?|^o(\\d+)(?:$|[-_])",
+        pattern: "(?:gemini|gpt|opus|sonnet|haiku|claude(?:-[a-z]+)?)-(\\d+)(?:[.-](\\d+))?|^o(\\d+)(?:$|[-_])",
         options: [.caseInsensitive]
     )
 
@@ -401,12 +401,12 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
             else if lower.contains("flash") { seriesRank = 5 }
             else { seriesRank = 7 }
         } else if brandRank == 1 {
-            if lower.contains("opus") { seriesRank = 0 }
+            if lower.contains("mythos") || lower.contains("fable") || lower.contains("opus") { seriesRank = 0 }
             else if lower.contains("sonnet") { seriesRank = 1 }
             else if lower.contains("haiku") { seriesRank = 2 }
             else { seriesRank = 3 }
         } else if brandRank == 2 {
-            if lower.contains("mini") || lower.contains("nano") || lower.contains("oss") { seriesRank = 2 }
+            if lower.contains("mini") || lower.contains("nano") || lower.contains("oss") || lower.contains("luna") { seriesRank = 2 }
             else { seriesRank = 0 }
         } else {
             seriesRank = 0
@@ -671,20 +671,22 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
     }
 
     private static let unpricedVariantOrder: [String: Int] = [
+        "Minimal": -1,
         "Low": 0,
         "Medium": 1,
         "High": 2,
         "XHigh": 3,
         "Extra High": 4,
         "Extra Low": 5,
-        "Thinking": 6,
-        "Orchestrator": 7,
+        "Max": 6,
+        "Thinking": 7,
+        "Orchestrator": 8,
     ]
 
     private static func stripDisplayTierSuffix(_ name: String) -> String {
         let patterns = [
-            "\\s*[（(]\\s*(?:extra[\\s-]*high|extra[\\s-]*low|xhigh|high|medium|low|thinking)\\s*[）)]\\s*$",
-            "\\s+(?:extra[\\s-]*high|extra[\\s-]*low|xhigh|high|medium|low|thinking)\\s*$"
+            "\\s*[（(]\\s*(?:extra[\\s-]*high|extra[\\s-]*low|xhigh|high|medium|low|minimal|max|thinking)\\s*[）)]\\s*$",
+            "\\s+(?:extra[\\s-]*high|extra[\\s-]*low|xhigh|high|medium|low|minimal|max|thinking)\\s*$"
         ]
         var current = name.trimmingCharacters(in: .whitespacesAndNewlines)
         for pattern in patterns {
@@ -711,7 +713,7 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         guard !parsed.isEmpty else { return [] }
 
         let thinkingRegex = try? NSRegularExpression(
-            pattern: "^((?:gemini|claude|gpt|o[1-9]).+?)-(extra-high|extra-low|xhigh|high|medium|low|thinking)$",
+            pattern: "^((?:gemini|claude|gpt|o[1-9]).+?)-(extra-high|extra-low|xhigh|high|medium|low|minimal|max|thinking)$",
             options: [.caseInsensitive]
         )
         let orchIdRegex = try? NSRegularExpression(
@@ -737,12 +739,14 @@ final class PricingSyncSheetController: NSObject, NSWindowDelegate {
         }
 
         let suffixLabels: [String: String] = [
+            "minimal": "Minimal",
             "low": "Low",
             "medium": "Medium",
             "high": "High",
             "xhigh": "XHigh",
             "extra-high": "Extra High",
             "extra-low": "Extra Low",
+            "max": "Max",
             "thinking": "Thinking",
         ]
 

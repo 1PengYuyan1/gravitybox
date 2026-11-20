@@ -2976,4 +2976,79 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
       assert.equal(nonOrchInst.shadow.querySelector('.capsule-context').classList.contains('has-compaction'), false);
     }
   });
+
+  it('OPT-01：独立子智能体轨迹分栏 (isSubagentTrajectory) 保留后端 isStreaming，普通分屏 (isSubpane) 不误亮', () => {
+    const subInst = new HudInstance('pane-sub-traj', { isSubpane: true });
+    const subHost = new FakeElement('div');
+    const subShadow = subHost.attachShadow({ mode: 'open' });
+    subHost.shadowRoot = subShadow;
+    subInst.host = subHost;
+    subInst.shadow = subShadow;
+    subShadow.innerHTML = subInst.buildHudHtml();
+    subInst.switchConversation('sub-traj-conv', 'gemini-3.8-flash', false);
+
+    subInst.updateMetrics({
+      conversationId: 'sub-traj-conv',
+      sessionRevision: subInst.getSessionRevision(),
+      updatedAt: Date.now(),
+      isStreaming: true,
+      activityPhase: 'generating',
+      session: {
+        isSubagentTrajectory: true,
+        turns: 1,
+        steps: 2,
+        activeModelStepCount: 0,
+        activeToolStepCount: 0,
+        currentTurnDurationSeconds: 1,
+      },
+    });
+    assert.equal(subInst.backendIsStreaming, true);
+    assert.equal(subInst.isStreaming, true);
+    assert.equal(subInst.activityPhase, 'generating');
+    assert.ok(subInst.turnClockTimer !== null, '子智能体分栏后端流式期间必须保持跑表运行');
+
+    // 两步交接期仅发生模型名变动且 DOM 仍无停止按钮时，不得因 domIsStreaming=false 停表冻结
+    subInst.notifyModelOrStreamingChange('gemini-4-argon', false);
+    assert.equal(subInst.isStreaming, true);
+    assert.equal(subInst.hasActiveWork, true);
+    assert.ok(subInst.turnClockTimer !== null, '模型切换通知不得冻结正在运行的子智能体轨迹跑表');
+
+    // 若 DOM 经历从 true -> false 显式结束一轮，同步复位 backendIsStreaming
+    subInst.notifyModelOrStreamingChange('gemini-4-argon', true);
+    subInst.notifyModelOrStreamingChange('gemini-4-argon', false);
+    assert.equal(subInst.backendIsStreaming, false);
+    assert.equal(subInst.isStreaming, false);
+
+    // 对比：普通分屏对话 (isSubpane=true, isSubagentTrajectory=false) 挂着后台子代理时，不得把前台小圆点点亮
+    const splitMain = new HudInstance('pane-split-main', { isSubpane: true });
+    const mainHost = new FakeElement('div');
+    const mainShadow = mainHost.attachShadow({ mode: 'open' });
+    mainHost.shadowRoot = mainShadow;
+    splitMain.host = mainHost;
+    splitMain.shadow = mainShadow;
+    mainShadow.innerHTML = splitMain.buildHudHtml();
+    splitMain.switchConversation('split-main-conv', 'gemini-3.8-flash', false);
+    splitMain.updateMetrics({
+      conversationId: 'split-main-conv',
+      sessionRevision: splitMain.getSessionRevision(),
+      updatedAt: Date.now(),
+      isStreaming: true,
+      isSubagentRunning: true,
+      runningSubagentCount: 1,
+      activityPhase: 'idle',
+      session: {
+        isSubagentTrajectory: false,
+        turns: 1,
+        steps: 2,
+        activeModelStepCount: 0,
+        activeToolStepCount: 0,
+      },
+    });
+    assert.equal(splitMain.isStreaming, false, '普通分屏主会话不得因后台子代理将前台 isStreaming 抬成 true');
+    assert.equal(splitMain.activityPhase, 'idle');
+    assert.equal(splitMain.isSubagentRunning, true);
+
+    subInst.dispose();
+    splitMain.dispose();
+  });
 });

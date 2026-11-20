@@ -240,7 +240,7 @@ export class UsageStatsManager {
   async previewRevalueHistory(mode: 'force_all' | 'unpriced_only' = 'force_all') {
     await this.getUsageSummary(true);
     const liveFiles = (await this.discoverDatabaseFiles()).map(path => basename(path));
-    return this.ledger.revalue({ action: 'preview', mode, prices: await this.getRawPricingTable(), accounts: [], liveFiles, now: Math.floor(Date.now() / 1000) });
+    return this.ledger.revalue({ action: 'preview', mode, prices: await this.getBillingPricingTable(), accounts: [], liveFiles, now: Math.floor(Date.now() / 1000) });
   }
 
   private async mutateHistoricalPricing<T>(operation: () => Promise<T>): Promise<T> {
@@ -257,7 +257,7 @@ export class UsageStatsManager {
     if (!options?.previewId) throw Error(bt('usage.err.revalue_preview_required'));
     return this.mutateHistoricalPricing(async () => {
       const result = await this.ledger.revalue({ action: 'apply', confirmed, previewId: options.previewId,
-        prices: await this.getRawPricingTable(), accounts: [], now: Math.floor(Date.now() / 1000) });
+        prices: await this.getBillingPricingTable(), accounts: [], now: Math.floor(Date.now() / 1000) });
       this.rateLocksLoaded = false;
       this.rateLocks = Object.create(null);
       this.cachedSummariesByAccount.clear(); this.lastAggregationKeysByAccount.clear(); this.snapshots.clear();
@@ -267,7 +267,7 @@ export class UsageStatsManager {
 
   async restoreRevalueHistory(previewId: string, confirmed = false) {
     return this.mutateHistoricalPricing(async () => {
-      const result = await this.ledger.revalue({ action: 'restore', previewId, confirmed, prices: await this.getRawPricingTable(), accounts: [], now: Math.floor(Date.now() / 1000) });
+      const result = await this.ledger.revalue({ action: 'restore', previewId, confirmed, prices: await this.getBillingPricingTable(), accounts: [], now: Math.floor(Date.now() / 1000) });
       this.rateLocksLoaded = false; this.rateLocks = Object.create(null);
       this.cachedSummariesByAccount.clear(); this.lastAggregationKeysByAccount.clear(); this.snapshots.clear();
       return result;
@@ -834,7 +834,7 @@ export class UsageStatsManager {
     await this.loadUsageLedger();
     await this.loadRateLocks();
     if (this.archivedUnavailable || this.ledgerUnavailable || this.rateLocksUnavailable) throw Error(bt('usage.err.clear_aborted_ledger_unreadable'));
-    const rawPricing = await this.getRawPricingTable();
+    const rawPricing = await this.getBillingPricingTable();
 
     let archivedCount = 0;
     let eventCount = 0;
@@ -901,6 +901,12 @@ export class UsageStatsManager {
   async getRawPricingTable(): Promise<Record<string, ApiPricingEntry>> {
     const { raw } = await this.getRawPricingCatalog();
     return raw;
+  }
+
+  async getBillingPricingTable(): Promise<Record<string, ApiPricingEntry>> {
+    const { billingPrices, warnings } = await loadRawPricingTable(this.remotePricingCachePath, this.pricingCachePath);
+    this.pricingWarnings = warnings;
+    return billingPrices;
   }
 
   private resolvePricingTableFromRaw(
@@ -1102,7 +1108,7 @@ export class UsageStatsManager {
     if (this.largeLedger) {
       if (this.ledgerUnavailable || this.archivedUnavailable || this.rateLocksUnavailable) return 0;
       if (this.usageLedgerDirty) await this.saveUsageLedger();
-      const rawPricing = await this.getRawPricingTable();
+      const rawPricing = await this.getBillingPricingTable();
       const dbPaths = await this.discoverDatabaseFiles();
       const aggregated = await this.ledger.aggregate({
         prices: rawPricing,
@@ -1418,7 +1424,7 @@ export class UsageStatsManager {
       void this.savePersistentFileCache();
       for (const event of allEvents) this.upsertLedger(event);
       await this.saveUsageLedger();
-      const rawPricing = await this.getRawPricingTable();
+      const rawPricing = await this.getBillingPricingTable();
       if (this.rateLocksUnavailable && !this.pricingWarnings.some(w => /费率账本|rate ledger/i.test(w))) this.pricingWarnings.push(bt('usage.warn.rate_ledger_unreadable_no_reprice'));
       const revision = await this.ledger.version();
       const aggregateKey = JSON.stringify([revision, this.calendarKey(), rawPricing, accountId ?? 'all', this.knownAccounts, skippedLargeRecords]);
@@ -1536,7 +1542,7 @@ export class UsageStatsManager {
     if (this.usageLedgerDirty) {
       await this.saveUsageLedger();
     }
-    const rawPricing = await this.getRawPricingTable();
+    const rawPricing = await this.getBillingPricingTable();
     await this.loadRateLocks();
     if (this.rateLocksUnavailable && !this.pricingWarnings.some(w => /费率账本|rate ledger/i.test(w))) this.pricingWarnings.push(bt('usage.warn.rate_ledger_unreadable_no_reprice'));
     const now = Math.floor(Date.now() / 1000);

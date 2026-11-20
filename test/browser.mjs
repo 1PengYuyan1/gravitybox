@@ -958,6 +958,9 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
         '  <span id="v233-ssh">You\'re signing in on devbox.example. Your sign-in stays on that machine.</span>',
         '  <button id="v233-grants" aria-label="Permissions, 3 grants"></button>',
         '  <div role="alert" id="v233-bad-folders">2 folders in this project could not be loaded because their locations are invalid.</div>',
+        '  <button data-testid="tool-group-collapsible"><span id="v233-thinking-label">Thinking</span><span id="v233-elapsed-sec" data-testid="tool-group-elapsed">42s</span><span id="v233-elapsed-min" data-testid="tool-group-elapsed">1m 12s</span><span id="v233-elapsed-hr" data-testid="tool-group-elapsed">1h 2m 3s</span></button>',
+        '  <div data-testid="running-row"><span id="v233-running-min">5m</span></div>',
+        '  <span id="v233-ago-sec">42s ago</span>',
         '</div>'
       ].join('');
       await cdp.evaluate('document.body.innerHTML=' + JSON.stringify(html));
@@ -979,8 +982,16 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
       assert.equal(await text(cdp, '#v233-ssh'), '您正在 devbox.example 上登录。您的登录状态仅保留在该设备上。');
       assert.equal(await cdp.evaluate('document.querySelector("#v233-grants").getAttribute("aria-label")'), '权限，3 项授权');
       assert.equal(await text(cdp, '#v233-bad-folders'), '此项目中有 2 个文件夹因其位置无效而无法加载。');
+      assert.equal(await text(cdp, '#v233-thinking-label'), '正在思考...');
+      assert.equal(await text(cdp, '#v233-elapsed-sec'), '42秒');
+      assert.equal(await text(cdp, '#v233-elapsed-min'), '1分12秒');
+      assert.equal(await text(cdp, '#v233-elapsed-hr'), '1小时2分3秒');
+      assert.equal(await text(cdp, '#v233-running-min'), '5分');
+      assert.equal(await text(cdp, '#v233-ago-sec'), '42秒前');
       await cdp.evaluate('globalThis.__GRAVITYBOX_ENGINE_V1__.dispose()');
       assert.equal(await text(cdp, '#v233-step'), 'Step 2 of 4');
+      assert.equal(await text(cdp, '#v233-elapsed-sec'), '42s');
+      assert.equal(await text(cdp, '#v233-elapsed-min'), '1m 12s');
       assert.equal(await cdp.evaluate('document.querySelector("#v233-plan").getAttribute("aria-label")'), 'Plan, 2 of 5 steps done');
     } finally { cdp?.close(); if (target?.targetId) await browserCommand('Target.closeTarget', { targetId: target.targetId }).catch(error => { chromeErrors += '\nTarget cleanup: ' + error.message; }); }
   });
@@ -989,8 +1000,8 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
     try {
       ({target,cdp}=await openIsolatedPage('/'));
       const rows=Array.from({length:320},(_,i)=>`<div data-testid="conversation-row-sidebar"><span class="truncate">Private conversation ${i}</span><span>1d</span></div>`).join('');
-      const html='<div role="dialog" aria-label="Settings" id="flash-root"><button aria-label="Close">Close</button><aside><h1 id="flash-heading">Settings</h1><button id="flash-general">General</button><button id="flash-app">Application</button><button>Appearance</button><h2>Project list</h2><button id="flash-project">Application</button>'+rows+'</aside><main><h2>General</h2><span id="flash-label">Permission Preset</span><div id="flash-description">Configure agent execution, queued message delivery, and permissions.</div><p id="flash-inline">Type <code>/</code> and select <code>plan</code> to have the agent generate a plan.</p><input id="flash-input" value="Permission Preset"><div data-gravitybox-user-content id="flash-private">Permission Preset</div></main></div>';
-      const entries={Settings:'设置',Close:'关闭',General:'通用',Application:'应用设置','App Settings':'应用设置',Appearance:'外观','Permission Preset':'权限预设','Configure agent execution, queued message delivery, and permissions.':'配置智能体执行、排队消息发送及权限。','Type {0} and select {1} to have the agent generate a plan.':'输入 {0} 并选择 {1}，让智能体生成规划。'};
+      const html='<div role="dialog" aria-label="Settings" id="flash-root"><button aria-label="Close">Close</button><aside><h1 id="flash-heading">Settings</h1><button id="flash-general">General</button><button id="flash-app">Application</button><button>Appearance</button><h2>Project list</h2><button id="flash-project">Application</button>'+rows+'</aside><main><h2>General</h2><span id="flash-label">Permission Preset</span><div id="flash-description">Configure agent execution, queued message delivery, and permissions.</div><p id="flash-inline">Type <code>/</code> and select <code>plan</code> to have the agent generate a plan.</p><div data-testid="shortcut-row-artifactStartComment"><span id="flash-shortcut-artifact">Comment on Selection</span></div><div data-testid="artifact-viewer"><span id="flash-real-artifact">Comment on Selection</span></div><input id="flash-input" value="Permission Preset"><div data-gravitybox-user-content id="flash-private">Permission Preset</div></main></div>';
+      const entries={Settings:'设置',Close:'关闭',General:'通用',Application:'应用设置','App Settings':'应用设置',Appearance:'外观','Permission Preset':'权限预设','Comment on Selection':'对选中内容添加评论','Configure agent execution, queued message delivery, and permissions.':'配置智能体执行、排队消息发送及权限。','Type {0} and select {1} to have the agent generate a plan.':'输入 {0} 并选择 {1}，让智能体生成规划。'};
       await cdp.evaluate(`document.body.innerHTML='<nav aria-label="Sidebar"><a href="/history">History</a></nav><div id="flash-mount"></div>';globalThis.__FLASH_HTML__=${JSON.stringify(html)};globalThis.__FLASH_DICT__=${JSON.stringify({schema:1,version:'settings-frames-1',entries})}`);
       const engine=await readFile(join(root,'dist/engine.js'),'utf8');
       await cdp.evaluate(`globalThis.__GRAVITYBOX_BOOT__={origin:${JSON.stringify(origin)},path:'/',dictionary:globalThis.__FLASH_DICT__,conservative:true};\n${engine}`);
@@ -1012,6 +1023,8 @@ ${engine}`,auth.executionContextId);assert.equal(await cdp.evaluate('!!globalThi
       assert.equal(await text(cdp,'#flash-private'),'Permission Preset');
       assert.equal(await text(cdp,'.truncate'),'Private conversation 0');
       assert.equal(await text(cdp,'#flash-project'),'Application','A project name matching the new navigation alias remains protected');
+      assert.equal(await text(cdp,'#flash-shortcut-artifact'),'对选中内容添加评论','Shortcut row with artifactStartComment commandId must not be blocked by artifact selector');
+      assert.equal(await text(cdp,'#flash-real-artifact'),'Comment on Selection','Real artifact viewer container must remain protected');
       assert.equal(await text(cdp,'code'),'/');
       await cdp.evaluate('globalThis.__flashObserver.disconnect();document.querySelector("#flash-mount").replaceChildren();globalThis.__GRAVITYBOX_ENGINE_V1__.refresh()');
       const reopened=await cdp.evaluate(`(async()=>{history.pushState({},'','/?settingsOpen=true&settingsScreen=General');document.querySelector('#flash-mount').innerHTML=globalThis.__FLASH_HTML__;return await globalThis.__flashFrames();})()`);

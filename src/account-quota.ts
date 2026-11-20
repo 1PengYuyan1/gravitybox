@@ -6,12 +6,15 @@ import {
   buildCarbonStatus,
   buildStandaloneModels,
   classifyFamily,
+  extractStandaloneGeminiCodename,
   familyWindowsFromGroups,
   familyModelQuotaFromModels,
   legacyFromFamilyWindows,
+  matchModelToSharedPool,
   mergeGroupSets,
   mergeModelCatalogues,
   mergeWindowStatuses,
+  normalizeBaseModelKey,
   normalizeCloudGroups,
   normalizeCloudModels,
   normalizeResetTime,
@@ -436,6 +439,7 @@ export function accountErrorCode(error: unknown): AccountErrorCode | null {
 }
 
 const AUTH_REQUIRED_CODES = new Set<AccountErrorCode>(['refresh_failed', 'missing_refresh_token', 'token_invalid']);
+const NON_AUTH_ERROR_CODES = new Set<AccountErrorCode>(['network', 'oauth_network', 'token_network', 'http_3501', 'missing_oauth_client']);
 
 const MISSING_OAUTH_CLIENT_PATTERN = /^(?:Google OAuth credentials are not configured, so standby accounts cannot refresh tokens in the background \(optional credentials can be set in \.env\)|未配置 Google OAuth 凭据，备用账号无法后台刷新 Token（可在 \.env 中配置可选凭据）|Credentials expired without background auto-refresh; switch to this account or re-save the current account to refresh quota|登录凭据已过期（未配置后台自动续期），请切换至此账号或重新「保存当前账号」刷新配额)$/;
 
@@ -446,8 +450,9 @@ export function accountCredentialReadiness(account: Account, now = Date.now() / 
   const isHttp403Only = /HTTP\s*403|\b3501\b/i.test(rawError) && !/invalid_grant|HTTP\s*401/i.test(rawError);
   // Missing local OAuth client config only blocks background auto-refresh; switching or re-saving still works.
   const isMissingOAuthClient = errorCode === 'missing_oauth_client' || MISSING_OAUTH_CLIENT_PATTERN.test(rawError.trim());
+  const isKnownNonAuthCode = Boolean(errorCode && NON_AUTH_ERROR_CODES.has(errorCode));
   if ((errorCode && AUTH_REQUIRED_CODES.has(errorCode))
-    || (!isHttp403Only && !isMissingOAuthClient && /invalid_grant|授权.*(?:失效|过期)|重新(?:登录|授权|获取)|请重新添加|登录凭据(?:无法刷新|无效|已失效)|缺少登录凭据|re-?authoriz|sign in again|expired|HTTP\s*401|Unable to refresh login credentials|missing login credentials|please add this account again/i.test(rawError))) {
+    || (!isKnownNonAuthCode && !isHttp403Only && !isMissingOAuthClient && /invalid_grant|授权.*(?:失效|过期)|重新(?:登录|授权|获取)|请重新添加|登录凭据(?:无法刷新|无效|已失效)|缺少登录凭据|re-?authoriz|sign in again|(?:refresh[_\s-]*token|access[_\s-]*token|token|credentials?|auth(?:orization)?|session|grant)[^.;]{0,24}expired|expired\s+(?:token|credentials?|session|grant)|HTTP\s*401|Unable to refresh login credentials|missing login credentials|please add this account again/i.test(rawError))) {
     return { state: 'needs_authorization', message: bt('account_quota.readiness.needs_auth') };
   }
   if (!account.token?.access_token || account.token.access_token === 'pending_refresh' || !Number.isFinite(account.token.expiry_timestamp) || account.token.expiry_timestamp <= now + 30) {
@@ -825,11 +830,42 @@ export function fuseQuotaData(fetchAvailableModelsData: any, quotaSummaryData?: 
   };
 }
 
+function findMatchingModels<T extends { name: string; model_id?: string; display_name?: string | null }>(models: T[], target: string): T[] {
+  const trimmed = target.trim().toLowerCase();
+  if (!trimmed) return [];
+  const exact = models.filter(item =>
+    (item.model_id ?? item.name).toLowerCase() === trimmed
+    || (item.display_name ?? '').toLowerCase() === trimmed);
+  if (exact.length > 0) return exact;
+  const targetBase = normalizeBaseModelKey(trimmed);
+  if (targetBase) {
+    const byBase = models.filter(item => normalizeBaseModelKey(item.model_id ?? item.name) === targetBase);
+    if (byBase.length > 0) return byBase;
+  }
+  const targetCodename = extractStandaloneGeminiCodename(trimmed)
+    ?? (/^[a-z][a-z0-9]{2,24}$/.test(trimmed) && !['all', 'gemini', 'claude', 'gpt', 'openai', '3p', 'gemini_all'].includes(trimmed) ? trimmed : null);
+  if (!targetCodename) return [];
+  return models.filter(item => {
+    const itemText = `${item.model_id ?? item.name} ${item.display_name ?? ''}`;
+    return extractStandaloneGeminiCodename(itemText) === targetCodename;
+  });
+}
+
+function normalizedGroupsFromQuota(quota: QuotaData | null | undefined, nowSec: number): NormalizedGroup[] {
+  if (!quota || !Array.isArray(quota.quota_groups)) return [];
+  const sourceDefault: QuotaSource = quota.source === 'live' ? 'live' : 'cloud';
+  try {
+    return normalizeStoredGroups(quota.quota_groups, quota.last_updated ?? nowSec, sourceDefault);
+  } catch {
+    return [];
+  }
+}
+
 /**
  * 根据当前正在使用的账号套餐与可用配额结构，将用户配置的监测范围安全解析为当前账号的等效有效监测范围。
  * 不改动持久化配置本身，仅避免切到 Ultra / Free 套餐后因独立模型已并入共享池或无权限而导致推荐静默失效。
  */
-export function resolveEffectiveMonitoredModel(account: Account, monitoredModel = 'all'): string {
+export function resolveEffectiveMonitoredModel(account: Account | { quota?: QuotaData | null }, monitoredModel = 'all'): string {
   const trimmed = monitoredModel.trim().toLowerCase();
   if (!trimmed || trimmed === 'all') return 'all';
   if (trimmed === 'gemini' || trimmed === 'claude' || trimmed === '3p' || trimmed === 'claude/gpt') {
@@ -841,7 +877,10 @@ export function resolveEffectiveMonitoredModel(account: Account, monitoredModel 
   const hasGeminiCore = overview.models.some(m => m.family === 'gemini' && m.disabled !== true && !m.stale)
     || overview.familyWindows.gemini.fiveHour !== null
     || overview.familyWindows.gemini.weekly !== null;
-  if (!hasGeminiCore) return monitoredModel;
+  const hasClaudeCore = overview.models.some(m => m.family === 'claude' && m.disabled !== true && !m.stale)
+    || overview.familyWindows.claude.fiveHour !== null
+    || overview.familyWindows.claude.weekly !== null;
+  if (!hasGeminiCore && !hasClaudeCore) return monitoredModel;
 
   if (
     trimmed === 'gemini_all'
@@ -850,16 +889,20 @@ export function resolveEffectiveMonitoredModel(account: Account, monitoredModel 
     || trimmed === 'gemini 全系（含 argon）'
     || trimmed === 'all gemini (incl. argon)'
   ) {
+    if (!hasGeminiCore) return monitoredModel;
     const hasStandaloneGemini =
       (overview.argonStatus.mode === 'standalone' && overview.argonStatus.availability === 'available')
       || (overview.carbonStatus.mode === 'standalone' && overview.carbonStatus.availability === 'available')
       || (overview.standaloneModels ?? []).some(m =>
         m.availability === 'available'
-        && (m.key.toLowerCase().includes('gemini') || m.displayName.toLowerCase().includes('gemini')));
+        && (resolveStandaloneBrands(m.key, m.displayName).includes('gemini')
+          || m.key.toLowerCase().includes('gemini')
+          || m.displayName.toLowerCase().includes('gemini')));
     return hasStandaloneGemini ? 'gemini_all' : 'gemini';
   }
 
   if (trimmed === 'argon' || trimmed === 'gemini 4 argon' || trimmed === 'gemini-4-argon') {
+    if (!hasGeminiCore) return monitoredModel;
     if (overview.argonStatus.mode === 'unified') {
       return overview.argonStatus.pooledInFamily ?? 'gemini';
     }
@@ -870,6 +913,7 @@ export function resolveEffectiveMonitoredModel(account: Account, monitoredModel 
   }
 
   if (trimmed === 'carbon' || trimmed === 'gemini 4 carbon' || trimmed === 'gemini-4-carbon') {
+    if (!hasGeminiCore) return monitoredModel;
     if (overview.carbonStatus.mode === 'unified') {
       return overview.carbonStatus.pooledInFamily ?? 'gemini';
     }
@@ -879,7 +923,33 @@ export function resolveEffectiveMonitoredModel(account: Account, monitoredModel 
     return monitoredModel;
   }
 
-  return monitoredModel;
+  // 动态新独立模型跨套餐兼容：可用独立项保留，已并入共享池则映射至对应共享池，缺失/禁用则按品牌兜底。
+  const standalone = (overview.standaloneModels ?? []).find(item =>
+    item.key.toLowerCase() === trimmed || item.displayName.toLowerCase() === trimmed);
+  if (standalone) {
+    if (standalone.availability === 'available') return monitoredModel;
+  } else {
+    const matchedModels = findMatchingModels(overview.models, trimmed);
+    const activeMatches = matchedModels.filter(m => m.disabled !== true && !m.stale);
+    if (activeMatches.length > 0) {
+      const nowSec = Math.floor(Date.now() / 1000);
+      const sourceDefault: QuotaSource = account.quota?.source === 'live' ? 'live' : 'cloud';
+      const groups = normalizedGroupsFromQuota(account.quota, nowSec);
+      const normalizedAll = overview.models.map(item => normalizedModelFromStored(item, sourceDefault));
+      const poolMatches = activeMatches.map(m =>
+        matchModelToSharedPool(normalizedModelFromStored(m, sourceDefault), overview.familyWindows, groups, account.quota?.subscription_tier, normalizedAll));
+      if (poolMatches.every((p): p is NonNullable<typeof p> => p !== null)) {
+        return poolMatches[0]!.family;
+      }
+      return monitoredModel;
+    }
+  }
+
+  const brands = resolveStandaloneBrands(trimmed, trimmed);
+  const classified = classifyFamily({ modelId: trimmed, displayName: trimmed });
+  if ((brands.includes('gemini') || classified === 'gemini') && hasGeminiCore) return 'gemini';
+  if ((brands.includes('claude') || brands.includes('openai') || classified === 'claude') && hasClaudeCore) return 'claude';
+  return hasGeminiCore || hasClaudeCore ? 'all' : monitoredModel;
 }
 
 export function computeAccountRemaining(
@@ -946,17 +1016,28 @@ export function computeAccountRemaining(
       if (typeof standalone.observedAt === 'number' && nowSec - standalone.observedAt > FRESH_SECONDS) return null;
       return bounded(standalone.remaining);
     }
-    const model = overview.models.find(item =>
-      (item.model_id ?? item.name).toLowerCase() === trimmed
-      || (item.display_name ?? '').toLowerCase() === trimmed);
+    const matchedModels = findMatchingModels(overview.models, trimmed);
+    const model = matchedModels.find(m => m.disabled !== true && m.stale !== true) ?? matchedModels[0];
     if (model) {
       if (model.disabled === true || model.stale === true) return null;
       const modelFamily = model.family ?? classifyFamily({ modelId: model.name, displayName: model.display_name });
-      const pooledFamily = (model.is_argon || modelFamily === 'argon') && overview.argonStatus.mode === 'unified'
+      let pooledFamily = (model.is_argon || modelFamily === 'argon') && overview.argonStatus.mode === 'unified'
         ? overview.argonStatus.pooledInFamily
         : (model.is_carbon || modelFamily === 'carbon') && overview.carbonStatus.mode === 'unified'
           ? overview.carbonStatus.pooledInFamily
           : null;
+      if (!pooledFamily && modelFamily === 'other') {
+        const sourceDefault: QuotaSource = account.quota?.source === 'live' ? 'live' : 'cloud';
+        const groups = normalizedGroupsFromQuota(account.quota, Math.floor(nowSec));
+        const normalizedAll = overview.models.map(item => normalizedModelFromStored(item, sourceDefault));
+        pooledFamily = matchModelToSharedPool(
+          normalizedModelFromStored(model, sourceDefault),
+          overview.familyWindows,
+          groups,
+          account.quota?.subscription_tier,
+          normalizedAll,
+        )?.family ?? null;
+      }
       if (pooledFamily) {
         const poolValues = familyValues(pooledFamily);
         if (model.effective_known === true && typeof model.effective_percentage === 'number') {
@@ -1005,7 +1086,11 @@ export function computeAccountRemaining(
       const keyLower = extra.key.toLowerCase();
       if (keyLower === 'argon' || keyLower === 'carbon') continue;
       const nameLower = extra.displayName.toLowerCase();
-      if (!keyLower.includes('gemini') && !nameLower.includes('gemini')) continue;
+      if (
+        !resolveStandaloneBrands(extra.key, extra.displayName).includes('gemini') &&
+        !keyLower.includes('gemini') &&
+        !nameLower.includes('gemini')
+      ) continue;
       if (
         extra.availability === 'available' &&
         extra.quotaState === 'known' &&
@@ -1060,7 +1145,7 @@ export function subscriptionTierRank(account: Account | AccountSummary | null | 
   const raw = String(account.quota?.subscription_tier ?? '').toUpperCase();
   if (raw.includes('ULTRA') || raw.includes('ENTERPRISE')) return 5;
   if (raw.includes('TEAM') || raw.includes('BUSINESS') || raw.includes('WORKSPACE')) return 4;
-  if (raw.includes('PRO') || raw.includes('AI PREMIUM')) return 3;
+  if (/\bPRO\b/.test(raw) || raw.includes('AI PREMIUM')) return 3;
   if (raw.includes('PLUS')) return 2.5;
   if (raw.includes('FREE') || raw.includes('STARTER') || raw.includes('TRIAL')) return 1;
   return 2;
@@ -1100,7 +1185,7 @@ function resolveStandaloneBrands(key: string, displayName: string): string[] {
   const brands: string[] = [];
   if (/\bclaude\b|\banthropic\b/.test(text)) brands.push('claude');
   if (/\bgpt\b|\bopenai\b/.test(text)) brands.push('openai');
-  if (/\bgemini\b|\bargon\b|\bcarbon\b|\borchestrator\b/.test(text)) brands.push('gemini');
+  if (/\bgemini\b|\bargon\b|\bcarbon\b|\bneon\b|\bhydrogen\b|\borchestrator\b/.test(text)) brands.push('gemini');
   return brands.length > 0 ? brands : [key];
 }
 

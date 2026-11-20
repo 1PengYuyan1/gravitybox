@@ -275,6 +275,7 @@ export class HudInstance {
     this.lastMetricsSequence = 0;
     this.lastAppliedUpdatedAt = 0;
     this.currentModelId = '';
+    this.backendIsStreaming = false;
     this.domIsStreaming = false;
     this.domActivityPhase = 'idle';
     this.backendActivityPhase = null;
@@ -324,6 +325,7 @@ export class HudInstance {
     this.streamResumeAtMs = 0;
     this.currentConvId = null;
     this.currentModelId = '';
+    this.backendIsStreaming = false;
     this.domIsStreaming = false;
     this.domActivityPhase = 'idle';
     this.backendActivityPhase = null;
@@ -367,6 +369,7 @@ export class HudInstance {
     this.currentConvId = newConvId;
     if (changed) this.currentModelId = modelId || '';
     else if (modelId) this.currentModelId = modelId;
+    const prevDomStreaming = this.domIsStreaming;
     this.domIsSubagentRunning = Boolean(isSubagentRunning);
     this.domRunningSubagentCount = Math.max(0, Number(runningSubagentCount) || 0);
     // domIsStreaming 与 domActivityPhase 仅由当前分栏前台模型/流式状态决定，不与独立子智能体混用
@@ -389,6 +392,7 @@ export class HudInstance {
       this.backendIsSubagentRunning = false;
       this.backendRunningSubagentCount = 0;
       this.backendActivityPhase = null;
+      this.backendIsStreaming = false;
       this.isSubagentRunning = this.domIsSubagentRunning;
       this.runningSubagentCount = this.domRunningSubagentCount;
       this.isStreaming = this.domIsStreaming;
@@ -409,15 +413,19 @@ export class HudInstance {
       this.syncStreamingClass();
       this.emitBridgeEvent('SESSION_ATTACHED');
     } else {
+      if (prevDomStreaming && !this.domIsStreaming) {
+        this.backendIsStreaming = false;
+      }
       const wasActiveWork = this.hasActiveWork;
       this.isSubagentRunning = Boolean(this.domIsSubagentRunning || this.backendIsSubagentRunning);
       this.runningSubagentCount = Math.max(
         this.domRunningSubagentCount,
         this.backendRunningSubagentCount
       );
-      this.isStreaming = this.domIsStreaming;
+      const subagentBackendStreaming = this.isSubagentBackendStreaming(this.lastMetrics);
+      this.isStreaming = Boolean(this.domIsStreaming || subagentBackendStreaming);
       this.hasActiveWork = Boolean(
-        this.domIsStreaming ||
+        this.isStreaming ||
           this.isSubagentRunning ||
           (this.lastMetrics?.session?.activeModelStepCount || 0) > 0 ||
           (this.lastMetrics?.session?.activeToolStepCount || 0) > 0
@@ -431,14 +439,22 @@ export class HudInstance {
     return this.sessionRevision;
   }
 
+  isSubagentBackendStreaming(metricsRef = null) {
+    return Boolean(
+      metricsRef?.session?.isSubagentTrajectory === true &&
+        this.backendIsStreaming
+    );
+  }
+
   computeMergedActivityPhase(metricsOverride = null) {
     const refMetrics = metricsOverride || this.lastMetrics;
     const subpaneDbActive =
       Boolean(this.isSubpane || refMetrics?.session?.isSubagentTrajectory) &&
       ((refMetrics?.session?.activeModelStepCount || 0) > 0 ||
         (refMetrics?.session?.activeToolStepCount || 0) > 0);
-    // 当前分栏前台模型未处于流式轮次时（除非是独立子智能体分栏且底层数据库实锤存在活跃步），小圆点保持灰色 idle
-    if (!this.domIsStreaming && !subpaneDbActive) return 'idle';
+    const subagentTrajectoryStreaming = this.isSubagentBackendStreaming(refMetrics);
+    // 当前分栏前台模型未处于流式轮次时（除非是独立子智能体分栏且底层数据库实锤存在活跃步或后端判定子轨迹流式中），小圆点保持灰色 idle
+    if (!this.domIsStreaming && !subpaneDbActive && !subagentTrajectoryStreaming) return 'idle';
     if (this.domActivityPhase === 'executing' || this.backendActivityPhase === 'executing') {
       return 'executing';
     }
@@ -486,6 +502,9 @@ export class HudInstance {
       ) {
         this.backendActivityPhase = null;
       }
+      if (this.domIsStreaming && !nextDomStreaming) {
+        this.backendIsStreaming = false;
+      }
       this.domIsStreaming = nextDomStreaming;
       this.domActivityPhase = nextDomPhase;
       this.domIsSubagentRunning = nextDomSubagentRunning;
@@ -496,9 +515,10 @@ export class HudInstance {
         this.domRunningSubagentCount,
         this.backendRunningSubagentCount
       );
-      this.isStreaming = this.domIsStreaming;
+      const subagentBackendStreaming = this.isSubagentBackendStreaming(this.lastMetrics);
+      this.isStreaming = Boolean(this.domIsStreaming || subagentBackendStreaming);
       this.hasActiveWork = Boolean(
-        this.domIsStreaming ||
+        this.isStreaming ||
           this.isSubagentRunning ||
           (this.lastMetrics?.session?.activeModelStepCount || 0) > 0 ||
           (this.lastMetrics?.session?.activeToolStepCount || 0) > 0
@@ -699,11 +719,13 @@ export class HudInstance {
     this.runningSubagentCount = mergedSubagentCount;
     const activeModelSteps = Math.max(0, Number(metrics.session?.activeModelStepCount) || 0);
     const activeToolSteps = Math.max(0, Number(metrics.session?.activeToolStepCount) || 0);
-    this.isStreaming = Boolean(this.domIsStreaming);
+    this.backendIsStreaming = Boolean(metrics.isStreaming);
+    const subagentBackendStreaming = this.isSubagentBackendStreaming(metrics);
+    this.isStreaming = Boolean(this.domIsStreaming || subagentBackendStreaming);
     this.hasActiveWork = Boolean(
-      this.domIsStreaming ||
+      this.isStreaming ||
         mergedSubagentRunning ||
-        metrics.isStreaming ||
+        this.backendIsStreaming ||
         activeModelSteps > 0 ||
         activeToolSteps > 0
     );

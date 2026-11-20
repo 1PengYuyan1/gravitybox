@@ -323,4 +323,35 @@ describeContractGroup("连接与控制 · debug-port-missing", { concurrency: fa
       await rm(profileDir, { recursive: true, force: true });
     }
   });
+
+  test('hasRunningAgentTask 返回 checked 标记，仅认准真实生成/流式信号并排除弹窗 Cancel、后台行 Stop 与残留 codicon-loading', async () => {
+    const ctrl = new Controller({
+      appPath: '/Applications/Antigravity.app',
+      profile: '/tmp/unused',
+      dictionary: dictionaryFromEntries({ Settings: '设置' }),
+      hudEnabled: false,
+      onStatus: () => {},
+    });
+    // 无已连接页面时返回 { busy: false, checked: false }
+    const noPageRes = await ctrl.hasRunningAgentTask();
+    assert.deepEqual(noPageRes, { busy: false, checked: false });
+
+    let evaluatedExpr = '';
+    ctrl.pages.set('mock-page', {
+      targetId: 'mock-page',
+      contextId: 1,
+      cdp: {
+        evaluate: async (expr) => {
+          evaluatedExpr = expr;
+          return { busy: false, checked: true };
+        },
+      },
+    });
+    const idleRes = await ctrl.hasRunningAgentTask();
+    assert.deepEqual(idleRes, { busy: false, checked: true });
+    assert.equal(evaluatedExpr.includes('.codicon-loading'), false, '不得再将历史残留 .codicon-loading 判为运行中');
+    assert.equal(evaluatedExpr.includes('input-cancel-button'), true, '必须认准输入框取消按钮 input-cancel-button');
+    assert.equal(evaluatedExpr.includes('running-row'), true, '必须排除后台任务行 running-row 中的普通 Stop 按钮');
+  });
 });
+

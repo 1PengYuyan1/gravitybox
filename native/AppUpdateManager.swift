@@ -105,7 +105,7 @@ final class AppUpdateManager {
                 break
             }
         }
-        return buildStr.isEmpty ? "10101" : buildStr
+        return buildStr.isEmpty ? "10103" : buildStr
     }
 
     static func normalizeVersion(_ raw: String) -> String {
