@@ -3051,4 +3051,115 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
     subInst.dispose();
     splitMain.dispose();
   });
+
+  it('2.34.0 DOM data-context-window 探针、收窄 MutationObserver、syncAllSessions 刷新代际防竞态与通用阶段短名', () => {
+    const observedCalls = [];
+    const OrigMO = globalThis.MutationObserver;
+    const origDoc = globalThis.document;
+    globalThis.MutationObserver = class {
+      constructor(cb) { this.cb = cb; }
+      observe(target, opts) { observedCalls.push({ target, opts }); }
+      disconnect() {}
+    };
+    const fakeBody = { nodeType: 1, querySelectorAll: () => [] };
+    const fakeDocEl = { nodeType: 1 };
+    globalThis.document = {
+      body: fakeBody,
+      documentElement: fakeDocEl,
+      hidden: false,
+      querySelector: () => null,
+      querySelectorAll: () => [],
+      addEventListener: () => {},
+      removeEventListener: () => {},
+    };
+    try {
+      const bridgeEvents = [];
+      const manager = new AntigravityHudManager({
+        onBridgeEvent: (e) => bridgeEvents.push(e),
+      });
+      manager.start();
+
+      // 1. 验证 document.body subtree MutationObserver 不再监听全子树 style / class
+      const subtreeObs = observedCalls.find((c) => c.target === fakeBody && c.opts?.subtree === true);
+      assert.ok(subtreeObs, '应存在 document.body subtree observer');
+      assert.equal(subtreeObs.opts.attributeFilter.includes('style'), false, 'subtree observer 不得监听 style');
+      assert.equal(subtreeObs.opts.attributeFilter.includes('class'), false, 'subtree observer 不得监听 class');
+      assert.equal(subtreeObs.opts.attributeFilter.includes('data-context-window'), true);
+
+      // 2. 验证 data-context-window 解析与非品牌硬编码触发器解析
+      assert.equal(manager.parseContextWindowTokens('512k'), 512_000);
+      assert.equal(manager.parseContextWindowTokens('1M'), 1_000_000);
+      assert.equal(manager.parseContextWindowTokens('256000'), 256_000);
+      assert.equal(manager.parseContextWindowTokens('invalid'), undefined);
+
+      const mockTrigger = new FakeElement('button');
+      mockTrigger.setAttribute('data-testid', 'model-selector-trigger');
+      mockTrigger.setAttribute('data-context-window', '512k');
+      mockTrigger.setAttribute('aria-label', 'Select model, current: Orchestrator Gemini 4 Neon High');
+      mockTrigger.textContent = 'Orchestrator Gemini 4 Neon High';
+      const mockView = new FakeElement('div');
+      mockView.appendChild(mockTrigger);
+      assert.equal(manager.resolveActiveModel(mockView, 1), 'Orchestrator Gemini 4 Neon High');
+      assert.equal(manager.resolveActiveModelCapacity(mockView, 1), 512_000);
+
+      // 3. 验证 syncAllSessions 推进 sessionRevision 防止旧在途轮询包倒灌覆盖
+      const inst = new HudInstance('pane-sync', {
+        paneSlotId: 'pane-sync',
+        onBridgeEvent: (e) => bridgeEvents.push(e),
+        allocateRevision: () => manager.allocateSessionRevision(),
+      });
+      const host = new FakeElement('div');
+      const shadow = host.attachShadow({ mode: 'open' });
+      host.shadowRoot = shadow;
+      inst.host = host;
+      inst.shadow = shadow;
+      shadow.innerHTML = inst.buildHudHtml();
+      const rev1 = inst.switchConversation('conv-sync-race', 'Orchestrator Gemini 4 Neon High', false, false, 0, null, 'idle', 512_000);
+      assert.equal(bridgeEvents.at(-1)?.modelCapacity, 512_000);
+      assert.equal(inst.updateMetrics({
+        conversationId: 'conv-sync-race',
+        paneSlotId: 'pane-sync',
+        sessionRevision: rev1,
+        metricsSequence: 200,
+        updatedAt: Date.now(),
+        context: { hasUsageData: true, usedTokens: 90_000, capacityTokens: 512_000, usedRatio: 90_000 / 512_000 },
+      }), true);
+
+      manager.instances.set('pane-sync', inst);
+      manager.reconcileMounts = () => {};
+      manager.syncAllSessions();
+      const rev2 = inst.getSessionRevision();
+      assert.ok(rev2 > rev1, 'syncAllSessions 必须推进单调 sessionRevision');
+      // 旧代际在途乱序旧包 (rev1, seq=150) 必须被严格拒收
+      assert.equal(inst.updateMetrics({
+        conversationId: 'conv-sync-race',
+        paneSlotId: 'pane-sync',
+        sessionRevision: rev1,
+        metricsSequence: 150,
+        updatedAt: Date.now(),
+        context: { hasUsageData: true, usedTokens: 10_000, capacityTokens: 512_000, usedRatio: 10_000 / 512_000 },
+      }), false, '旧代际在途轮询包不得覆盖最新状态');
+      assert.equal(inst.lastMetrics.context.usedTokens, 90_000);
+
+      // 4. 验证通用阶段短名（含 Orchestrator 前缀、第三方厂商前缀与未知待介入规划阶段中性文案）
+      const listEl = new FakeElement('div');
+      inst.renderModelStagesList(
+        listEl,
+        [
+          { slotKey: 'orchestrator:planner_pending', role: 'planner', modelId: 'pending', shortLabel: '', hasUsageData: false, isActive: false },
+          { slotKey: 'model:openai-gpt-5-2', role: 'model', modelId: 'gpt-5.2', modelDisplayName: 'Orchestrator OpenAI GPT-5.2', shortLabel: 'GPT-5.2', hasUsageData: true, isActive: true, usedTokens: 50_000, capacityTokens: 200_000, usedRatio: 0.25 },
+        ],
+        false
+      );
+      assert.match(listEl.innerHTML, /规划阶段/);
+      assert.match(listEl.innerHTML, /GPT-5\.2/);
+      assert.equal(/Orchestrator|OpenAI/.test(listEl.innerHTML), false);
+
+      inst.dispose();
+      manager.dispose();
+    } finally {
+      globalThis.MutationObserver = OrigMO;
+      globalThis.document = origDoc;
+    }
+  });
 });

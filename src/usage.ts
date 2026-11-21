@@ -429,7 +429,7 @@ export class UsageStatsManager {
       const raw = JSON.parse(await readFile(this.persistCachePath, 'utf8'));
       if (raw && raw.version === 3 && typeof raw.entries === 'object' && raw.entries !== null) {
         for (const [k, v] of Object.entries(raw.entries as Record<string, any>)) {
-          if (v && typeof v.mtimeMs === 'number' && typeof v.size === 'number' && Array.isArray(v.events) && v.events.every((e: GenerationEvent) => typeof e.event_key === 'string' && !/\borchestrator\b|^gemini-flash-worker|^MODEL_PLACEHOLDER_M66[789]$|^Gemini\s+Flash$/i.test(e.model)) && isFileCacheEntryReusable(v) && !this.fileCache.has(k)) {
+          if (v && typeof v.mtimeMs === 'number' && typeof v.size === 'number' && Array.isArray(v.events) && v.events.every((e: GenerationEvent) => typeof e.event_key === 'string' && !/\borchestrator\b|^gemini-flash-worker|^MODEL_PLACEHOLDER_M\d+$|^Gemini\s+Flash$/i.test(e.model)) && isFileCacheEntryReusable(v) && !this.fileCache.has(k)) {
             this.setFileCacheEntry(k, {
               ...v,
               skippedLargeRecords: Number.isFinite(v.skippedLargeRecords) ? Number(v.skippedLargeRecords) : 0,

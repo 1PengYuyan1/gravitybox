@@ -100,7 +100,14 @@ function formatPopoverPercent(value, formatted) {
 }
 
 function formatConciseStageModelName(rawName) {
-  const text = String(rawName || '').trim();
+  let text = String(rawName || '').trim();
+  if (!text) return '—';
+  // 兼容 2.34.0 "Orchestrator <Model>" 与历史 "Orchestrator (<Model>)" / "<Model> (Orchestrator)" 包装
+  text = text
+    .replace(/^Orchestrator\s*[（(]\s*([^）)]+?)\s*[）)]$/i, '$1')
+    .replace(/^Orchestrator(?:\s*[:·•/-]\s*|\s+)/i, '')
+    .replace(/\s*[（(]\s*Orchestrator\s*[）)]$/i, '')
+    .trim();
   if (!text) return '—';
   const g4Match = text.match(/^Gemini\s+4\s+(.+)$/i);
   if (g4Match) return g4Match[1];
@@ -108,6 +115,8 @@ function formatConciseStageModelName(rawName) {
   if (gVerMatch) return gVerMatch[1];
   const claudeMatch = text.match(/^Claude\s+(.+)$/i);
   if (claudeMatch) return claudeMatch[1];
+  const vendorMatch = text.match(/^(?:OpenAI|Anthropic|Google|Meta|xAI|Mistral)\s+(.+)$/i);
+  if (vendorMatch && vendorMatch[1]) return vendorMatch[1].trim();
   return text;
 }
 
@@ -275,6 +284,7 @@ export class HudInstance {
     this.lastMetricsSequence = 0;
     this.lastAppliedUpdatedAt = 0;
     this.currentModelId = '';
+    this.currentModelCapacity = undefined;
     this.backendIsStreaming = false;
     this.domIsStreaming = false;
     this.domActivityPhase = 'idle';
@@ -325,6 +335,7 @@ export class HudInstance {
     this.streamResumeAtMs = 0;
     this.currentConvId = null;
     this.currentModelId = '';
+    this.currentModelCapacity = undefined;
     this.backendIsStreaming = false;
     this.domIsStreaming = false;
     this.domActivityPhase = 'idle';
@@ -362,13 +373,23 @@ export class HudInstance {
     isSubagentRunning = false,
     runningSubagentCount = 0,
     childConversationIds = null,
-    activityPhase = null
+    activityPhase = null,
+    modelCapacity = undefined
   ) {
     if (!newConvId) return this.sessionRevision;
     const changed = this.currentConvId !== newConvId;
     this.currentConvId = newConvId;
-    if (changed) this.currentModelId = modelId || '';
-    else if (modelId) this.currentModelId = modelId;
+    const validCap =
+      typeof modelCapacity === 'number' && Number.isSafeInteger(modelCapacity) && modelCapacity > 0
+        ? modelCapacity
+        : undefined;
+    if (changed) {
+      this.currentModelId = modelId || '';
+      this.currentModelCapacity = validCap;
+    } else {
+      if (modelId) this.currentModelId = modelId;
+      if (validCap !== undefined) this.currentModelCapacity = validCap;
+    }
     const prevDomStreaming = this.domIsStreaming;
     this.domIsSubagentRunning = Boolean(isSubagentRunning);
     this.domRunningSubagentCount = Math.max(0, Number(runningSubagentCount) || 0);
@@ -467,11 +488,20 @@ export class HudInstance {
     isSubagentRunning = false,
     runningSubagentCount = 0,
     childConversationIds = null,
-    activityPhase = null
+    activityPhase = null,
+    modelCapacity = undefined
   ) {
     let changed = false;
-    if (modelId && modelId !== this.currentModelId) {
-      this.currentModelId = modelId;
+    const validCap =
+      typeof modelCapacity === 'number' && Number.isSafeInteger(modelCapacity) && modelCapacity > 0
+        ? modelCapacity
+        : undefined;
+    const modelChanged = Boolean(modelId && modelId !== this.currentModelId);
+    const capChanged = validCap !== undefined && validCap !== this.currentModelCapacity;
+    if (modelChanged || capChanged) {
+      if (modelId) this.currentModelId = modelId;
+      if (validCap !== undefined) this.currentModelCapacity = validCap;
+      else if (modelChanged) this.currentModelCapacity = undefined;
       changed = true;
       this.emitBridgeEvent('MODEL_CHANGED');
     }
@@ -634,8 +664,15 @@ export class HudInstance {
     this.stopTurnClock();
   }
 
-  requestRefresh() {
+  requestRefresh(options = {}) {
     if (!this.currentConvId) return;
+    if (options && options.bumpRevision === true) {
+      this.sessionRevision = this.allocateRevision
+        ? Math.max(this.sessionRevision + 1, this.allocateRevision())
+        : this.sessionRevision + 1;
+      this.lastMetricsSequence = 0;
+      this.lastAppliedUpdatedAt = 0;
+    }
     this.emitBridgeEvent('REQUEST_REFRESH');
   }
 
@@ -648,6 +685,9 @@ export class HudInstance {
       paneSlotId: this.paneSlotId,
       sessionRevision: this.sessionRevision,
       modelId: this.currentModelId,
+      ...(typeof this.currentModelCapacity === 'number' && this.currentModelCapacity > 0
+        ? { modelCapacity: this.currentModelCapacity }
+        : {}),
       isStreaming: this.domIsStreaming,
       activityPhase: this.domActivityPhase,
       isSubagentRunning: this.domIsSubagentRunning,
@@ -2672,7 +2712,9 @@ export class HudInstance {
       const shortModel = String(stage.shortLabel || stage.modelDisplayName || stage.modelId || '—');
       const stageTitle =
         stage.role === 'planner'
-          ? this.t('stageRolePlanner', { model: shortModel })
+          ? !stage.shortLabel
+            ? (this.locale === 'en' ? 'Plan Stage' : '规划阶段')
+            : this.t('stageRolePlanner', { model: shortModel })
           : stage.role === 'executor'
           ? !stage.shortLabel
             ? this.t('stageRoleExecutorPending')

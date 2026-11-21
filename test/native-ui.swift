@@ -3054,6 +3054,34 @@ import Cocoa
             let foldedZhTexts = allTextValues(foldedSheet.sheet.contentView!)
             check(foldedZhTexts.contains("涵盖变体：Low · Medium · High · XHigh · Orchestrator"), "Folded group card must list combined variants: \(foldedZhTexts)")
 
+            // Non-Gemini / standalone orchestrator rows must never fabricate gemini-4-<codename>; sibling matching + hostOrder must work cleanly
+            let standaloneNonGeminiOrch = PricingSyncSheetController.groupUnpricedLiveModels([
+                ["key": "gemini-pro-orchestrator-opus", "displayName": "Orchestrator (Opus)", "disabled": false],
+                ["key": "gemini-flash-worker-agy", "displayName": "Orchestrator (Claude Opus 6)", "disabled": false],
+            ])
+            check(standaloneNonGeminiOrch.count == 2, "Standalone non-Gemini orchestrators remain distinct without fabricating gemini-4-*")
+            check(standaloneNonGeminiOrch[0].key == "gemini-pro-orchestrator-opus" && standaloneNonGeminiOrch[0].displayName == "Orchestrator (Opus)", "Must not fabricate gemini-4-opus for unmatched Opus orchestrator (got \(standaloneNonGeminiOrch[0]))")
+            check(standaloneNonGeminiOrch[1].key == "gemini-flash-worker-agy" && standaloneNonGeminiOrch[1].displayName == "Orchestrator (Claude Opus 6)", "Must preserve canonical key/displayName for unmatched Claude Opus orchestrator (got \(standaloneNonGeminiOrch[1]))")
+
+            let pairedNonGeminiOrch = PricingSyncSheetController.groupUnpricedLiveModels([
+                ["key": "claude-opus-6-high", "displayName": "Claude Opus 6 (High)", "disabled": false, "hostOrder": 2],
+                ["key": "gemini-flash-worker-agy", "displayName": "Claude Opus 6 (Orchestrator)", "disabled": false, "hostOrder": 2],
+                ["key": "gemini-5-zephyr-extra", "displayName": "Gemini 5 Zephyr (Extra)", "disabled": false, "hostOrder": 0],
+            ])
+            check(pairedNonGeminiOrch.count == 2, "Paired non-Gemini orchestrator folds into its sibling while respecting hostOrder")
+            check(pairedNonGeminiOrch[0].key == "gemini-5-zephyr" && pairedNonGeminiOrch[0].displayName == "Gemini 5 Zephyr" && pairedNonGeminiOrch[0].variants == ["Extra"], "Unpriced grouping honors backend hostOrder and -extra variant (got \(pairedNonGeminiOrch[0]))")
+            check(pairedNonGeminiOrch[1].key == "claude-opus-6" && pairedNonGeminiOrch[1].displayName == "Claude Opus 6" && pairedNonGeminiOrch[1].variants == ["High", "Orchestrator"], "Non-Gemini orchestrator folds into matching Claude sibling cleanly (got \(pairedNonGeminiOrch[1]))")
+
+            let customHostOrder = PricingSyncSheetController.sortCurrentPlanKeys(
+                ["gemini-4-neon", "gemini-4-zephyr", "claude-opus-5-5"],
+                catalogState: [
+                    "gemini-4-zephyr": ["availability": "available", "hostOrder": 0],
+                    "claude-opus-5-5": ["availability": "available", "hostOrder": 1],
+                    "gemini-4-neon": ["availability": "available", "hostOrder": 2],
+                ]
+            )
+            check(customHostOrder == ["gemini-4-zephyr", "claude-opus-5-5", "gemini-4-neon"], "sortCurrentPlanKeys must follow backend hostOrder without hardcoded codename precedence (got \(customHostOrder))")
+
             _ = L10n.shared.setLanguage("en", notify: true); pump()
             let enPartialOverview = DashboardPage(app: partialHost)
             let enPartialUsage = UsagePage(app: partialHost)

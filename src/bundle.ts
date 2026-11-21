@@ -178,7 +178,7 @@ export function looksLikeNoise(text: string): boolean {
   if (/^!?[a-z-]+(?:-[a-z0-9./%[\]]+)*\s/.test(text) && /\s[a-z-]+:/.test(text)) return true;
   if (/^[+.]/.test(text) || /this\.|style\[/.test(text)) return true;
   if (/^(?:solid|dashed|dotted|double|groove|ridge|inset|outset|none|hidden)$/i.test(text)) return true;
-  if (/^(?:translate|scale|rotate|skew|matrix|blur|grayscale|opacity|hue-rotate|rgba?|hsla?|url|linear-gradient|radial-gradient|calc|var|repeat|drop-shadow)\(/.test(text)) return true;
+  if (/^(?:translate|scale|rotate|skew|matrix|blur|grayscale|opacity|hue-rotate|rgba?|hsla?|url|linear-gradient|radial-gradient|calc|clamp|var|repeat|drop-shadow)\(/.test(text)) return true;
   if (/^-?\d+(?:\.\d+)?(?:deg|rad|turn|s|ms)?$/.test(text)) return true;
   if (/^[A-Za-z]+\d+[-_][A-Za-z0-9-]+$/.test(text)) return true;
   if (/^\[object [A-Za-z]+\]$/.test(text)) return true;
@@ -195,7 +195,16 @@ export function looksLikeNoise(text: string): boolean {
   if (/^system-ui,|^ui-monospace,/.test(text)) return true;
   if (/^translate[XY]\(/.test(text)) return true;
   if (/^(?:grid-rows-|opacity-|scale-|max-h-|max-w-|min-w-|h-|w-|p-|bg-|border)/.test(text) && /-|:/.test(text)) return true;
-  if (/\b(?:flex|grid|items-center|justify-center|bg-|text-|border-|opacity-|animate-|px-|py-|shrink|grow|sticky|top-0|z-10)\b/.test(text) && /\s/.test(text)) return true;
+  if (/\b(?:flex|grid|items-center|justify-center|bg-|text-|border-|opacity-|animate-|px-|py-|shrink|grow|sticky|top-0|z-10|object-cover|object-contain)\b/.test(text) && /\s/.test(text)) return true;
+  if (/\s/.test(text) && /\b(?:block|inline|inline-block|relative|absolute|fixed|hidden|truncate)\b/.test(text)) {
+    const parts = text.trim().split(/\s+/);
+    if (
+      parts.some(part => /-|:/.test(part)) &&
+      parts.every(part => /^(?:[a-z-]+:)*(?:block|inline|inline-block|relative|absolute|fixed|hidden|truncate|[a-z][a-z0-9]*(?:-[a-z0-9./%[\]]+)+)$/.test(part))
+    ) {
+      return true;
+    }
+  }
   if (/\bminmax\(/.test(text) || /^page\.(?:reload|goBack|goForward)\(\)$/.test(text)) return true;
   if (/^[A-Z_]+(?:\s+[A-Z_]+)+$/.test(text)) return true;
   if (/^[a-z_]+(?:\s+[a-z_]+){2,}$/.test(text)) return true;
@@ -347,6 +356,26 @@ export function findMissingStrings(extracted: { text: string; kinds?: string[] }
     missing.push(key);
   }
   return [...new Set(missing)].sort((a, b) => a.localeCompare(b));
+}
+
+export const ADAPTIVE_FULL_TRANSLATION_MIN_COVERAGE = 0.85;
+export const ADAPTIVE_FULL_TRANSLATION_MIN_STRINGS = 10;
+
+export function computeBundleDictionaryCoverage(
+  extracted: readonly { text: string; kinds?: string[] }[],
+  dictionary: Dictionary
+): { total: number; matched: number; missing: string[]; coverage: number } {
+  const translatableKeys = new Set<string>();
+  for (const item of extracted) {
+    if (item.kinds?.includes('template') || item.kinds?.includes('fragment')) continue;
+    const key = normalizeText(item.text);
+    if (key) translatableKeys.add(key);
+  }
+  const missing = findMissingStrings(extracted as { text: string; kinds?: string[] }[], dictionary);
+  const total = translatableKeys.size;
+  const matched = Math.max(0, total - missing.length);
+  const coverage = total > 0 ? matched / total : 0;
+  return { total, matched, missing, coverage };
 }
 
 export type PendingList = {

@@ -7,6 +7,7 @@ import {
   buildPricingCatalogPayloadSnapshot,
   readInstalledAppBundleVersion,
   readValidLiveIdeModelsSnapshot,
+  registerObservedModelsFromSource,
   sanitizeLiveIdeModelsSnapshot,
   type LiveIdeModelSnapshotEntry,
   type LiveIdeModelsSnapshot,
@@ -384,6 +385,7 @@ async function run() {
   let lastLiveSnapshotDedupKey = '';
   async function persistLiveIdeModelsIfPresent(live: Parameters<typeof sanitizeLiveIdeModelsSnapshot>[0]): Promise<void> {
     if (!live?.quota?.models?.length) return;
+    registerObservedModelsFromSource(live.quota.models);
     const appVersion = await readInstalledAppBundleVersion(target.appPath);
     const snapshot = sanitizeLiveIdeModelsSnapshot(live, appVersion);
     if (!snapshot) return;
@@ -470,6 +472,19 @@ async function run() {
   if (pricePrefs) usageManager.setAutoRemotePricingSync(pricePrefs.enabled === true);
   else if (typeof configuredAutoPricingSync === 'boolean') usageManager.setAutoRemotePricingSync(configuredAutoPricingSync);
   await usageManager.hydratePricingCatalog().catch(() => {});
+  await (async () => {
+    const listRes = await accountsManager.listAccounts().catch(() => null);
+    for (const acc of listRes?.accounts ?? []) {
+      if (acc.quota?.models?.length) {
+        registerObservedModelsFromSource(acc.quota.models);
+      }
+    }
+    const installedVer = await readInstalledAppBundleVersion(target.appPath).catch(() => '');
+    const snap = installedVer ? await readValidLiveIdeModelsSnapshot(liveIdeModelsPath, installedVer).catch(() => null) : null;
+    if (snap?.models?.length) {
+      registerObservedModelsFromSource(snap.models);
+    }
+  })().catch(() => {});
   const idempotencyStore = new IdempotencyStore();
   let backendLease: ProcessLease | undefined;
 
@@ -647,7 +662,10 @@ async function run() {
   const startQuotaRefreshTask = () => tasks.begin('quota-refresh', bt('main.task.quota_refresh_title'), async (signal, progress, _commit) => {
     const result = await accountsManager.refreshAllQuotas(globalThis.fetch, {
       signal,
-      onAccountUpdated: (_account, done, total) => {
+      onAccountUpdated: (account, done, total) => {
+        if (account?.quota?.models?.length) {
+          registerObservedModelsFromSource(account.quota.models);
+        }
         progress(done, total);
       },
     });
@@ -999,6 +1017,9 @@ async function run() {
           }
           if (command === 'quota_refresh') {
             const acc = await accountsManager.refreshQuota(parsed.id);
+            if (acc.quota?.models?.length) {
+              registerObservedModelsFromSource(acc.quota.models);
+            }
             const refreshNowMs = Date.now();
             const overview = accountsManager.getAccountQuotaOverview(acc, { nowMs: refreshNowMs });
             const projected = projectAccountForIpcNormalized(acc, {
@@ -1199,6 +1220,11 @@ async function run() {
 
           if (command === 'quota_refresh_all') {
             const result = await accountsManager.refreshAllQuotas();
+            for (const refreshed of result.accounts) {
+              if (refreshed.quota?.models?.length) {
+                registerObservedModelsFromSource(refreshed.quota.models);
+              }
+            }
             const accounts = result.accounts.map(account => projectAccountForIpcNormalized(account));
             reply({ ok: result.failures.length === 0,
               accounts,
