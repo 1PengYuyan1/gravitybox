@@ -9,9 +9,12 @@ export class BundleCache {
   private pending=new Map<string,Promise<{hash:string;source:string|undefined;cacheHit:boolean}>>();
   async key(app:string,pid:number,version:string,origin:string){
     const rows=[];
-    for(const name of ['app.asar','app.asar.unpacked']){
+    for(const name of ['app.asar','app.asar.unpacked','bin/language_server']){
       try{const s=await stat(join(app,'Contents/Resources',name));rows.push([name,s.dev,s.ino,s.size,s.mtimeMs,s.ctimeMs]);}
-      catch(error){if(name==='app.asar'||(error as NodeJS.ErrnoException).code!=='ENOENT')throw error;}
+      catch(error){
+        const code=(error as NodeJS.ErrnoException).code;
+        if(name==='app.asar'||(code!=='ENOENT'&&code!=='ENOTDIR'))throw error;
+      }
     }
     return JSON.stringify([app,pid,version,new URL(origin).origin,rows]);
   }

@@ -3,10 +3,11 @@ import { spawn, execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { readFile, mkdir, lstat, unlink, readdir } from 'node:fs/promises';
 import { join } from 'node:path';
+import { homedir } from 'node:os';
 import { randomUUID, createHash } from 'node:crypto';
-import { atomicJson, atomicText } from './files.js';
+import { atomicJson, atomicText, sanitizeError } from './files.js';
 import { withProcessLease } from './process-lock.js';
-import { AccountsManager, SystemKeychainAdapter, syncAccountToKeychain, type KeychainAdapter, type Account } from './accounts.js';
+import { AccountsManager, SystemKeychainAdapter, buildGoOauthPayload, syncAccountToKeychain, type KeychainAdapter, type Account } from './accounts.js';
 import { ProtobufWriter as Writer } from './protobuf.js';
 import { replaceTopicRow } from './account-state.js';
 export { replaceTopicRow } from './account-state.js';
@@ -109,9 +110,11 @@ export class DatabaseTransaction {
 function nextRows(before: Rows, acc: Account): Rows {
   const token = acc.token;
   const personal = /@(gmail|outlook|hotmail|qq|163)\.com$/i.test(acc.email);
+  const accessToken = token.access_token && token.access_token !== 'pending_refresh' ? token.access_token : '';
+  const expirySec = Number.isFinite(token.expiry_timestamp) && token.expiry_timestamp > 0 ? Math.floor(token.expiry_timestamp) : 0;
   const payload = Buffer.concat([
-    Writer.encodeString(1, token.access_token), Writer.encodeString(2, 'Bearer'), Writer.encodeString(3, token.refresh_token),
-    Writer.encodeLengthDelimited(4, Buffer.concat([Writer.encodeVarintField(1, token.expiry_timestamp), Writer.encodeVarintField(2, 0)])),
+    Writer.encodeString(1, accessToken), Writer.encodeString(2, 'Bearer'), Writer.encodeString(3, token.refresh_token),
+    Writer.encodeLengthDelimited(4, Buffer.concat([Writer.encodeVarintField(1, expirySec), Writer.encodeVarintField(2, 0)])),
     ...(token.id_token ? [Writer.encodeString(5, token.id_token)] : []),
     Writer.encodeVarintField(6, !personal && token.is_gcp_tos ? 1 : 0),
   ]);
@@ -141,10 +144,17 @@ function sanitizeJournalRows(rows: Rows): Rows {
   return result;
 }
 
+/**
+ * 白名单制文件脱敏：除 accounts.json 仅含非敏感索引摘要外，任何其它文件路径（无论是否有 .json 后缀）
+ * 一律视为可能包含 OAuth 凭据并彻底脱敏。
+ */
+function isNonSensitiveIndexFile(filePath: string): boolean {
+  return filePath.endsWith('/accounts.json') || filePath === 'accounts.json';
+}
+
 function sanitizeJournalFiles(files: SavedFile[]): SavedFile[] {
   return (files || []).map(f => {
-    const isAccountFile = f.path.includes('/accounts/') || (!f.path.endsWith('accounts.json') && f.path.endsWith('.json'));
-    if (isAccountFile) {
+    if (!isNonSensitiveIndexFile(f.path)) {
       return {
         path: f.path,
         before: '[REDACTED_ACCOUNT]',
@@ -161,12 +171,77 @@ export class AccountSwitchService {
   private target: ApplicationTarget;
   constructor(private manager: AccountsManager, private options: {
     stateDir: string; profile: string; keychain?: KeychainAdapter; channel?: ApplicationChannel; target?: ApplicationTarget;
+    homeDir?: string; geminiDir?: string;
     isRunning?: () => Promise<boolean>; // Isolated tests only; never accepted over IPC.
     databaseFactory?: (path: string) => DatabaseTransaction; // Fault injection, never accepted over IPC.
   }) {
     this.keychain = options.keychain ?? new SystemKeychainAdapter();
     this.target = options.target ?? applicationTarget(options.channel ?? 'stable', undefined, { profile: options.profile });
     this.journalPath = join(options.stateDir, 'account-switch-journal-stable.json');
+  }
+
+  private getCliCredentialPaths(): string[] {
+    const baseGeminiDir = this.options.geminiDir
+      ?? (this.options.homeDir ? join(this.options.homeDir, '.gemini') : undefined)
+      ?? (this.options.stateDir === join(homedir(), 'Library', 'Application Support', 'GravityBox') ? join(homedir(), '.gemini') : undefined);
+    if (!baseGeminiDir) return [];
+    return [
+      join(baseGeminiDir, 'antigravity-cli', 'antigravity-oauth-token'),
+      join(baseGeminiDir, 'jetski-standalone-oauth-token'),
+    ];
+  }
+
+  /**
+   * 附属同步本机已存在的同源 agy CLI 凭据文件（非侵入：文件不存在绝不创建；不进入 journal.files 严格摘要锁）。
+   */
+  private async syncExistingCliCredentials(payloadJson: string | null): Promise<{ syncedPaths: string[]; warnings: string[] }> {
+    const syncedPaths: string[] = [];
+    const warnings: string[] = [];
+    if (!payloadJson) return { syncedPaths, warnings };
+    for (const cliPath of this.getCliCredentialPaths()) {
+      try {
+        const info = await lstat(cliPath).catch((err: NodeJS.ErrnoException) => {
+          if (err?.code === 'ENOENT') return null;
+          throw err;
+        });
+        if (!info) continue;
+        if (!info.isFile() || info.isSymbolicLink() || info.uid !== process.getuid?.()) {
+          warnings.push(`${cliPath}: skipped non-regular or non-user file`);
+          continue;
+        }
+        await atomicText(cliPath, payloadJson.endsWith('\n') ? payloadJson : `${payloadJson}\n`);
+        syncedPaths.push(cliPath);
+      } catch (error) {
+        warnings.push(sanitizeError((error as Error)?.message ?? String(error)));
+      }
+    }
+    return { syncedPaths, warnings };
+  }
+
+  private async resolveRollbackCliPayload(journal: Journal): Promise<string | null> {
+    if (typeof journal.keychainBefore === 'string' && journal.keychainBefore.startsWith('go-keyring-base64:')) {
+      try {
+        const raw = Buffer.from(journal.keychainBefore.slice('go-keyring-base64:'.length), 'base64').toString('utf8');
+        const parsed = JSON.parse(raw);
+        if (parsed && typeof parsed === 'object' && parsed.token && typeof parsed.token.refresh_token === 'string' && parsed.token.refresh_token) {
+          return JSON.stringify(parsed);
+        }
+      } catch {}
+    }
+    const indexSnapshot = (journal.files || []).find(f => isNonSensitiveIndexFile(f.path));
+    if (indexSnapshot?.before) {
+      try {
+        const prevIndex = JSON.parse(indexSnapshot.before) as { current_account_id?: string | null };
+        const prevId = prevIndex?.current_account_id;
+        if (typeof prevId === 'string' && prevId) {
+          const prevAcc = await this.manager.getAccount(prevId).catch(() => null);
+          if (prevAcc?.token?.refresh_token) {
+            return buildGoOauthPayload(prevAcc);
+          }
+        }
+      } catch {}
+    }
+    return null;
   }
 
   setTarget(target: ApplicationTarget) {
@@ -233,6 +308,10 @@ export class AccountSwitchService {
       await atomicJson(this.journalPath, committed ? this.completedRollback(original) : original);
       await unlink(this.rollbackPath);
       this.manager.invalidateRuntimeCaches?.();
+      if (committed) {
+        const rollbackCliPayload = await this.resolveRollbackCliPayload(original);
+        await this.syncExistingCliCredentials(rollbackCliPayload);
+      }
       return committed ? 'rolled-back' : 'restored';
     } finally { await tx?.close(); }
   }
@@ -324,7 +403,17 @@ export class AccountSwitchService {
       if (previous && !['complete', 'rolled-back', 'cleared'].includes(previous.status)) throw new Error(bt('switch.err.previous_incomplete'));
       const acc = await this.manager.getAccount(id);
       if (!acc || acc.disabled || acc.validation_blocked) throw new Error(bt('switch.err.account_unavailable'));
-      if (!acc.token.access_token || acc.token.access_token === 'pending_refresh' || acc.token.expiry_timestamp <= Date.now() / 1000 + 30) throw new Error(bt('switch.err.refresh_credentials_first'));
+      if (!acc.token?.refresh_token) throw new Error(bt('switch.err.refresh_credentials_first'));
+      // Best-effort harvest of outgoing account's fresher local session token before overwriting host credentials.
+      const preHarvestIndex = await this.manager.loadIndex().catch(() => null);
+      const outgoingId = preHarvestIndex?.current_account_id;
+      if (outgoingId && outgoingId !== id && typeof this.manager.harvestTokenForAccountId === 'function') {
+        await this.manager.harvestTokenForAccountId(outgoingId, {
+          keychain: this.keychain,
+          homeDir: this.options.homeDir,
+          profileDir: this.options.profile,
+        }).catch(() => {});
+      }
       const db = join(this.options.profile, 'User', 'globalStorage', 'state.vscdb');
       const hasDb = await this.optionalRegular(db);
       const transaction = hasDb ? this.database(db) : undefined;
@@ -374,11 +463,17 @@ export class AccountSwitchService {
           files: filesWithDigest.map(f => ({
             path: f.path,
             before: f.before,
-            after: f.path.includes('/accounts/') ? '[REDACTED_ACCOUNT]' : f.after,
+            after: !isNonSensitiveIndexFile(f.path) ? '[REDACTED_ACCOUNT]' : f.after,
             afterDigest: f.afterDigest,
           })),
         });
-        return { switchedTo: acc.email, message: bt('switch.msg.switched') };
+        const cliSync = await this.syncExistingCliCredentials(buildGoOauthPayload(acc));
+        return {
+          switchedTo: acc.email,
+          message: bt('switch.msg.switched'),
+          ...(cliSync.syncedPaths.length ? { cliSynced: cliSync.syncedPaths.length } : {}),
+          ...(cliSync.warnings.length ? { cliWarnings: cliSync.warnings } : {}),
+        };
       } catch (error) {
         if (!committed) {
           await transaction?.finish(false).catch(() => {});
@@ -455,13 +550,21 @@ export class AccountSwitchService {
         record.phase = 'committed'; await atomicJson(this.rollbackPath, record);
         await atomicJson(this.journalPath, this.completedRollback(journal));
         await unlink(this.rollbackPath);
-        return { message: bt('switch.msg.restored_previous') };
+        const rollbackCliPayload = await this.resolveRollbackCliPayload(journal);
+        const cliSync = await this.syncExistingCliCredentials(rollbackCliPayload);
+        return {
+          message: bt('switch.msg.restored_previous'),
+          ...(cliSync.syncedPaths.length ? { cliSynced: cliSync.syncedPaths.length } : {}),
+          ...(cliSync.warnings.length ? { cliWarnings: cliSync.warnings } : {}),
+        };
       } catch (error) {
         await transaction?.finish(false).catch(() => {});
         await transaction?.close();
         if (record) {
           try {
-            if (await this.reconcileRollback() === 'rolled-back') return { message: bt('switch.msg.restored_previous') };
+            if (await this.reconcileRollback() === 'rolled-back') {
+              return { message: bt('switch.msg.restored_previous') };
+            }
           } catch {
             throw new Error(bt('switch.err.rollback_blocked'));
           }
