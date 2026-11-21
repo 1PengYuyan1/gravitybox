@@ -989,6 +989,7 @@ final class DashboardPage: NSObject {
     }
 
     static func syncCoreGroupBars(_ groups: [QuotaPresentation.QuotaGroup], into stack: NSStackView, compact: Bool = true, minBarHeight: CGFloat? = nil) {
+        let now = Date()
         var rows: [[QuotaBarSpec]] = []
         var pendingSingle: QuotaBarSpec? = nil
         for group in groups {
@@ -996,10 +997,10 @@ final class DashboardPage: NSObject {
                 QuotaBarSpec(
                     title: group.barTitle(for: win),
                     percentage: win.percentage,
-                    resetText: win.percentage == nil ? "" : win.resetText,
+                    resetText: win.percentage == nil ? "" : win.effectiveResetText(at: now),
                     icon: group.iconName(for: win),
                     placeholder: win.placeholder(availability: group.availability),
-                    stale: win.stale
+                    stale: win.effectiveStale(at: now)
                 )
             }
             guard !specs.isEmpty else { continue }
@@ -1030,6 +1031,7 @@ final class DashboardPage: NSObject {
     }
 
     static func syncStandaloneGroupBars(_ groups: [QuotaPresentation.QuotaGroup], into stack: NSStackView, compact: Bool = true, minBarHeight: CGFloat? = nil) {
+        let now = Date()
         var specs: [QuotaBarSpec] = []
         for group in groups {
             if group.windows.isEmpty {
@@ -1047,10 +1049,10 @@ final class DashboardPage: NSObject {
                     specs.append(QuotaBarSpec(
                         title: group.barTitle(for: win),
                         percentage: win.percentage,
-                        resetText: win.percentage == nil ? "" : win.resetText,
+                        resetText: win.percentage == nil ? "" : win.effectiveResetText(at: now),
                         icon: group.iconName(for: win),
                         placeholder: win.placeholder(availability: group.availability),
-                        stale: win.stale
+                        stale: win.effectiveStale(at: now)
                     ))
                 }
             }

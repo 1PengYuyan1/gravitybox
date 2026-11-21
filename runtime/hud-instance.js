@@ -1205,7 +1205,7 @@ export class HudInstance {
 
           <span class="hud-seg-sep" aria-hidden="true"></span>
 
-          <!-- 分段 3: 当前上下文实况 (左侧显示上下文压缩次数徽章，0 次隐藏，>=1 次显示；多模型/Orchestrator 时显示模型短标) -->
+          <!-- 分段 3: 当前上下文实况 (左侧显示当前展示模型的上下文压缩次数徽章，0 次隐藏，>=1 次显示；多模型/Orchestrator 时显示模型短标) -->
           <button type="button" class="capsule capsule-context" data-capsule-id="context" aria-haspopup="dialog" aria-expanded="false" aria-label="${this.t('capsuleContextLabel')}">
             <span class="hud-compaction-badge" id="hud-compaction-badge" hidden></span>
             <span class="hud-ctx-model-tag" id="hud-ctx-model-tag" hidden><span class="hud-ctx-model-full" id="hud-ctx-model-full"></span><span class="hud-ctx-model-short" id="hud-ctx-model-short"></span></span>
@@ -2191,7 +2191,22 @@ export class HudInstance {
       c.modelShortLabel || formatConciseStageModelName(c.modelDisplayName || '') || c.modelId || ''
     ).trim();
     const showMultiModel = !unavailable && Boolean(c.isMultiModel && visibleStages.length > 0 && rawShortLabel);
-    const compCount = unavailable ? 0 : Math.max(0, Math.floor(Number(s.compactionCount) || 0));
+    const activeStageObj = stages.find((st) => st && st.isActive);
+    const sessionCompCount = unavailable ? 0 : Math.max(0, Math.floor(Number(s.compactionCount) || 0));
+    const hasPerModelCompaction =
+      isRawNumber(c.activeModelCompactionCount) ||
+      stages.some((st) => st && isRawNumber(st.compactionCount));
+    const effectiveModelCompCount = unavailable
+      ? 0
+      : showMultiModel && hasPerModelCompaction
+      ? Math.max(
+          0,
+          Math.floor(
+            Number(c.activeModelCompactionCount ?? activeStageObj?.compactionCount) || 0
+          )
+        )
+      : sessionCompCount;
+    const compCount = effectiveModelCompCount;
     if (compBadgeEl) {
       compBadgeEl.classList?.remove('is-compaction-low', 'is-compaction-warn', 'is-compaction-danger');
       if (compCount >= 1) {
@@ -2499,19 +2514,7 @@ export class HudInstance {
     setTxt('#lbl-seg-msg', this.t('lblSegMsg'));
     setTxt('#val-seg-msg', hasContextUsage ? formatTokenCount(b.latestOutputTokens ?? b.messageTokens, b.latestOutputFormatted || b.messageTokensCompact) : '—');
 
-    const activeStageObj = stages.find((st) => st && st.isActive);
-    const hasPerModelCompaction =
-      isRawNumber(c.activeModelCompactionCount) ||
-      stages.some((st) => st && isRawNumber(st.compactionCount));
-    const effectivePeakCompCount =
-      showMultiModel && hasPerModelCompaction
-        ? Math.max(
-            0,
-            Math.floor(
-              Number(c.activeModelCompactionCount ?? activeStageObj?.compactionCount) || 0
-            )
-          )
-        : compCount;
+    const effectivePeakCompCount = effectiveModelCompCount;
     const peakRow = q('#row-ctx-peak');
     if (peakRow) {
       setTxt('#lbl-ctx-peak', showMultiModel ? this.t('lblCtxModelPeak') : this.t('lblCtxPeak'));
@@ -2596,18 +2599,10 @@ export class HudInstance {
         : '';
       let compNote = '';
       if (compCount >= 1) {
-        const useSessionNote = showMultiModel && effectivePeakCompCount !== compCount;
-        if (useSessionNote) {
-          compNote =
-            compCount === 1
-              ? this.t('ariaContextSessionCompNoteOnce')
-              : this.t('ariaContextSessionCompNote', { count: formatBarCompactCount(compCount) });
-        } else {
-          compNote =
-            compCount === 1
-              ? this.t('ariaContextCompNoteOnce')
-              : this.t('ariaContextCompNote', { count: formatBarCompactCount(compCount) });
-        }
+        compNote =
+          compCount === 1
+            ? this.t('ariaContextCompNoteOnce')
+            : this.t('ariaContextCompNote', { count: formatBarCompactCount(compCount) });
       }
       capContext.setAttribute(
         'aria-label',
@@ -2622,7 +2617,7 @@ export class HudInstance {
       popSession.setAttribute('aria-label', this.t('popoverSessionAria'));
       popSession.setAttribute(
         'data-exact-summary',
-        `turns=${rawTurns}; steps=${rawSteps}; modelSec=${Number(liveModelSec || 0).toFixed(2)}; toolSec=${Number(liveToolSec || 0).toFixed(2)}; ttftSec=${Number(s.averageTtftSeconds || 0).toFixed(2)}; tps=${Number(s.outputTps || 0).toFixed(2)}`
+        `turns=${rawTurns}; steps=${rawSteps}; modelSec=${Number(liveModelSec || 0).toFixed(2)}; toolSec=${Number(liveToolSec || 0).toFixed(2)}; ttftSec=${Number(s.averageTtftSeconds || 0).toFixed(2)}; tps=${Number(s.outputTps || 0).toFixed(2)}; compactions=${sessionCompCount}`
       );
     }
     if (popTokens) {
@@ -2636,7 +2631,7 @@ export class HudInstance {
       popContext.setAttribute('aria-label', this.t('popoverContextAria'));
       popContext.setAttribute(
         'data-exact-summary',
-        `used=${Math.floor(Number(c.usedTokens) || 0)}; capacity=${Math.floor(Number(c.capacityTokens) || 0)}; peak=${Math.floor(Number(c.peakContextTokens ?? c.usedTokens) || 0)}; compactions=${compCount}; modelCompactions=${showMultiModel ? effectivePeakCompCount : compCount}; model=${c.modelDisplayName || c.modelId || ''}`
+        `used=${Math.floor(Number(c.usedTokens) || 0)}; capacity=${Math.floor(Number(c.capacityTokens) || 0)}; peak=${Math.floor(Number(c.peakContextTokens ?? c.usedTokens) || 0)}; compactions=${sessionCompCount}; modelCompactions=${effectivePeakCompCount}; model=${c.modelDisplayName || c.modelId || ''}`
       );
     }
 

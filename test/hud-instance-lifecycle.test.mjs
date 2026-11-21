@@ -432,6 +432,7 @@ describe('HUD raw 数值精度与缺值展示', () => {
       assert.equal(text('#val-ttft-latest'), languageMode === 'en' ? '1.24s' : '1.24 秒');
       assert.equal(text('#lbl-tps-latest'), languageMode === 'en' ? 'Latest Step TPS' : '最近一步 TPS');
       assert.equal(text('#val-tps-latest'), '171 tok/s');
+      assert.equal(instance.shadow.querySelector('#row-session-compactions'), null);
       assert.equal(text('#val-turn-dur'), languageMode === 'en' ? '18s' : '18秒');
       assert.equal(text('#val-ttft'), languageMode === 'en' ? '3.85s' : '3.85 秒');
       assert.equal(text('#val-model-dur'), languageMode === 'en' ? '22m28s' : '22分28秒');
@@ -484,6 +485,7 @@ describe('HUD raw 数值精度与缺值展示', () => {
       }, languageMode);
       assert.equal(zeroComp.instance.shadow.querySelector('#hud-compaction-badge').hasAttribute('hidden'), true);
       assert.equal(zeroComp.text('#hud-compaction-badge'), '');
+      assert.equal(zeroComp.instance.shadow.querySelector('#row-session-compactions'), null);
       assert.equal(zeroComp.instance.shadow.querySelector('.capsule-context').classList.contains('has-compaction'), false);
       assert.equal(zeroComp.text('#hud-txt-session .hud-turns'), languageMode === 'en' ? '1.5KT ' : '1.5K 轮 ');
       assert.equal(zeroComp.text('#pop-session-badge'), languageMode === 'en' ? '1.5K turns 2.5M steps' : '1.5K 轮 2.5M 步');
@@ -2771,7 +2773,7 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
     });
 
     for (const lang of ['zh', 'en']) {
-      // A. 当前活跃 Carbon 自身 0 次压缩：底部会话胶囊仍显示总压缩次数 6 (danger)，但 #val-ctx-peak 不得误挂历史模型压缩后缀
+      // A. 当前活跃 Carbon/Neon 自身 0 次压缩：常驻胶囊必须隐藏徽标（不得误挂搭档/历史模型压缩数），会话总压缩数 6 展示于对话统计弹窗
       const instZeroActive = new HudInstance(`ctx-stage-comp-0-${lang}`, { languageMode: lang });
       instZeroActive.shadow = new FakeShadowRoot('open', null);
       instZeroActive.shadow.innerHTML = instZeroActive.buildHudHtml();
@@ -2779,9 +2781,18 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
       instZeroActive.applyMetricsToDom(payload0);
 
       const sessionBadge = instZeroActive.shadow.querySelector('#hud-compaction-badge');
-      assert.equal(sessionBadge.hasAttribute('hidden'), false);
-      assert.equal(sessionBadge.getAttribute('data-compaction-tier'), 'danger');
-      assert.equal(sessionBadge.textContent, '6');
+      assert.equal(sessionBadge.hasAttribute('hidden'), true, '当前展示模型未压缩时，常驻胶囊不得显示其他模型的压缩徽标');
+      assert.equal(sessionBadge.textContent, '');
+      assert.equal(instZeroActive.shadow.querySelector('.capsule-context').classList.contains('has-compaction'), false);
+      assert.equal(
+        instZeroActive.shadow.querySelector('.capsule-context').getAttribute('aria-label').includes(lang === 'en' ? 'Compacted' : '已压缩'),
+        false
+      );
+      assert.equal(instZeroActive.shadow.querySelector('#row-session-compactions'), null);
+      assert.equal(
+        instZeroActive.shadow.querySelector('#hud-popover-session').getAttribute('data-exact-summary').includes('compactions=6'),
+        true
+      );
       assert.equal(
         instZeroActive.shadow.querySelector('#val-ctx-peak').textContent,
         '256K tok',
@@ -2850,12 +2861,15 @@ describe('HudInstance 与 AntigravityHudManager 生产模块生命周期、垂�
       assert.equal(findByClass(stageNodes[3], 'hud-stage-compaction')?.getAttribute('data-compaction-tier'), 'danger');
       assert.equal(findByClass(stageNodes[3], 'hud-stage-compaction')?.textContent, '3');
 
-      // B. 当前活跃 Carbon 自身发生 2 次压缩：#val-ctx-peak 仅展示当前模型的 2 次，且活跃行同时并存“当前”与数字圆圈“2”
+      // B. 当前活跃模型自身发生 2 次压缩：常驻胶囊与 #val-ctx-peak 均仅反映当前模型的 2 次，而对话统计弹窗展示全会话总计 8 次
       const instActiveComp = new HudInstance(`ctx-stage-comp-2-${lang}`, { languageMode: lang });
       instActiveComp.shadow = new FakeShadowRoot('open', null);
       instActiveComp.shadow.innerHTML = instActiveComp.buildHudHtml();
       const payload2 = buildMultiCompMetrics(2);
       instActiveComp.applyMetricsToDom(payload2);
+      assert.equal(instActiveComp.shadow.querySelector('#hud-compaction-badge').hasAttribute('hidden'), false);
+      assert.equal(instActiveComp.shadow.querySelector('#hud-compaction-badge').getAttribute('data-compaction-tier'), 'warn');
+      assert.equal(instActiveComp.shadow.querySelector('#hud-compaction-badge').textContent, '2');
       assert.equal(
         instActiveComp.shadow.querySelector('#val-ctx-peak').textContent,
         lang === 'en' ? '256K tok (2x compacted)' : '256K tok (已压缩 2 次)'

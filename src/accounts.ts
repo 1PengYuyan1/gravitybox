@@ -3,7 +3,7 @@ import { bt } from './i18n.js';
 import { inspectBundle } from './discovery.js';
 import { readFileSync, statSync } from 'node:fs';
 import { lstat, mkdir, readFile, readdir, unlink } from 'node:fs/promises';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { randomUUID, createHash } from 'node:crypto';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -44,19 +44,23 @@ import {
 } from './quota.js';
 import {
   CodedAccountError,
+  MISSING_OAUTH_CLIENT_PATTERN,
   accountCredentialReadiness,
   accountErrorCode,
   buildAccountQuotaOverview,
   cleanAndLocalizeRefreshError,
   computeAccountRemaining,
   computeAccountRevision,
+  computeStandbyRefreshStatus,
   endpointHost,
   endpointPriority,
+  evaluateStandbyCandidate,
   familyLabel,
   formatResetCountdown,
   fuseQuotaData,
   generateDeviceProfile,
   groupToQuotaGroup,
+  hasExpiredQuotaWindow,
   localizeStoredQuotaError,
   modelQuotaFromNormalized,
   normalizedModelFromStored,
@@ -82,6 +86,9 @@ import {
   type QuotaOverview,
   type QuotaOverviewWindowStatus,
   type QuotaRefreshState,
+  type StandbyCandidateEvaluation,
+  type StandbyRefreshMode,
+  type StandbyRefreshStatus,
   type TokenData,
 } from './account-quota.js';
 import {
@@ -111,14 +118,17 @@ export {
   cleanAndLocalizeRefreshError,
   CodedAccountError,
   computeAccountRevision,
+  computeStandbyRefreshStatus,
   endpointHost,
   endpointPriority,
+  evaluateStandbyCandidate,
   familyLabel,
   formatResetCountdown,
   generateDeviceProfile,
   localizeStoredQuotaError,
   type AccountErrorCode,
   groupToQuotaGroup,
+  hasExpiredQuotaWindow,
   modelQuotaFromNormalized,
   normalizedModelFromStored,
   pickNextReset,
@@ -142,6 +152,9 @@ export {
   type QuotaOverview,
   type QuotaOverviewWindowStatus,
   type QuotaRefreshState,
+  type StandbyCandidateEvaluation,
+  type StandbyRefreshMode,
+  type StandbyRefreshStatus,
   type TokenData,
   CLOUD_CODE_LOAD_PROJECT_ENDPOINTS,
   QUOTA_API_ENDPOINTS,
@@ -162,8 +175,10 @@ export class AccountsManager {
   private dirReadyPromise: Promise<void> | null = null;
   private inFlightRefreshes = new Map<string, Promise<Account>>();
   private mutex = new ReentrantMutex();
-  private liveProbeCache: { status: LiveLanguageServerStatus | null; expiresAt: number } | null = null;
+  private liveProbeCache: { status: LiveLanguageServerStatus; expiresAt: number } | null = null;
   private inFlightProbe: Promise<LiveLanguageServerStatus | null> | null = null;
+  private inFlightForceProbe: Promise<LiveLanguageServerStatus | null> | null = null;
+  private probeLiveOnceOverride?: typeof probeLiveLanguageServerOnce;
   private providerOverride?: CloudProviderContext;
   private providerContextCache: { value: CloudProviderContext; expiresAt: number } | null = null;
   private inFlightProviderContext: Promise<CloudProviderContext | null> | null = null;
@@ -181,9 +196,10 @@ export class AccountsManager {
     return this.withWriteLock(action);
   }
 
-  constructor(private stateDir: string, options: { providerContext?: CloudProviderContext; target?: ApplicationTarget } = {}) {
+  constructor(private stateDir: string, options: { providerContext?: CloudProviderContext; target?: ApplicationTarget; probeLiveOnce?: typeof probeLiveLanguageServerOnce } = {}) {
     this.target = options.target ?? applicationTarget();
     this.providerOverride=options.providerContext;
+    this.probeLiveOnceOverride = options.probeLiveOnce;
     this.accountsDir = join(stateDir, 'accounts');
     this.indexPath = join(stateDir, 'accounts.json');
     this.autoSwitchPath = join(stateDir, 'auto_switch.json');
@@ -705,6 +721,34 @@ export class AccountsManager {
         const resolvedExpiresIn = explicitExpiryTs !== undefined
           ? (expiresIn ?? Math.max(0, explicitExpiryTs - now))
           : (expiresIn ?? existing.token.expires_in);
+        const refreshTokenChanged = Boolean(refreshToken && refreshToken !== existing.token.refresh_token);
+        const existingAccessValid = Boolean(
+          existing.token.access_token && existing.token.access_token !== 'pending_refresh'
+        );
+        const incomingAccessValid = Boolean(accessToken && accessToken !== 'pending_refresh');
+        // Never regress a fresher valid access_token on the same refresh_token with an older/expired disk snapshot.
+        const preserveExistingAccess =
+          !refreshTokenChanged &&
+          existingAccessValid &&
+          Number.isFinite(existing.token.expiry_timestamp) &&
+          (!incomingAccessValid || existing.token.expiry_timestamp > resolvedExpiryTs);
+        const finalAccessToken = preserveExistingAccess
+          ? existing.token.access_token
+          : (accessToken ?? existing.token.access_token);
+        const finalExpiryTs = preserveExistingAccess ? existing.token.expiry_timestamp : resolvedExpiryTs;
+        const finalExpiresIn = preserveExistingAccess ? existing.token.expires_in : resolvedExpiresIn;
+        const hadMissingOAuthClientError =
+          existing.quota_refresh_error_code === 'missing_oauth_client' ||
+          (typeof existing.quota_refresh_error === 'string' && MISSING_OAUTH_CLIENT_PATTERN.test(existing.quota_refresh_error.trim()));
+        const hasUsableAccessToken = Boolean(
+          finalAccessToken &&
+          finalAccessToken !== 'pending_refresh' &&
+          Number.isFinite(finalExpiryTs) &&
+          finalExpiryTs > now + 300
+        );
+        const oauthConfigured = Boolean(getGoogleClientId() && getGoogleClientSecret());
+        const shouldClearQuotaRefreshError =
+          hasNewCreds && (!hadMissingOAuthClientError || refreshTokenChanged || hasUsableAccessToken || oauthConfigured);
         account = {
           ...existing,
           name: name !== undefined ? name : existing.name,
@@ -712,9 +756,11 @@ export class AccountsManager {
           disabled: false,
           disabled_reason: null,
           disabled_at: null,
-          ...(hasNewCreds ? {
+          ...(shouldClearQuotaRefreshError ? {
             quota_refresh_error: null,
             quota_refresh_error_code: null,
+          } : {}),
+          ...(hasNewCreds ? {
             validation_blocked: false,
             validation_blocked_until: null,
             validation_blocked_reason: null,
@@ -723,9 +769,9 @@ export class AccountsManager {
           token: {
             ...existing.token,
             refresh_token: refreshToken || existing.token.refresh_token,
-            access_token: accessToken ?? existing.token.access_token,
-            expires_in: resolvedExpiresIn,
-            expiry_timestamp: resolvedExpiryTs,
+            access_token: finalAccessToken,
+            expires_in: finalExpiresIn,
+            expiry_timestamp: finalExpiryTs,
             token_type: typeof tokenType === 'string' && tokenType ? tokenType : (existing.token.token_type || 'Bearer'),
             email: email || existing.token.email || existing.email,
             project_id: projectId !== undefined ? projectId : existing.token.project_id,
@@ -936,20 +982,41 @@ export class AccountsManager {
           skipped.push({ source, reason: bt('accounts.import.err.missing_refresh_token') });
           continue;
         }
+        const parseOptionalCleanString = (val: unknown, maxLen: number): string | null | undefined => {
+          if (val === undefined) return undefined;
+          if (val === null) return null;
+          if (typeof val !== 'string' || /[\x00]/.test(val)) return undefined;
+          const trimmed = val.trim();
+          if (!trimmed) return null;
+          return trimmed.slice(0, maxLen);
+        };
         const rawAccess = data.accessToken ?? data.access_token ?? data.token?.access_token ?? data.token?.accessToken;
-        const accessToken = typeof rawAccess === 'string' && rawAccess.trim() ? rawAccess.trim() : 'pending_refresh';
+        const cleanAccess = typeof rawAccess === 'string' && !/[\r\n\x00]/.test(rawAccess) ? rawAccess.trim().slice(0, 8192) : '';
+        const accessToken = cleanAccess || 'pending_refresh';
         const rawExpiresIn = data.expiresIn ?? data.expires_in ?? data.token?.expires_in ?? data.token?.expiresIn;
         const expiresIn = typeof rawExpiresIn === 'number' && Number.isFinite(rawExpiresIn) && rawExpiresIn >= 0 ? Math.floor(rawExpiresIn) : undefined;
         const explicitExpiryTs = AccountsManager.parseExplicitExpiryTimestamp(
           data.expiryTimestamp ?? data.expiry_timestamp ?? data.token?.expiry_timestamp ?? data.token?.expiryTimestamp,
           data.expiry ?? data.token?.expiry
         );
-        const customLabel = data.custom_label !== undefined ? data.custom_label : data.customLabel;
-        const name = typeof data.name === 'string' ? data.name.trim() || null : (data.name === null ? null : undefined);
-        const projectId = data.projectId !== undefined ? data.projectId : (data.project_id !== undefined ? data.project_id : (data.token?.project_id !== undefined ? data.token.project_id : data.token?.projectId));
-        const oauthClientKey = data.oauthClientKey !== undefined ? data.oauthClientKey : (data.oauth_client_key !== undefined ? data.oauth_client_key : (data.token?.oauth_client_key !== undefined ? data.token.oauth_client_key : data.token?.oauthClientKey));
+        const customLabel = parseOptionalCleanString(
+          data.custom_label !== undefined ? data.custom_label : data.customLabel,
+          80
+        );
+        const name = parseOptionalCleanString(data.name, 80);
+        const projectId = parseOptionalCleanString(
+          data.projectId !== undefined ? data.projectId : (data.project_id !== undefined ? data.project_id : (data.token?.project_id !== undefined ? data.token.project_id : data.token?.projectId)),
+          256
+        );
+        const oauthClientKey = parseOptionalCleanString(
+          data.oauthClientKey !== undefined ? data.oauthClientKey : (data.oauth_client_key !== undefined ? data.oauth_client_key : (data.token?.oauth_client_key !== undefined ? data.token.oauth_client_key : data.token?.oauthClientKey)),
+          128
+        );
         const isGcpTos = data.isGcpTos !== undefined ? data.isGcpTos : (data.is_gcp_tos !== undefined ? data.is_gcp_tos : (data.token?.is_gcp_tos !== undefined ? data.token.is_gcp_tos : data.token?.isGcpTos));
-        const idToken = data.idToken !== undefined ? data.idToken : (data.id_token !== undefined ? data.id_token : (data.token?.id_token !== undefined ? data.token.id_token : data.token?.idToken));
+        const idToken = parseOptionalCleanString(
+          data.idToken !== undefined ? data.idToken : (data.id_token !== undefined ? data.id_token : (data.token?.id_token !== undefined ? data.token.id_token : data.token?.idToken)),
+          16384
+        );
         const tokenType = data.token_type ?? data.tokenType ?? data.token?.token_type ?? data.token?.tokenType;
 
         const emailKey = email.toLowerCase();
@@ -960,12 +1027,24 @@ export class AccountsManager {
 
         let toSave: Account;
         if (existing && existingSummary) {
-          const resolvedExpiryTs = explicitExpiryTs !== undefined
-            ? explicitExpiryTs
-            : (expiresIn !== undefined ? now + expiresIn : existing.token.expiry_timestamp);
-          const resolvedExpiresIn = explicitExpiryTs !== undefined
-            ? Math.max(0, explicitExpiryTs - now)
-            : (expiresIn ?? existing.token.expires_in);
+          const refreshTokenChanged = refreshToken !== existing.token.refresh_token;
+          const nextAccessToken = rawAccess !== undefined
+            ? accessToken
+            : (refreshTokenChanged ? 'pending_refresh' : existing.token.access_token);
+          const forceResetExpiry =
+            nextAccessToken === 'pending_refresh' &&
+            explicitExpiryTs === undefined &&
+            expiresIn === undefined;
+          const resolvedExpiryTs = forceResetExpiry
+            ? 0
+            : explicitExpiryTs !== undefined
+              ? explicitExpiryTs
+              : (expiresIn !== undefined ? now + expiresIn : existing.token.expiry_timestamp);
+          const resolvedExpiresIn = forceResetExpiry
+            ? 0
+            : explicitExpiryTs !== undefined
+              ? Math.max(0, explicitExpiryTs - now)
+              : (expiresIn ?? existing.token.expires_in);
           toSave = {
             ...existing,
             email: existing.email || email,
@@ -986,7 +1065,7 @@ export class AccountsManager {
             token: {
               ...existing.token,
               refresh_token: refreshToken,
-              access_token: rawAccess !== undefined ? accessToken : existing.token.access_token,
+              access_token: nextAccessToken,
               expires_in: resolvedExpiresIn,
               expiry_timestamp: resolvedExpiryTs,
               token_type: typeof tokenType === 'string' && tokenType ? tokenType : (existing.token.token_type || 'Bearer'),
@@ -1114,6 +1193,16 @@ export class AccountsManager {
       throw new Error(bt('accounts.export.err.invalid_path'));
     }
     const resolvedPath = resolve(cleanPath);
+    const resolvedStateDir = resolve(this.stateDir);
+    const relToState = relative(resolvedStateDir, resolvedPath).replaceAll('\\', '/');
+    if (
+      relToState === '' ||
+      (!relToState.startsWith('..') &&
+        !isAbsolute(relToState) &&
+        /^(?:accounts\.json|accounts(?:\/|\\|$)|config\.json|account-switch-|usage-|usage\.|rate-locks|remote_pricing\.json|api_pricing\.json|pricing_sync_state\.json|live-ide-models\.json)/i.test(relToState))
+    ) {
+      throw new Error(bt('accounts.export.err.invalid_path'));
+    }
     const uid = process.getuid?.();
     const parentDir = dirname(resolvedPath);
     const parentInfo = await lstat(parentDir).catch(() => null);
@@ -1484,13 +1573,19 @@ export class AccountsManager {
       if (acc) candidates.push(acc);
     }
 
-    // Filter valid & precompute remaining/tierRank once per candidate (避免对 Pro/Ultra 候选错用 Free/受限账号降级后的 monitoredModel)
-    const allValidScored: Array<{ acc: Account; rem: number; tierRank: number }> = [];
+    // Filter valid & evaluate each candidate across fresh / snapshot / cooldown_elapsed tiers
+    const nowMs = Date.now();
+    const staleAfterSeconds = this.getConfiguredQuotaStaleSeconds();
+    type ScoredCandidate = { acc: Account; evalResult: StandbyCandidateEvaluation; tierRank: number };
+    const allValidScored: ScoredCandidate[] = [];
     for (const acc of candidates) {
-      const rem = this.getAccountRemaining(acc, cfg.monitored_model);
-      if (rem === null || rem < cfg.candidate_min_percentage || rem <= 0) continue;
-      if (accountCredentialReadiness(acc).state === 'needs_authorization') continue;
-      allValidScored.push({ acc, rem, tierRank: this.subscriptionTierRank(acc) });
+      const evalResult = evaluateStandbyCandidate(acc, cfg.monitored_model, {
+        staleAfterSeconds,
+        nowMs,
+        minPercentage: cfg.candidate_min_percentage,
+      });
+      if (!evalResult) continue;
+      allValidScored.push({ acc, evalResult, tierRank: this.subscriptionTierRank(acc) });
     }
 
     if (allValidScored.length === 0) {
@@ -1506,9 +1601,9 @@ export class AccountsManager {
     const paidScored = allValidScored.filter(item => item.tierRank >= 2);
     const validScored = paidScored.length > 0 ? paidScored : allValidScored;
 
-    let bestItem: { acc: Account; rem: number; tierRank: number };
+    let bestItem: ScoredCandidate;
     if (cfg.strategy === 'round_robin') {
-      // 环形轮询：基于全局候选全集池 poolOrder 与游标选择下一个可用账号，杜绝双账号反复横跳振荡
+      // 环形轮询：基于全局候选全集池 poolOrder 与游标选择下一个可用账号（包含 fresh/snapshot/cooldown_elapsed）
       const poolOrder = cfg.candidate_account_ids.length > 0
         ? cfg.candidate_account_ids
         : index.accounts.map(a => a.id);
@@ -1517,7 +1612,7 @@ export class AccountsManager {
         : currentId;
       const cursorIndex = cursorId ? poolOrder.indexOf(cursorId) : -1;
       if (cursorIndex !== -1) {
-        let chosen: { acc: Account; rem: number; tierRank: number } | undefined;
+        let chosen: ScoredCandidate | undefined;
         for (let i = 1; i < poolOrder.length; i++) {
           const nextId = poolOrder[(cursorIndex + i) % poolOrder.length]!;
           if (nextId === currentId) continue;
@@ -1532,33 +1627,47 @@ export class AccountsManager {
         bestItem = validScored[0]!;
       }
     } else {
-      // Priority: 先按套餐等级（ULTRA > PRO > 待确认 > FREE）降序，同等级按剩余额度从高到低排序
+      // Priority: 先按套餐等级（ULTRA > PRO > 待确认 > FREE）降序，同等级按 fresh(rem desc) > snapshot(rem desc) > cooldown_elapsed(earliestResetMs asc)
+      const tierPriority = (tier: StandbyCandidateEvaluation['tier']): number =>
+        tier === 'fresh' ? 0 : tier === 'snapshot' ? 1 : 2;
       validScored.sort((a, b) => {
         const tierDiff = b.tierRank - a.tierRank;
         if (tierDiff !== 0) return tierDiff;
-        return b.rem - a.rem;
+        const kindDiff = tierPriority(a.evalResult.tier) - tierPriority(b.evalResult.tier);
+        if (kindDiff !== 0) return kindDiff;
+        if (a.evalResult.tier === 'cooldown_elapsed') {
+          return (a.evalResult.earliestResetMs ?? Number.MAX_SAFE_INTEGER)
+            - (b.evalResult.earliestResetMs ?? Number.MAX_SAFE_INTEGER);
+        }
+        return (b.evalResult.remaining ?? 0) - (a.evalResult.remaining ?? 0);
       });
       bestItem = validScored[0]!;
     }
 
     const best = bestItem.acc;
-    const bestRem = bestItem.rem;
+    const bestRem = bestItem.evalResult.remaining ?? 0;
     const bestDisplay = best.name ? `${best.name} (${best.email})` : best.email;
     // 当前为 PRO/ULTRA 而唯一候选为 FREE 时，除非当前账号已彻底耗尽（0%），否则不主动触发向免费账号的降级推荐
     const isDowngradeToFree = this.subscriptionTierRank(currentAccount) >= 2 && this.subscriptionTierRank(best) < 2;
     const effectiveShouldSwitch = isLow && (!isDowngradeToFree || (currentRem !== null && currentRem <= 0));
 
+    const switchReason = !effectiveShouldSwitch
+      ? isLow && isDowngradeToFree
+        ? bt('accounts.recommend.only_free')
+        : currentRem === null
+        ? bt('accounts.recommend.unknown')
+        : bt('accounts.recommend.sufficient', { currentRem })
+      : bestItem.evalResult.tier === 'cooldown_elapsed'
+      ? bt('accounts.recommend.should_switch_reset', { currentRem, bestDisplay })
+      : bestItem.evalResult.tier === 'snapshot'
+      ? bt('accounts.recommend.should_switch_snapshot', { currentRem, bestDisplay, bestRem })
+      : bt('accounts.recommend.should_switch', { currentRem, bestDisplay, bestRem });
+
     return {
       currentAccount,
       bestCandidate: best,
       shouldSwitch: effectiveShouldSwitch,
-      reason: effectiveShouldSwitch
-        ? bt('accounts.recommend.should_switch', { currentRem, bestDisplay, bestRem })
-        : isLow && isDowngradeToFree
-        ? bt('accounts.recommend.only_free')
-        : currentRem === null
-        ? bt('accounts.recommend.unknown')
-        : bt('accounts.recommend.sufficient', { currentRem }),
+      reason: switchReason,
     };
   }
 
@@ -1568,14 +1677,16 @@ export class AccountsManager {
   async probeLiveLanguageServer(fetchImpl: typeof fetch = globalThis.fetch, options: { forceRefresh?: boolean } = {}): Promise<LiveLanguageServerStatus | null> {
     if (process.env.GRAVITYBOX_PROBE_LS === 'false') return null;
     const now = Date.now();
-    if (fetchImpl === globalThis.fetch && this.liveProbeCache && now < (options.forceRefresh ? this.liveProbeCache.expiresAt - 1300 : this.liveProbeCache.expiresAt)) {
+    const forceRefresh = options.forceRefresh === true;
+    if (fetchImpl === globalThis.fetch && !forceRefresh && this.liveProbeCache && now < this.liveProbeCache.expiresAt) {
       return this.liveProbeCache.status;
     }
-    if (fetchImpl === globalThis.fetch && this.inFlightProbe) {
-      return await this.inFlightProbe;
+    if (fetchImpl === globalThis.fetch) {
+      const activeFlight = forceRefresh ? this.inFlightForceProbe : (this.inFlightForceProbe ?? this.inFlightProbe);
+      if (activeFlight) return await activeFlight;
     }
 
-    const doProbe = () => probeLiveLanguageServerOnce(this.target, fetchImpl, options, {
+    const doProbe = () => (this.probeLiveOnceOverride ?? probeLiveLanguageServerOnce)(this.target, fetchImpl, options, {
       modelQuotaFromNormalized,
       groupToQuotaGroup,
     });
@@ -1585,35 +1696,105 @@ export class AccountsManager {
     }
 
     const probePromise = doProbe();
-    this.inFlightProbe = probePromise;
+    if (forceRefresh) this.inFlightForceProbe = probePromise;
+    else this.inFlightProbe = probePromise;
     try {
       const res = await probePromise;
-      this.liveProbeCache = { status: res, expiresAt: Date.now() + 5000 };
+      this.liveProbeCache = res !== null ? { status: res, expiresAt: Date.now() + 5000 } : null;
       return res;
     } finally {
-      this.inFlightProbe = null;
+      if (forceRefresh) {
+        if (this.inFlightForceProbe === probePromise) this.inFlightForceProbe = null;
+      } else if (this.inFlightProbe === probePromise) {
+        this.inFlightProbe = null;
+      }
     }
   }
 
-  /**
-   * 提取当前系统/IDE真实登录态并存入账号池
-   */
-  async saveCurrentAccount(options?: {
+  private static buildExtractedOAuthToken(rawToken: any, fallbackEmail: string | null): { token: TokenData; email: string | null } {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const explicitTs = AccountsManager.parseExplicitExpiryTimestamp(rawToken.expiry_timestamp, rawToken.expiry);
+    const accessToken = typeof rawToken.access_token === 'string' ? rawToken.access_token : '';
+    const isEpochZeroIso = typeof rawToken.expiry === 'string' && rawToken.expiry.trim().length > 0 && Date.parse(rawToken.expiry.trim()) === 0;
+    const hasZeroExpiry =
+      rawToken.expiry_timestamp === 0 ||
+      isEpochZeroIso ||
+      rawToken.expires_in === 0 ||
+      !accessToken ||
+      accessToken === 'pending_refresh';
+    const expiryTs = explicitTs ?? (hasZeroExpiry ? 0 : nowSec + (Number(rawToken.expires_in) || 3600));
+    const email = rawToken.email || fallbackEmail || null;
+    return {
+      token: {
+        access_token: accessToken,
+        refresh_token: rawToken.refresh_token,
+        expires_in: rawToken.expires_in ?? (expiryTs > nowSec ? expiryTs - nowSec : 0),
+        expiry_timestamp: expiryTs,
+        token_type: rawToken.token_type || 'Bearer',
+        email,
+        project_id: rawToken.project_id || null,
+        is_gcp_tos: Boolean(rawToken.is_gcp_tos),
+        id_token: rawToken.id_token || null,
+      },
+      email,
+    };
+  }
+
+  private static shouldPreferTokenCandidate(current: TokenData, candidate: TokenData, nowSec: number): boolean {
+    const hasValidAccess = (t: TokenData): boolean =>
+      Boolean(t.access_token && t.access_token !== 'pending_refresh');
+    const getExpiry = (t: TokenData): number =>
+      Number.isFinite(t.expiry_timestamp) ? t.expiry_timestamp : 0;
+
+    const curValid = hasValidAccess(current);
+    const candValid = hasValidAccess(candidate);
+    if (candValid !== curValid) return candValid;
+    if (!candValid) return false;
+
+    const curExp = getExpiry(current);
+    const candExp = getExpiry(candidate);
+    const curUnexpired = curExp > nowSec;
+    const candUnexpired = candExp > nowSec;
+    if (candUnexpired !== curUnexpired) return candUnexpired;
+    return candExp > curExp;
+  }
+
+  private async readLocalSessionCredentials(options?: {
     keychain?: KeychainAdapter;
     homeDir?: string;
     appSupportDir?: string;
-  }): Promise<Account> {
+    profileDir?: string;
+    expectedEmail?: string;
+    strictSandboxGuard?: boolean;
+  }): Promise<{ token: TokenData | null; email: string | null }> {
+    const defaultStateDir = join(homedir(), 'Library', 'Application Support', 'GravityBox');
+    const isDefaultStateDir = this.stateDir === defaultStateDir;
+    const defaultProfileDir = join(homedir(), 'Library', 'Application Support', this.target.name);
+    const hasCustomTargetProfile = resolve(this.target.profile) !== resolve(defaultProfileDir);
+    if (
+      options?.strictSandboxGuard
+      && options.homeDir === undefined
+      && options.appSupportDir === undefined
+      && options.keychain === undefined
+      && options.profileDir === undefined
+      && !isDefaultStateDir
+      && !hasCustomTargetProfile
+    ) {
+      return { token: null, email: null };
+    }
+
     const homeDir = options?.homeDir ?? homedir();
     const appSupportDir = options?.appSupportDir ?? join(homedir(), 'Library', 'Application Support');
-    const keychain = options?.keychain ?? new SystemKeychainAdapter();
-
     const isSandboxHome = homeDir !== homedir();
+    const allowHostSessionFiles = options?.homeDir !== undefined || isDefaultStateDir;
+    const allowHostKeychain = Boolean(options?.keychain) || (!isSandboxHome && isDefaultStateDir);
+    const expectedLower = options?.expectedEmail?.trim().toLowerCase() ?? null;
+
     let extractedToken: TokenData | null = null;
     let extractedEmail: string | null = null;
-    let extractedName: string | null = null;
-    let liveQuota: QuotaData | null = null;
 
     const readSessionToken = async () => {
+      if (!allowHostSessionFiles) return;
       const candidates = [
         join(homeDir, '.gemini', 'jetski-standalone-oauth-token'),
         join(homeDir, '.gemini', 'antigravity-cli', 'antigravity-oauth-token'),
@@ -1624,19 +1805,9 @@ export class AccountsManager {
           const json = JSON.parse(raw);
           const t = json.token || json;
           if (t?.refresh_token) {
-            const explicitTs = AccountsManager.parseExplicitExpiryTimestamp(t.expiry_timestamp, t.expiry);
-            extractedToken = {
-              access_token: t.access_token || '',
-              refresh_token: t.refresh_token,
-              expires_in: t.expires_in ?? 3600,
-              expiry_timestamp: explicitTs ?? (Math.floor(Date.now() / 1000) + (Number(t.expires_in) || 3600)),
-              token_type: t.token_type || 'Bearer',
-              email: t.email || json.id_token_email || null,
-              project_id: t.project_id || null,
-              is_gcp_tos: Boolean(t.is_gcp_tos),
-              id_token: t.id_token || null,
-            };
-            extractedEmail = t.email || json.id_token_email || null;
+            const parsed = AccountsManager.buildExtractedOAuthToken(t, json.id_token_email || null);
+            extractedToken = parsed.token;
+            extractedEmail = parsed.email;
             return;
           }
         } catch {}
@@ -1649,26 +1820,17 @@ export class AccountsManager {
     }
 
     // 2. Keychain 优先读取 (显式传入 keychain 或非沙箱模式)
-    if (!extractedToken && (options?.keychain || !isSandboxHome)) {
+    if (!extractedToken && allowHostKeychain) {
+      const keychain = options?.keychain ?? new SystemKeychainAdapter();
       try {
         const pass = await keychain.readPassword('gemini', 'antigravity');
         if (pass && pass.startsWith('go-keyring-base64:')) {
           const raw = Buffer.from(pass.slice('go-keyring-base64:'.length), 'base64').toString('utf8');
           const parsed = JSON.parse(raw);
           if (parsed?.token?.refresh_token) {
-            const explicitTs = AccountsManager.parseExplicitExpiryTimestamp(parsed.token.expiry_timestamp, parsed.token.expiry);
-            extractedToken = {
-              access_token: parsed.token.access_token || '',
-              refresh_token: parsed.token.refresh_token,
-              expires_in: parsed.token.expires_in ?? 3600,
-              expiry_timestamp: explicitTs ?? (Math.floor(Date.now() / 1000) + (Number(parsed.token.expires_in) || 3600)),
-              token_type: parsed.token.token_type || 'Bearer',
-              email: parsed.token.email || parsed.id_token_email || null,
-              project_id: parsed.token.project_id || null,
-              is_gcp_tos: Boolean(parsed.token.is_gcp_tos),
-              id_token: parsed.token.id_token || null,
-            };
-            extractedEmail = parsed.token.email || parsed.id_token_email || null;
+            const extracted = AccountsManager.buildExtractedOAuthToken(parsed.token, parsed.id_token_email || null);
+            extractedToken = extracted.token;
+            extractedEmail = extracted.email;
           }
         }
       } catch {}
@@ -1679,80 +1841,234 @@ export class AccountsManager {
       await readSessionToken();
     }
 
-    // 4. 检查 state.vscdb (补充 token 或补充 email)
-    if (!extractedToken || !extractedEmail) {
-      const primaryProfileVscdb = join(this.target.profile, 'User', 'globalStorage', 'state.vscdb');
-      const fallbackProfileVscdb = options?.appSupportDir
-        ? join(appSupportDir, this.target.name, 'User', 'globalStorage', 'state.vscdb')
-        : primaryProfileVscdb;
-      const candidateVscdbPaths = Array.from(new Set(
-        options?.appSupportDir ? [fallbackProfileVscdb, primaryProfileVscdb] : [primaryProfileVscdb]
-      ));
-      for (const vscdbPath of candidateVscdbPaths) {
-        if (extractedToken && extractedEmail) break;
-        const stateRows = await readAntigravityStateDb(vscdbPath, [
-          'antigravityUnifiedStateSync.oauthToken',
-          'antigravityUnifiedStateSync.userStatus',
-          'antigravityUnifiedStateSync.enterprisePreferences',
-        ]);
-        if (stateRows.size === 0) continue;
-        const oauthRawB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.oauthToken'));
-        const userStatusB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.userStatus'));
-        const entPrefB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.enterprisePreferences'));
-        let entProjectId: string | null = null;
-        if (entPrefB64) {
+    // 4. 检查 state.vscdb：在非沙箱模式下始终核对以防旧 Keychain 掩盖较新会话，在沙箱模式下仅读取显式指定的目标配置目录
+    const primaryProfileVscdb = join(options?.profileDir ?? this.target.profile, 'User', 'globalStorage', 'state.vscdb');
+    const fallbackProfileVscdb = options?.appSupportDir
+      ? join(appSupportDir, this.target.name, 'User', 'globalStorage', 'state.vscdb')
+      : primaryProfileVscdb;
+    const candidateVscdbPaths = isSandboxHome
+      ? Array.from(new Set([
+          ...(options?.appSupportDir ? [fallbackProfileVscdb] : []),
+          ...(options?.profileDir || hasCustomTargetProfile ? [primaryProfileVscdb] : []),
+        ]))
+      : Array.from(new Set(
+          options?.appSupportDir ? [fallbackProfileVscdb, primaryProfileVscdb] : [primaryProfileVscdb]
+        ));
+
+    for (const vscdbPath of candidateVscdbPaths) {
+      const stateRows = await readAntigravityStateDb(vscdbPath, [
+        'antigravityUnifiedStateSync.oauthToken',
+        'antigravityUnifiedStateSync.userStatus',
+        'antigravityUnifiedStateSync.enterprisePreferences',
+      ]);
+      if (stateRows.size === 0) continue;
+      const oauthRawB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.oauthToken'));
+      const userStatusB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.userStatus'));
+      const entPrefB64 = extractTopicDataString(stateRows.get('antigravityUnifiedStateSync.enterprisePreferences'));
+      let entProjectId: string | null = null;
+      if (entPrefB64) {
+        try {
           const entBuf = decodeTopicRow(entPrefB64, 'enterpriseGcpProjectId');
           if (entBuf) {
             entProjectId = ProtobufReader.findString(entBuf, 3) || null;
           }
-        }
+        } catch {}
+      }
 
-        if (!extractedToken && oauthRawB64) {
+      let vscdbEmail: string | null = null;
+      if (userStatusB64) {
+        try {
+          const userBuf = decodeTopicRow(userStatusB64, 'userStatusSentinelKey');
+          if (userBuf) {
+            const email = ProtobufReader.findString(userBuf, 7);
+            if (email) vscdbEmail = email;
+          }
+        } catch {}
+      }
+
+      let vscdbToken: TokenData | null = null;
+      if (oauthRawB64) {
+        try {
           const payloadBuf = decodeTopicRow(oauthRawB64, 'oauthTokenInfoSentinelKey');
           if (payloadBuf) {
             const accessToken = ProtobufReader.findString(payloadBuf, 1) || '';
             const refreshToken = ProtobufReader.findString(payloadBuf, 3) || '';
             const idToken = ProtobufReader.findString(payloadBuf, 5) || null;
             const gcpTosFlag = ProtobufReader.findVarint(payloadBuf, 6);
-            let expirySec = Math.floor(Date.now() / 1000) + 3600;
+            const nowSec = Math.floor(Date.now() / 1000);
+            let expirySec = accessToken ? nowSec + 3600 : 0;
             const timeBuf = ProtobufReader.findField(payloadBuf, 4);
             if (timeBuf) {
               const sec = ProtobufReader.findVarint(timeBuf, 1);
-              if (sec && sec > 0) expirySec = sec;
+              if (sec !== null && sec >= 0) expirySec = sec;
             }
-
             if (refreshToken) {
-              extractedToken = {
+              vscdbToken = {
                 access_token: accessToken,
                 refresh_token: refreshToken,
-                expires_in: Math.max(60, expirySec - Math.floor(Date.now() / 1000)),
+                expires_in: Math.max(0, expirySec - nowSec),
                 expiry_timestamp: expirySec,
                 token_type: 'Bearer',
-                email: null,
+                email: vscdbEmail,
                 project_id: entProjectId,
                 is_gcp_tos: Boolean(gcpTosFlag && gcpTosFlag > 0),
                 id_token: idToken,
               };
             }
           }
-        } else if (extractedToken && !extractedToken.project_id && entProjectId) {
-          extractedToken.project_id = entProjectId;
-        }
+        } catch {}
+      }
 
-        if (!extractedEmail && userStatusB64 && oauthRawB64 && extractedToken?.refresh_token === ProtobufReader.findString(decodeTopicRow(oauthRawB64, 'oauthTokenInfoSentinelKey') ?? Buffer.alloc(0), 3)) {
-          const payloadBuf = decodeTopicRow(userStatusB64, 'userStatusSentinelKey');
-          if (payloadBuf) {
-            const email = ProtobufReader.findString(payloadBuf, 7);
-            if (email) extractedEmail = email;
+      if (!extractedToken) {
+        if (vscdbToken) {
+          extractedToken = vscdbToken;
+          extractedEmail = extractedEmail || vscdbEmail;
+        }
+      } else {
+        const currentEmail = extractedEmail || extractedToken.email;
+        if (vscdbToken) {
+          const candidateEmail = vscdbEmail || vscdbToken.email;
+          const sameRefresh = Boolean(
+            vscdbToken.refresh_token &&
+            extractedToken.refresh_token &&
+            vscdbToken.refresh_token === extractedToken.refresh_token
+          );
+          const sameEmail = Boolean(
+            currentEmail &&
+            candidateEmail &&
+            currentEmail.trim().toLowerCase() === candidateEmail.trim().toLowerCase()
+          );
+          const emailsConflict = Boolean(currentEmail && candidateEmail && !sameEmail);
+          if (
+            expectedLower
+            && candidateEmail?.trim().toLowerCase() === expectedLower
+            && currentEmail?.trim().toLowerCase() !== expectedLower
+          ) {
+            extractedToken = vscdbToken;
+            extractedEmail = candidateEmail;
+          } else if (!emailsConflict && (sameRefresh || sameEmail)) {
+            const nowSec = Math.floor(Date.now() / 1000);
+            const preferVscdb = AccountsManager.shouldPreferTokenCandidate(extractedToken, vscdbToken, nowSec);
+            const winner = preferVscdb ? vscdbToken : extractedToken;
+            const loser = preferVscdb ? extractedToken : vscdbToken;
+            extractedToken = {
+              ...winner,
+              email: winner.email || loser.email || currentEmail || candidateEmail || null,
+              project_id: winner.project_id || loser.project_id || entProjectId || null,
+              id_token: winner.id_token || loser.id_token || null,
+              is_gcp_tos: Boolean(winner.is_gcp_tos || loser.is_gcp_tos),
+            };
+            extractedEmail = extractedEmail || candidateEmail || null;
+          }
+        } else {
+          const vscdbMatchesUser =
+            !vscdbEmail ||
+            !currentEmail ||
+            vscdbEmail.trim().toLowerCase() === currentEmail.trim().toLowerCase();
+          if (vscdbMatchesUser && !extractedToken.project_id && entProjectId) {
+            extractedToken.project_id = entProjectId;
           }
         }
       }
+      break;
     }
+
+    return { token: extractedToken, email: extractedEmail };
+  }
+
+  /**
+   * 只读采集本机当前活跃会话凭据（仅当邮箱严格匹配 expectedEmail 且 refresh_token 非空时返回）。
+   */
+  async harvestActiveSessionTokenIfMatched(
+    expectedEmail: string,
+    options?: {
+      keychain?: KeychainAdapter;
+      homeDir?: string;
+      appSupportDir?: string;
+      profileDir?: string;
+    },
+  ): Promise<{ token: TokenData; email: string } | null> {
+    const expected = expectedEmail?.trim().toLowerCase();
+    if (!expected) return null;
+    const { token, email } = await this.readLocalSessionCredentials({
+      ...options,
+      expectedEmail,
+      strictSandboxGuard: true,
+    });
+    if (!token || !token.refresh_token) return null;
+    const resolvedEmail = (email || token.email || '').trim();
+    if (!resolvedEmail || resolvedEmail.toLowerCase() !== expected) return null;
+    return {
+      token: token.email ? token : { ...token, email: resolvedEmail },
+      email: resolvedEmail,
+    };
+  }
+
+  /**
+   * 仅当采集到的本机活跃会话邮箱严格匹配且 expiry_timestamp 比已存记录更新超过 60 秒时，更新账号凭据。
+   */
+  async harvestTokenForAccountId(
+    id: string,
+    options?: {
+      keychain?: KeychainAdapter;
+      homeDir?: string;
+      appSupportDir?: string;
+      profileDir?: string;
+    },
+  ): Promise<Account | null> {
+    const account = await this.getAccount(id);
+    if (!account || !account.email) return null;
+    const harvested = await this.harvestActiveSessionTokenIfMatched(account.email, options);
+    if (!harvested || !harvested.token.refresh_token) return null;
+    const currentExp = Number.isFinite(account.token?.expiry_timestamp) ? account.token.expiry_timestamp : 0;
+    if (!Number.isFinite(harvested.token.expiry_timestamp) || harvested.token.expiry_timestamp <= currentExp + 60) {
+      return null;
+    }
+    const nowSec = Math.floor(Date.now() / 1000);
+    const hasUsableAccess = Boolean(
+      harvested.token.access_token
+      && harvested.token.access_token !== 'pending_refresh'
+      && harvested.token.expiry_timestamp > nowSec + 300,
+    );
+    const hadMissingOAuthErr =
+      account.quota_refresh_error_code === 'missing_oauth_client'
+      || (typeof account.quota_refresh_error === 'string' && MISSING_OAUTH_CLIENT_PATTERN.test(account.quota_refresh_error.trim()));
+    const updated: Account = {
+      ...account,
+      token: {
+        ...account.token,
+        ...harvested.token,
+        email: harvested.token.email || account.token.email || account.email,
+        project_id: harvested.token.project_id ?? account.token.project_id ?? null,
+        oauth_client_key: harvested.token.oauth_client_key ?? account.token.oauth_client_key ?? null,
+        id_token: harvested.token.id_token ?? account.token.id_token ?? null,
+      },
+      ...(hadMissingOAuthErr && hasUsableAccess
+        ? { quota_refresh_error: null, quota_refresh_error_code: null }
+        : {}),
+    };
+    await this.saveAccount(updated);
+    return (await this.getAccount(updated.id)) ?? updated;
+  }
+
+  /**
+   * 提取当前系统/IDE真实登录态并存入账号池
+   */
+  async saveCurrentAccount(options?: {
+    keychain?: KeychainAdapter;
+    homeDir?: string;
+    appSupportDir?: string;
+  }): Promise<Account> {
+    const homeDir = options?.homeDir ?? homedir();
+    const isSandboxHome = homeDir !== homedir();
+    let { token: extractedToken, email: extractedEmail } = await this.readLocalSessionCredentials(options);
+    let extractedName: string | null = null;
+    let liveQuota: QuotaData | null = null;
 
     // A live identity may enrich the same account, or provide the email for the active local session when state.vscdb is absent.
     if (!isSandboxHome && (extractedEmail || extractedToken)) {
-      const lsStatus = await this.probeLiveLanguageServer();
-      if (lsStatus?.email && (!extractedEmail || lsStatus.email.toLowerCase() === extractedEmail.toLowerCase())) {
+      const lsStatus = await this.probeLiveLanguageServer(globalThis.fetch, { forceRefresh: true });
+      if (lsStatus?.email && (!extractedEmail || lsStatus.email.trim().toLowerCase() === extractedEmail.trim().toLowerCase())) {
         extractedEmail = extractedEmail || lsStatus.email;
         extractedName = lsStatus.name || null;
         liveQuota = { ...lsStatus.quota, source: 'live' };
@@ -1821,6 +2137,8 @@ export class AccountsManager {
       } else {
         account.quota = liveQuota;
       }
+      account.quota_refresh_error = null;
+      account.quota_refresh_error_code = null;
       await this.saveAccount(account);
     }
 
@@ -1926,13 +2244,39 @@ export class AccountsManager {
             }
             account.quota={models:[],quota_groups:[],last_updated:0,is_forbidden:false,subscription_tier:account.quota?.subscription_tier,model_forwarding_rules:{},source:'cloud',quota_warnings:['UNVERIFIED_CLOUD_SCOPE: '+error.message]};
           }
+          const errCode = accountErrorCode(error);
+          if (errCode === 'missing_oauth_client') {
+            const isActiveLiveError =
+              error instanceof Error && error.message === bt('account_cloud.err.missing_oauth_client_active_live');
+            if (isActiveLiveError) {
+              const rawMsg = error.message;
+              account.quota_refresh_error = sanitizeError(rawMsg, [
+                account.token?.access_token,
+                account.token?.refresh_token,
+                account.token?.id_token,
+              ]);
+              account.quota_refresh_error_code = errCode;
+              await this.saveRefreshedAccount(account);
+            } else {
+              const hadMissingOAuthErr =
+                account.quota_refresh_error_code === 'missing_oauth_client'
+                || (typeof account.quota_refresh_error === 'string'
+                  && MISSING_OAUTH_CLIENT_PATTERN.test(account.quota_refresh_error.trim()));
+              if (hadMissingOAuthErr) {
+                account.quota_refresh_error = null;
+                account.quota_refresh_error_code = null;
+                await this.saveRefreshedAccount(account);
+              }
+            }
+            throw error;
+          }
           const rawMsg = error instanceof Error ? error.message : bt('accounts.err.refresh_failed_retry');
           account.quota_refresh_error = sanitizeError(rawMsg, [
             account.token?.access_token,
             account.token?.refresh_token,
             account.token?.id_token,
           ]);
-          account.quota_refresh_error_code = accountErrorCode(error);
+          account.quota_refresh_error_code = errCode;
           await this.saveRefreshedAccount(account);
         }
         throw error;
@@ -1963,11 +2307,18 @@ export class AccountsManager {
     const liveSummaryFailed = lsStatus?.quota?.refresh_state?.endpointsAttempted?.includes('live:RetrieveUserQuotaSummary') === true
       && lsStatus.quota.refresh_state?.endpointsSucceeded?.includes('live:RetrieveUserQuotaSummary') !== true
       && (lsStatus.quota.quota_groups?.length ?? 0) === 0;
-    const canFallbackToCloud = liveSummaryFailed && Boolean(account.token?.refresh_token);
-    if (lsStatus && account.email && lsStatus.email && lsStatus.email.trim().toLowerCase() === account.email.trim().toLowerCase() && (lsStatus.quota.models?.length ?? 0) > 0 && !canFallbackToCloud) {
-      const fresh = lsStatus.quota;
+    const hasExpiredLiveWindow = hasExpiredQuotaWindow(lsStatus?.quota, Date.now());
+    const emailMatchedLive = Boolean(
+      lsStatus && account.email && lsStatus.email &&
+      lsStatus.email.trim().toLowerCase() === account.email.trim().toLowerCase() &&
+      (lsStatus.quota.models?.length ?? 0) > 0
+    );
+    const canFallbackToCloud = (liveSummaryFailed || hasExpiredLiveWindow) && Boolean(account.token?.refresh_token);
+
+    const persistLiveResult = async (): Promise<Account> => {
+      const fresh = lsStatus!.quota;
       const old = account.quota;
-      const allowFreeDowngrade = lsStatus.accountType !== 'enterprise_vertex' && !liveSummaryFailed;
+      const allowFreeDowngrade = lsStatus!.accountType !== 'enterprise_vertex' && !liveSummaryFailed;
       const resolvedTier = mergeSubscriptionTier(fresh.subscription_tier, old?.subscription_tier, {
         allowFreeDowngrade,
       });
@@ -1991,20 +2342,91 @@ export class AccountsManager {
       };
       account.quota_refresh_error = null;
       account.quota_refresh_error_code = null;
-      if (lsStatus.name && !account.name) account.name = lsStatus.name;
+      if (lsStatus!.name && !account.name) account.name = lsStatus!.name;
+      const expectedRefresh = account.token.refresh_token;
+      try {
+        const harvested = await this.harvestActiveSessionTokenIfMatched(account.email);
+        const currentExp = Number.isFinite(account.token?.expiry_timestamp) ? account.token.expiry_timestamp : 0;
+        if (
+          harvested
+          && harvested.token.refresh_token
+          && Number.isFinite(harvested.token.expiry_timestamp)
+          && harvested.token.expiry_timestamp > currentExp + 60
+        ) {
+          account.token = {
+            ...account.token,
+            ...harvested.token,
+            email: harvested.token.email || account.token.email || account.email,
+            project_id: harvested.token.project_id ?? account.token.project_id ?? null,
+            oauth_client_key: harvested.token.oauth_client_key ?? account.token.oauth_client_key ?? null,
+            id_token: harvested.token.id_token ?? account.token.id_token ?? null,
+          };
+        }
+      } catch {}
       signal?.throwIfAborted();
-      await this.saveRefreshedAccount(account, account.token.refresh_token, signal);
+      await this.saveRefreshedAccount(account, expectedRefresh, signal);
       return account;
+    };
+
+    if (emailMatchedLive && !canFallbackToCloud) {
+      return await persistLiveResult();
+    }
+
+    if (emailMatchedLive && hasExpiredLiveWindow && !liveSummaryFailed) {
+      try {
+        const providerContext = await this.resolveProviderContext(fetchImpl);
+        await fetchCloudQuotaForAccount({
+          account,
+          providerContext,
+          fetchImpl,
+          signal,
+          onTokenRefreshed: (acc, prevRefresh) => this.saveRefreshedAccount(acc, prevRefresh, signal),
+        });
+        await this.saveRefreshedAccount(account, account.token.refresh_token, signal);
+        return account;
+      } catch (cloudErr) {
+        if (signal?.aborted) throw cloudErr;
+        return await persistLiveResult();
+      }
+    }
+
+    const nowSec = Math.floor(Date.now() / 1000);
+    const needTokenRefresh =
+      !account.token?.access_token
+      || account.token.access_token === 'pending_refresh'
+      || !Number.isFinite(account.token.expiry_timestamp)
+      || account.token.expiry_timestamp - nowSec < 300;
+    if (needTokenRefresh && fetchImpl === globalThis.fetch && (!getGoogleClientId() || !getGoogleClientSecret())) {
+      if (!account.token?.refresh_token) {
+        throw new CodedAccountError('missing_refresh_token', bt('account_cloud.err.missing_refresh_token'));
+      }
+      if (!emailMatchedLive) {
+        const desktopEmail = await this.detectCurrentAntigravityEmail({ liveEmailHint: lsStatus?.email ?? null }).catch(() => null);
+        if (desktopEmail && account.email && desktopEmail.trim().toLowerCase() === account.email.trim().toLowerCase()) {
+          throw new CodedAccountError('missing_oauth_client', bt('account_cloud.err.missing_oauth_client_active_live'));
+        }
+      }
+      throw new CodedAccountError('missing_oauth_client', bt('account_cloud.err.missing_oauth_client'));
     }
 
     const providerContext=await this.resolveProviderContext(fetchImpl);
-    await fetchCloudQuotaForAccount({
-      account,
-      providerContext,
-      fetchImpl,
-      signal,
-      onTokenRefreshed: (acc, prevRefresh) => this.saveRefreshedAccount(acc, prevRefresh, signal),
-    });
+    try {
+      await fetchCloudQuotaForAccount({
+        account,
+        providerContext,
+        fetchImpl,
+        signal,
+        onTokenRefreshed: (acc, prevRefresh) => this.saveRefreshedAccount(acc, prevRefresh, signal),
+      });
+    } catch (err) {
+      if (!emailMatchedLive && accountErrorCode(err) === 'missing_oauth_client') {
+        const desktopEmail = await this.detectCurrentAntigravityEmail({ liveEmailHint: lsStatus?.email ?? null }).catch(() => null);
+        if (desktopEmail && account.email && desktopEmail.trim().toLowerCase() === account.email.trim().toLowerCase()) {
+          throw new CodedAccountError('missing_oauth_client', bt('account_cloud.err.missing_oauth_client_active_live'));
+        }
+      }
+      throw err;
+    }
     await this.saveRefreshedAccount(account, account.token.refresh_token, signal);
     return account;
   }
@@ -2015,7 +2437,7 @@ export class AccountsManager {
   async refreshAllQuotas(
     fetchImpl: typeof globalThis.fetch = globalThis.fetch,
     options?: { signal?: AbortSignal; onAccountUpdated?: (account: Account, done: number, total: number) => void }
-  ): Promise<{ accounts: Account[]; failures: { id: string; message: string }[] }> {
+  ): Promise<{ accounts: Account[]; failures: { id: string; message: string }[]; skippedStandby: number }> {
     options?.signal?.throwIfAborted();
     const index = await this.loadIndex();
     const activeId = index.current_account_id;
@@ -2024,12 +2446,20 @@ export class AccountsManager {
       const bActive = b.id === activeId ? 1 : 0;
       return bActive - aActive;
     });
+    const hasLocalOAuthClient = Boolean(getGoogleClientId() && getGoogleClientSecret());
+    let liveEmailLower: string | null = null;
     if (fetchImpl === globalThis.fetch && enabledAccounts.length > 0) {
-      void this.probeLiveLanguageServer(fetchImpl, { forceRefresh: true }).catch(() => null);
+      if (!hasLocalOAuthClient) {
+        const liveStatus = await this.probeLiveLanguageServer(fetchImpl, { forceRefresh: true }).catch(() => null);
+        liveEmailLower = liveStatus?.email?.trim().toLowerCase() ?? null;
+      } else {
+        void this.probeLiveLanguageServer(fetchImpl, { forceRefresh: true }).catch(() => null);
+      }
       void this.resolveProviderContext(fetchImpl).catch(() => null);
     }
     const resultsByIndex: Array<Account | undefined> = new Array(enabledAccounts.length);
     const failures: { id: string; message: string }[] = [];
+    let skippedStandby = 0;
     const concurrency = fetchImpl === globalThis.fetch ? Math.min(5, Math.max(1, enabledAccounts.length)) : 1;
     let cursor = 0;
     let completed = 0;
@@ -2038,6 +2468,34 @@ export class AccountsManager {
         options?.signal?.throwIfAborted();
         const slot = cursor++;
         const accMeta = enabledAccounts[slot]!;
+        if (fetchImpl === globalThis.fetch && !hasLocalOAuthClient) {
+          const saved = await this.getAccount(accMeta.id);
+          if (saved) {
+            const nowSec = Date.now() / 1000;
+            const matchesLive = Boolean(liveEmailLower && saved.email?.trim().toLowerCase() === liveEmailLower);
+            const isActiveByFallback = !liveEmailLower && accMeta.id === activeId;
+            const isTokenNearOrPastExpiry =
+              !saved.token?.access_token
+              || saved.token.access_token === 'pending_refresh'
+              || !Number.isFinite(saved.token.expiry_timestamp)
+              || saved.token.expiry_timestamp - nowSec < 300;
+            if (!matchesLive && !isActiveByFallback && isTokenNearOrPastExpiry) {
+              const hadMissingOAuthErr =
+                saved.quota_refresh_error_code === 'missing_oauth_client'
+                || (typeof saved.quota_refresh_error === 'string'
+                  && MISSING_OAUTH_CLIENT_PATTERN.test(saved.quota_refresh_error.trim()));
+              if (hadMissingOAuthErr) {
+                saved.quota_refresh_error = null;
+                saved.quota_refresh_error_code = null;
+                await this.saveRefreshedAccount(saved, saved.token.refresh_token, options?.signal).catch(() => {});
+              }
+              skippedStandby += 1;
+              completed += 1;
+              options?.onAccountUpdated?.(saved, completed, enabledAccounts.length);
+              continue;
+            }
+          }
+        }
         try {
           const updated = await this.refreshQuota(accMeta.id, fetchImpl, { signal: options?.signal });
           resultsByIndex[slot] = updated;
@@ -2051,7 +2509,7 @@ export class AccountsManager {
       }
     }));
     options?.signal?.throwIfAborted();
-    return { accounts: resultsByIndex.filter((a): a is Account => Boolean(a)), failures };
+    return { accounts: resultsByIndex.filter((a): a is Account => Boolean(a)), failures, skippedStandby };
   }
 
   private desktopEmailCache: { email: string | null; expiresAt: number } | null = null;
@@ -2144,18 +2602,26 @@ export class AccountsManager {
     }
     const activeEntry = effectiveActiveId ? await this.peekAccountEntry(effectiveActiveId) : null;
     const activeAccount = activeEntry ? structuredClone(activeEntry.account) : null;
+    const hasLocalOAuthClient = Boolean(getGoogleClientId() && getGoogleClientSecret());
+    const listNowMs = Date.now();
     const accountsWithRevision = await Promise.all(index.accounts.map(async acc => {
       const entry = await this.peekAccountEntry(acc.id);
       const saved = entry?.account ?? null;
-      const readiness = accountCredentialReadiness(saved ?? acc as Account);
+      const readiness = accountCredentialReadiness(saved ?? acc as Account, listNowMs / 1000);
+      const standbyStatus = computeStandbyRefreshStatus(saved ?? acc, {
+        isActive: acc.id === effectiveActiveId,
+        hasLocalOAuthClient,
+        nowMs: listNowMs,
+      });
       const baseRevision = entry ? entry.revision : computeAccountRevision(acc);
       return {
         ...acc,
         quota: saved?.quota ?? null,
         quota_refresh_error: cleanAndLocalizeRefreshError(saved?.quota_refresh_error),
         quota_refresh_error_code: saved?.quota_refresh_error_code ?? acc.quota_refresh_error_code ?? null,
-        revision: baseRevision + ':' + readiness.state,
+        revision: `${baseRevision}:${readiness.state}:${standbyStatus.mode}`,
         credentialReadiness: readiness,
+        standbyRefreshStatus: standbyStatus,
         quota_last_updated: saved?.quota?.last_updated ?? 0,
       };
     }));

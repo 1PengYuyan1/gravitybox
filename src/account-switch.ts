@@ -308,6 +308,10 @@ export class AccountSwitchService {
       await atomicJson(this.journalPath, committed ? this.completedRollback(original) : original);
       await unlink(this.rollbackPath);
       this.manager.invalidateRuntimeCaches?.();
+      if (committed) {
+        const rollbackCliPayload = await this.resolveRollbackCliPayload(original);
+        await this.syncExistingCliCredentials(rollbackCliPayload);
+      }
       return committed ? 'rolled-back' : 'restored';
     } finally { await tx?.close(); }
   }
@@ -400,6 +404,16 @@ export class AccountSwitchService {
       const acc = await this.manager.getAccount(id);
       if (!acc || acc.disabled || acc.validation_blocked) throw new Error(bt('switch.err.account_unavailable'));
       if (!acc.token?.refresh_token) throw new Error(bt('switch.err.refresh_credentials_first'));
+      // Best-effort harvest of outgoing account's fresher local session token before overwriting host credentials.
+      const preHarvestIndex = await this.manager.loadIndex().catch(() => null);
+      const outgoingId = preHarvestIndex?.current_account_id;
+      if (outgoingId && outgoingId !== id && typeof this.manager.harvestTokenForAccountId === 'function') {
+        await this.manager.harvestTokenForAccountId(outgoingId, {
+          keychain: this.keychain,
+          homeDir: this.options.homeDir,
+          profileDir: this.options.profile,
+        }).catch(() => {});
+      }
       const db = join(this.options.profile, 'User', 'globalStorage', 'state.vscdb');
       const hasDb = await this.optionalRegular(db);
       const transaction = hasDb ? this.database(db) : undefined;
@@ -549,8 +563,6 @@ export class AccountSwitchService {
         if (record) {
           try {
             if (await this.reconcileRollback() === 'rolled-back') {
-              const rollbackCliPayload = await this.resolveRollbackCliPayload(journal);
-              await this.syncExistingCliCredentials(rollbackCliPayload);
               return { message: bt('switch.msg.restored_previous') };
             }
           } catch {

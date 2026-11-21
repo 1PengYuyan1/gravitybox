@@ -113,6 +113,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var usageAutoHealAttemptsByPeriod: [String: Int] = [:]
     var usageAutoHealPendingPeriods = Set<String>()
     var singleAccountRefreshErrors: [String: String] = [:]
+    var singleAccountRefreshNotices: [String: String] = [:]
     private var popoverGlobalClickMonitor: Any?
     private var popoverLocalClickMonitor: Any?
     private var popoverLocalKeyMonitor: Any?
@@ -147,6 +148,11 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     var reachable = false
     var quotaRefreshTimer: Timer?
     var lastAutoQuotaRefreshTriggerAt: Date = .distantPast
+    var nextScheduledQuotaRefreshAt: Date?
+    var pendingAutoQuotaRefresh = false
+    var workspaceWakeObserver: NSObjectProtocol?
+    var appBecomeActiveObserver: NSObjectProtocol?
+    var lastResetOverdueRefreshByAccount: [String: (signature: String, at: Date)] = [:]
     var quotaStaleThresholdSeconds: TimeInterval {
         let minutes = configuration?.value.quotaRefreshMinutes ?? 0
         return minutes > 15 ? TimeInterval(minutes * 60 + 120) : TimeInterval(15 * 60)
@@ -274,6 +280,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         let launchedByAntigravity = CommandLine.arguments.contains("--launched-by-antigravity")
         if !loginLaunch && !launchedByAntigravity { showPanel() }
         installAntigravityLifecycleObserver()
+        installQuotaScheduleObservers()
         syncLifecycleAgentRegistration()
         // 登录项启动时没有窗口，历史上因此从未创建定时器，菜单栏配额永远不更新。
         configureRefreshTimer()
@@ -551,6 +558,11 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
     func resizeMenuPanel(to newSize: NSSize, animate: Bool) {
         menuPanelResizeMotion?.cancel()
         menuPanelResizeMotion = nil
+        if let fade = menuPanelFadeMotion {
+            fade.cancel()
+            menuPanelFadeMotion = nil
+            menuPanel?.alphaValue = 1.0
+        }
         menuPanelTargetSize = newSize
         guard let panel = menuPanel else { return }
         let current = panel.frame
@@ -707,6 +719,7 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         controller.view.window?.makeFirstResponder(nil)
         installPopoverMonitors()
         refresh()
+        checkAndTriggerOverdueQuotaRefreshIfNeeded()
     }
 
     func closeMenuPopover(animated: Bool = true) {
@@ -1408,17 +1421,71 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
             content.layer?.transform = CATransform3DIdentity
         }
     }
+    func standbyRefreshMode(_ acc: [String: Any]) -> String? {
+        guard let status = acc["standbyRefreshStatus"] as? [String: Any],
+              let mode = status["mode"] as? String else { return nil }
+        let trimmed = mode.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    func isStandbySnapshotOnly(_ acc: [String: Any]) -> Bool {
+        let mode = standbyRefreshMode(acc)
+        return mode == "snapshot_cooling" || mode == "snapshot_cooldown_elapsed"
+    }
+
+    func isEligibleForAutoQuotaRefresh(_ acc: [String: Any]) -> Bool {
+        if acc["disabled"] as? Bool == true { return false }
+        if acc["validation_blocked"] as? Bool == true { return false }
+        if let readiness = acc["credentialReadiness"] as? [String: Any],
+           readiness["state"] as? String == "needs_authorization" { return false }
+        if isStandbySnapshotOnly(acc) { return false }
+        return true
+    }
+
+    func installQuotaScheduleObservers() {
+        #if !NATIVE_UI_TEST
+        if workspaceWakeObserver == nil {
+            workspaceWakeObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didWakeNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.configureQuotaRefreshTimer(preserveSchedule: true)
+                self?.refresh()
+            }
+        }
+        if appBecomeActiveObserver == nil {
+            appBecomeActiveObserver = NotificationCenter.default.addObserver(
+                forName: NSApplication.didBecomeActiveNotification,
+                object: nil,
+                queue: .main
+            ) { [weak self] _ in
+                self?.checkAndTriggerOverdueQuotaRefreshIfNeeded()
+            }
+        }
+        #endif
+    }
+
+    func removeQuotaScheduleObservers() {
+        if let observer = workspaceWakeObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+            workspaceWakeObserver = nil
+        }
+        if let observer = appBecomeActiveObserver {
+            NotificationCenter.default.removeObserver(observer)
+            appBecomeActiveObserver = nil
+        }
+    }
+
     func oldestEnabledAccountQuotaTimestamp() -> TimeInterval? {
         var oldest: TimeInterval? = nil
         var hasEligible = false
         for acc in cachedAccounts {
-            if acc["disabled"] as? Bool == true { continue }
-            if acc["validation_blocked"] as? Bool == true { continue }
-            if let readiness = acc["credentialReadiness"] as? [String: Any],
-               readiness["state"] as? String == "needs_authorization" { continue }
+            guard isEligibleForAutoQuotaRefresh(acc) else { continue }
             hasEligible = true
             let quota = acc["quota"] as? [String: Any]
-            let stamp = QuotaPresentation.number(quota?["last_updated"])
+            let stamp = QuotaPresentation.number(acc["persisted_quota_last_updated"])
+                ?? QuotaPresentation.number(quota?["last_updated"])
                 ?? QuotaPresentation.number(acc["quota_last_updated"])
                 ?? 0
             if stamp <= 0 {
@@ -1432,36 +1499,119 @@ final class Assistant: NSObject, NSApplicationDelegate, NSWindowDelegate, NSTabl
         }
         return hasEligible ? oldest : nil
     }
+
+    @discardableResult
+    func triggerResetOverdueRefreshIfNeeded(for account: [String: Any], now: Date = Date()) -> Bool {
+        guard !quitting, reachable, !quotaRefreshing, pendingAccountTaskId == nil else { return false }
+        guard isEligibleForAutoQuotaRefresh(account) else { return false }
+        guard let id = account["id"] as? String, !id.isEmpty, !refreshingAccountIds.contains(id) else { return false }
+        let signature = QuotaPresentation.contract(account).overdueResetSignature(at: now)
+        guard !signature.isEmpty else { return false }
+        if let prev = lastResetOverdueRefreshByAccount[id] {
+            let elapsed = now.timeIntervalSince(prev.at)
+            if prev.signature == signature && elapsed < 90.0 { return false }
+            if elapsed < 20.0 { return false }
+        }
+        lastResetOverdueRefreshByAccount[id] = (signature: signature, at: now)
+        refreshSingleAccountQuota(id: id)
+        return true
+    }
+
     func checkAndTriggerOverdueQuotaRefreshIfNeeded() {
-        guard !quitting, reachable, !quotaRefreshing, pendingAccountTaskId == nil,
-              let minutes = configuration?.value.quotaRefreshMinutes,
-              [5, 10, 15, 30, 60].contains(minutes) else { return }
-        guard Date().timeIntervalSince(lastAutoQuotaRefreshTriggerAt) >= 60.0 else { return }
-        if cachedAccounts.isEmpty {
-            if !accountListInFlight && Date().timeIntervalSince(lastAccountListFetchAt) >= 15.0 {
-                fetchAccountList(notifyPage: false)
+        guard !quitting, reachable else { return }
+        let now = Date()
+        let minutes = configuration?.value.quotaRefreshMinutes ?? 0
+        let autoEnabled = [5, 10, 15, 30, 60].contains(minutes)
+
+        if quotaRefreshing || pendingAccountTaskId != nil {
+            if autoEnabled, let scheduledAt = nextScheduledQuotaRefreshAt, now >= scheduledAt {
+                pendingAutoQuotaRefresh = true
             }
             return
         }
-        guard let oldest = oldestEnabledAccountQuotaTimestamp() else { return }
-        let age = oldest > 0 ? Date().timeIntervalSince1970 - oldest : .infinity
-        if age >= TimeInterval(minutes * 60) {
-            lastAutoQuotaRefreshTriggerAt = Date()
-            refreshAccountQuotas()
+
+        if autoEnabled {
+            let interval = TimeInterval(minutes * 60)
+            if cachedAccounts.isEmpty {
+                if !accountListInFlight && now.timeIntervalSince(lastAccountListFetchAt) >= 15.0 {
+                    fetchAccountList(notifyPage: false)
+                }
+                if pendingAutoQuotaRefresh || (nextScheduledQuotaRefreshAt.map { now >= $0 } ?? false) {
+                    if now.timeIntervalSince(lastAutoQuotaRefreshTriggerAt) >= 60.0 {
+                        pendingAutoQuotaRefresh = false
+                        lastAutoQuotaRefreshTriggerAt = now
+                        nextScheduledQuotaRefreshAt = now.addingTimeInterval(interval)
+                        refreshAccountQuotas()
+                    }
+                }
+                return
+            }
+
+            let oldest = oldestEnabledAccountQuotaTimestamp()
+            let age = oldest.map { $0 > 0 ? now.timeIntervalSince1970 - $0 : .infinity } ?? 0
+            let ageDue = oldest != nil && age >= interval
+            let wallDue = nextScheduledQuotaRefreshAt.map { now >= $0 } ?? false
+
+            if pendingAutoQuotaRefresh || ageDue || wallDue {
+                if now.timeIntervalSince(lastAutoQuotaRefreshTriggerAt) >= 60.0 {
+                    pendingAutoQuotaRefresh = false
+                    lastAutoQuotaRefreshTriggerAt = now
+                    nextScheduledQuotaRefreshAt = now.addingTimeInterval(interval)
+                    refreshAccountQuotas()
+                    return
+                }
+            }
+        } else {
+            pendingAutoQuotaRefresh = false
+        }
+
+        // 当任意启用账号出现“重置时间已过”窗口（刚重新进入 5h / 7d 计时周期）且处于可见刷新场景或开启了自动刷新时，主动纠偏单账号配额
+        let shouldAutoCorrectOverdueReset = autoEnabled || menuTracking || isMenuPanelShown || (contentVisible && currentPage <= 1)
+        if shouldAutoCorrectOverdueReset && !cachedAccounts.isEmpty {
+            for acc in cachedAccounts {
+                if triggerResetOverdueRefreshIfNeeded(for: acc, now: now) {
+                    break
+                }
+            }
         }
     }
-    func configureQuotaRefreshTimer() {
+
+    func configureQuotaRefreshTimer(preserveSchedule: Bool = false) {
         quotaRefreshTimer?.invalidate(); quotaRefreshTimer = nil
         guard let configuration, !quitting else { return }
         let minutes = configuration.value.quotaRefreshMinutes
-        guard [5, 10, 15, 30, 60].contains(minutes) else { return }
+        guard [5, 10, 15, 30, 60].contains(minutes) else {
+            nextScheduledQuotaRefreshAt = nil
+            pendingAutoQuotaRefresh = false
+            return
+        }
         let interval = TimeInterval(minutes * 60)
-        let timer = Timer(timeInterval: interval, repeats: true) { [weak self] _ in
-            guard let self, self.reachable, !self.quotaRefreshing, self.pendingAccountTaskId == nil else { return }
-            self.lastAutoQuotaRefreshTriggerAt = Date()
+        let now = Date()
+        let targetFireDate: Date
+        if preserveSchedule, let existing = nextScheduledQuotaRefreshAt, existing > now.addingTimeInterval(1.0) {
+            targetFireDate = existing
+        } else if let oldest = oldestEnabledAccountQuotaTimestamp(), oldest > 0 {
+            let aligned = Date(timeIntervalSince1970: oldest).addingTimeInterval(interval)
+            targetFireDate = aligned > now.addingTimeInterval(1.0) ? aligned : now.addingTimeInterval(interval)
+        } else {
+            targetFireDate = now.addingTimeInterval(interval)
+        }
+        nextScheduledQuotaRefreshAt = targetFireDate
+
+        let timer = Timer(fire: targetFireDate, interval: interval, repeats: true) { [weak self] _ in
+            guard let self, !self.quitting else { return }
+            let fireNow = Date()
+            self.nextScheduledQuotaRefreshAt = fireNow.addingTimeInterval(interval)
+            guard self.reachable else { return }
+            guard !self.quotaRefreshing, self.pendingAccountTaskId == nil else {
+                self.pendingAutoQuotaRefresh = true
+                return
+            }
+            self.pendingAutoQuotaRefresh = false
+            self.lastAutoQuotaRefreshTriggerAt = fireNow
             self.refreshAccountQuotas()
         }
-        timer.tolerance = min(15.0, interval * 0.05)
+        timer.tolerance = min(5.0, interval * 0.02)
         RunLoop.main.add(timer, forMode: .common)
         quotaRefreshTimer = timer
         checkAndTriggerOverdueQuotaRefreshIfNeeded()

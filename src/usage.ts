@@ -70,6 +70,7 @@ export class UsageStatsManager {
   private rateLocksLoading?: Promise<void>;
   private rateLocksDirty = false;
   private rateLocksUnavailable = false;
+  private rateLocksFileFatal = false;
   private priceRefMap = new Map<string, ApiPricing>();
   private geminiDir: string;
   private dataDirectoryNames: readonly DataDirectoryName[];
@@ -80,6 +81,8 @@ export class UsageStatsManager {
   private inFlightAccountKey = 'all';
   private pendingForced?: Promise<TokenUsageSummary>;
   private pricingMutation?: Promise<unknown>;
+  private pricingRevalueApplying?: Promise<void>;
+  private ledgerSaveQueue: Promise<unknown> = Promise.resolve();
   private discoveryErrors: NonNullable<TokenUsageSummary['database_diagnostics']> = [];
   private periodKey = '';
   private pricingWarnings:string[]=[];
@@ -243,10 +246,37 @@ export class UsageStatsManager {
     return this.ledger.revalue({ action: 'preview', mode, prices: await this.getBillingPricingTable(), accounts: [], liveFiles, now: Math.floor(Date.now() / 1000) });
   }
 
+  private runSerializedLedgerSave<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.ledgerSaveQueue.catch(() => {}).then(async () => {
+      while (this.pricingRevalueApplying) {
+        await this.pricingRevalueApplying.catch(() => {});
+      }
+      return fn();
+    });
+    this.ledgerSaveQueue = run;
+    return run;
+  }
+
   private async mutateHistoricalPricing<T>(operation: () => Promise<T>): Promise<T> {
-    if (this.pricingMutation) await this.pricingMutation;
+    while (this.pricingMutation) await this.pricingMutation.catch(() => {});
     const pendingRead = this.inFlight;
-    const work = (async () => { await pendingRead?.catch(() => {}); await this.rateLocksLoading?.catch(() => {}); return operation(); })();
+    const pendingLocks = this.rateLocksLoading;
+    const work = (async () => {
+      if (pendingRead) await pendingRead.catch(() => {});
+      if (pendingLocks) await pendingLocks.catch(() => {});
+      const prevSave = this.ledgerSaveQueue;
+      let releaseApply!: () => void;
+      const applyGate = new Promise<void>(resolve => { releaseApply = resolve; });
+      this.ledgerSaveQueue = prevSave.catch(() => {}).then(() => applyGate);
+      await prevSave.catch(() => {});
+      try {
+        this.pricingRevalueApplying = applyGate;
+        return await operation();
+      } finally {
+        this.pricingRevalueApplying = undefined;
+        releaseApply();
+      }
+    })();
     this.pricingMutation = work;
     try { return await work; }
     finally { if (this.pricingMutation === work) this.pricingMutation = undefined; }
@@ -259,6 +289,7 @@ export class UsageStatsManager {
       const result = await this.ledger.revalue({ action: 'apply', confirmed, previewId: options.previewId,
         prices: await this.getBillingPricingTable(), accounts: [], now: Math.floor(Date.now() / 1000) });
       this.rateLocksLoaded = false;
+      this.rateLocksFileFatal = false;
       this.rateLocks = Object.create(null);
       this.cachedSummariesByAccount.clear(); this.lastAggregationKeysByAccount.clear(); this.snapshots.clear();
       return result;
@@ -268,7 +299,7 @@ export class UsageStatsManager {
   async restoreRevalueHistory(previewId: string, confirmed = false) {
     return this.mutateHistoricalPricing(async () => {
       const result = await this.ledger.revalue({ action: 'restore', previewId, confirmed, prices: await this.getBillingPricingTable(), accounts: [], now: Math.floor(Date.now() / 1000) });
-      this.rateLocksLoaded = false; this.rateLocks = Object.create(null);
+      this.rateLocksLoaded = false; this.rateLocksFileFatal = false; this.rateLocks = Object.create(null);
       this.cachedSummariesByAccount.clear(); this.lastAggregationKeysByAccount.clear(); this.snapshots.clear();
       return result;
     });
@@ -314,6 +345,7 @@ export class UsageStatsManager {
         localFileFatal = true;
         this.rateLocksLoaded = true;
         this.rateLocksUnavailable = true;
+        this.rateLocksFileFatal = true;
         this.pricingWarnings.push(bt('usage.warn.rate_ledger_unreadable_stop'));
       }
     }
@@ -684,6 +716,47 @@ export class UsageStatsManager {
     this.legacyKeyIndex.clear();
   }
 
+  private confidenceRank(confidence?: GenerationEvent['account_confidence']): number {
+    switch (confidence) {
+      case 'observed':
+        return 3;
+      case 'unknown':
+        return 1;
+      case 'legacy':
+        return 0;
+      default:
+        return -1;
+    }
+  }
+
+  private mergeLedgerEventRecord(previous: LedgerEvent | undefined, incoming: LedgerEvent): LedgerEvent {
+    const next: LedgerEvent = {
+      ...previous,
+      ...incoming,
+      source_observed_at: Math.max(incoming.source_observed_at ?? 0, previous?.source_observed_at ?? 0) || incoming.source_observed_at,
+      timestamp_seconds: incoming.timestamp_seconds || previous?.timestamp_seconds || 0,
+      ingested_at: previous?.ingested_at ?? incoming.ingested_at ?? new Date().toISOString(),
+    };
+    if (previous) {
+      const prevRank = this.confidenceRank(previous.account_confidence);
+      const nextRank = this.confidenceRank(incoming.account_confidence);
+      const prevHasIdentity = Boolean(previous.account_id || previous.account_email || previous.account_confidence);
+      const nextHasIdentity = Boolean(incoming.account_id || incoming.account_email);
+      if (
+        (prevRank > nextRank && prevHasIdentity) ||
+        (prevRank === nextRank && !nextHasIdentity && prevHasIdentity)
+      ) {
+        next.account_id = previous.account_id;
+        next.account_email = previous.account_email;
+        next.account_confidence = previous.account_confidence;
+      }
+      if (previous.account_type && previous.account_type !== 'unknown' && (!incoming.account_type || incoming.account_type === 'unknown')) {
+        next.account_type = previous.account_type;
+      }
+    }
+    return next;
+  }
+
   private upsertLedger(event: LedgerEvent): void {
     const key = event.event_key;
     if (!key || event.db_file === 'recovered_session.db' || event.db_file === 'recovered_enterprise_session.db') return;
@@ -718,12 +791,12 @@ export class UsageStatsManager {
         if (!previous) {
           previous = candidate;
         } else {
-          if (candidate.account_confidence === 'observed' && previous.account_confidence !== 'observed') {
+          if (this.confidenceRank(candidate.account_confidence) > this.confidenceRank(previous.account_confidence)) {
             previous = {
               ...previous,
               account_id: candidate.account_id,
               account_email: candidate.account_email,
-              account_confidence: 'observed',
+              account_confidence: candidate.account_confidence,
               account_type: candidate.account_type ?? previous.account_type,
             };
           }
@@ -740,21 +813,7 @@ export class UsageStatsManager {
       }
     }
     if (sameKeyPrev && (sameKeyPrev.source_observed_at ?? 0) > (event.source_observed_at ?? 0) && migratedFromKeys.length === 0) return;
-    const next = { ...previous, ...event,
-      source_observed_at: Math.max(event.source_observed_at ?? 0, previous?.source_observed_at ?? 0) || event.source_observed_at,
-      timestamp_seconds: event.timestamp_seconds || previous?.timestamp_seconds || 0,
-      ingested_at: previous?.ingested_at ?? event.ingested_at ?? new Date().toISOString() };
-    // Absence of new attribution evidence must not erase an existing observed identity.
-    if (previous?.account_confidence === 'observed') {
-      if (!event.account_id) {
-        next.account_id = previous.account_id;
-        next.account_email = previous.account_email;
-        next.account_confidence = previous.account_confidence;
-      }
-      if (previous.account_type && previous.account_type !== 'unknown' && (!event.account_type || event.account_type === 'unknown')) {
-        next.account_type = previous.account_type;
-      }
-    }
+    const next = this.mergeLedgerEventRecord(previous, event);
     if (sameKeyPrev && migratedFromKeys.length === 0 && ledgerEventsEqual(sameKeyPrev, next)) return;
     this.setLedgerEventInMap(key, next);
     if (this.usageLedgerEvents.size > 50_000) this.largeLedger = true;
@@ -765,17 +824,25 @@ export class UsageStatsManager {
   private async saveUsageLedger(): Promise<void> {
     if (!this.usageLedgerDirty) return;
     if (this.ledgerUnavailable || this.archivedUnavailable) return;
-    const pending = [...this.pendingLedgerEvents.values()];
-    try {
-      await this.ledger.save(pending);
-      for (const event of pending) {
-        if (this.pendingLedgerEvents.get(event.event_key!) === event) this.pendingLedgerEvents.delete(event.event_key!);
+    await this.runSerializedLedgerSave(async () => {
+      if (!this.usageLedgerDirty) return;
+      if (this.ledgerUnavailable || this.archivedUnavailable) return;
+      const pending = [...this.pendingLedgerEvents.values()];
+      if (pending.length === 0) {
+        this.usageLedgerDirty = false;
+        return;
       }
-      this.usageLedgerDirty = this.pendingLedgerEvents.size > 0;
-    } catch {
-      this.storageWarnings.add(bt('usage.warn.ledger_save_failed'));
-      this.ledgerUnavailable = true;
-    }
+      try {
+        await this.ledger.save(pending);
+        for (const event of pending) {
+          if (this.pendingLedgerEvents.get(event.event_key!) === event) this.pendingLedgerEvents.delete(event.event_key!);
+        }
+        this.usageLedgerDirty = this.pendingLedgerEvents.size > 0;
+      } catch {
+        this.storageWarnings.add(bt('usage.warn.ledger_save_failed'));
+        this.ledgerUnavailable = true;
+      }
+    });
   }
 
   /**
@@ -892,9 +959,15 @@ export class UsageStatsManager {
 
   private calendarKey() { const d=new Date();return formatLocalDate(d)+':'+d.getTimezoneOffset()+':'+Intl.DateTimeFormat().resolvedOptions().timeZone+':'+getActiveLocale(); }
 
+  private withStickyPricingWarnings(warnings: string[]): string[] {
+    if (!this.rateLocksFileFatal) return warnings;
+    const fatalWarn = bt('usage.warn.rate_ledger_unreadable_stop');
+    return warnings.includes(fatalWarn) ? warnings : [...warnings, fatalWarn];
+  }
+
   async getRawPricingCatalog(): Promise<{ raw: Record<string, ApiPricingEntry>; publicKeys: Set<string> }> {
     const { merged, warnings, publicKeys } = await loadRawPricingTable(this.remotePricingCachePath, this.pricingCachePath);
-    this.pricingWarnings = warnings;
+    this.pricingWarnings = this.withStickyPricingWarnings(warnings);
     return { raw: merged, publicKeys };
   }
 
@@ -905,7 +978,7 @@ export class UsageStatsManager {
 
   async getBillingPricingTable(): Promise<Record<string, ApiPricingEntry>> {
     const { billingPrices, warnings } = await loadRawPricingTable(this.remotePricingCachePath, this.pricingCachePath);
-    this.pricingWarnings = warnings;
+    this.pricingWarnings = this.withStickyPricingWarnings(warnings);
     return billingPrices;
   }
 
@@ -1148,7 +1221,6 @@ export class UsageStatsManager {
         beforeValidLockedKeys.add(key);
       }
     }
-    const unpricedSet = new Set(unpricedKeys);
     for (const key of unpricedKeys) {
       delete this.rateLocks[key];
     }
@@ -1160,13 +1232,13 @@ export class UsageStatsManager {
     this.snapshots.clear();
 
     await this.getUsageSummary(true);
-    let newlyLockedFromUnlocked = 0;
+    let healedCount = 0;
     for (const [key, value] of Object.entries(this.rateLocks)) {
-      if (!beforeValidLockedKeys.has(key) && !unpricedSet.has(key) && !this.isUnpricedRateLock(value)) {
-        newlyLockedFromUnlocked++;
+      if (!beforeValidLockedKeys.has(key) && !this.isUnpricedRateLock(value)) {
+        healedCount++;
       }
     }
-    return unpricedSet.size + newlyLockedFromUnlocked;
+    return healedCount;
   }
 
   private discoveredStats = new Map<string, DiscoveredDbStat>();
@@ -1285,7 +1357,7 @@ export class UsageStatsManager {
    */
   cancelRead() { this.scanAbort?.abort(new Error(bt('usage.err.read_cancelled'))); return !!this.scanAbort; }
   async getUsageSummary(forceRefresh = false, accountId?: string): Promise<TokenUsageSummary> {
-    if (this.pricingMutation) await this.pricingMutation;
+    while (this.pricingMutation) await this.pricingMutation.catch(() => {});
     const accKey = accountId || 'all';
     if(this.inFlight) {
       if(this.inFlightAccountKey===accKey && (!forceRefresh||this.inFlightForced)) return this.inFlight;

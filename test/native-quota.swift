@@ -466,6 +466,52 @@ import Cocoa
         check(debugPortMissingEn.enabled == false && debugPortMissingEn.title == "Debug Port Not Enabled" && debugPortMissingEn.color == .systemOrange, "English debug-port-missing status maps cleanly")
         L10n.shared.setLanguage("zh-Hans", notify: false)
 
+        // Reset time parsing, live local countdown, and overdue reset detection
+        let nowRef = Date(timeIntervalSince1970: 1_800_000_000)
+        let overdueIso = ISO8601DateFormatter().string(from: nowRef.addingTimeInterval(-30))
+        let future5hIso = ISO8601DateFormatter().string(from: nowRef.addingTimeInterval(4 * 3600 + 42 * 60 + 10))
+        let overdueContract = QuotaPresentation.contract([
+            "quotaGroups": [
+                [
+                    "key": "gemini",
+                    "displayName": "Gemini",
+                    "brands": ["gemini"],
+                    "isStandalone": false,
+                    "availability": "available",
+                    "quotaState": "known",
+                    "windows": [
+                        [
+                            "id": "5h",
+                            "period": "5h",
+                            "label": "5 小时",
+                            "known": true,
+                            "remaining": 0.6,
+                            "stale": false,
+                            "resetCountdown": "1 分钟后重置",
+                            "resetTime": overdueIso
+                        ],
+                        [
+                            "id": "weekly",
+                            "period": "weekly",
+                            "label": "每周",
+                            "known": true,
+                            "remaining": 0.51,
+                            "stale": false,
+                            "resetCountdown": "4天 13小时后重置",
+                            "resetTime": future5hIso
+                        ]
+                    ]
+                ]
+            ]
+        ])
+        check(overdueContract.hasOverdueKnownWindow(at: nowRef), "Contract detects overdue resetTime even when cached stale flag was false")
+        let overdueWin = overdueContract.quotaGroups[0].windows[0]
+        check(overdueWin.effectiveStale(at: nowRef) == true, "Overdue resetDate turns effectiveStale to true")
+        check(overdueWin.effectiveResetText(at: nowRef).contains("数据已过期"), "Overdue window surfaces stale label locally")
+        let freshWin = overdueContract.quotaGroups[0].windows[1]
+        check(freshWin.effectiveStale(at: nowRef) == false, "Future resetDate stays fresh")
+        check(freshWin.effectiveResetText(at: nowRef).contains("4小时 42分后重置"), "Future resetDate computes live countdown locally")
+
         // Antigravity 2.34.0 Orchestrator meta-model guard: legacy polluted payloads must NEVER produce standalone pools
         check(QuotaPresentation.isOrchestratorMetaModel(id: "gemini-pro-coordinator"), "Detects gemini-pro-coordinator")
         check(QuotaPresentation.isOrchestratorMetaModel(id: "gemini-pro-orchestrator"), "Detects gemini-pro-orchestrator")
@@ -504,9 +550,7 @@ import Cocoa
         ])
         check(legacyNoGroupsOrchestrator.standaloneGroups.isEmpty && legacyNoGroupsOrchestrator.standaloneModels.isEmpty, "Swift must not invent standalone pools from rawModels when standaloneModels is absent")
 
-        // Future unknown multi-window standalone groups (5h + weekly + daily) with description & resetTime passthrough
-        let nowRef = Date(timeIntervalSince1970: 1_800_000_000)
-        let future5hIso = ISO8601DateFormatter().string(from: nowRef.addingTimeInterval(4 * 3600 + 42 * 60 + 10))
+        // Future unknown multi-window standalone groups (5h + weekly + daily) with live resetTime countdowns
         let futureDailyIso = ISO8601DateFormatter().string(from: nowRef.addingTimeInterval(12 * 3600 + 15 * 60 + 5))
         let futureWeeklyIso = ISO8601DateFormatter().string(from: nowRef.addingTimeInterval(3 * 24 * 3600 + 6 * 3600 + 30))
         let futureStandalonePayload: [String: Any] = [
@@ -523,8 +567,8 @@ import Cocoa
                     "availability": "available",
                     "quotaState": "known",
                     "windows": [
-                        ["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.75, "stale": false, "resetCountdown": "4小时 42分后重置", "resetTime": future5hIso],
-                        ["id": "weekly", "period": "weekly", "label": "每周", "known": true, "remaining": 0.45, "stale": false, "resetCountdown": "3天 6小时后重置", "resetTime": futureWeeklyIso]
+                        ["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.75, "stale": false, "resetCountdown": "旧文本", "resetTime": future5hIso],
+                        ["id": "weekly", "period": "weekly", "label": "每周", "known": true, "remaining": 0.45, "stale": false, "resetCountdown": "旧周文本", "resetTime": futureWeeklyIso]
                     ]
                 ],
                 [
@@ -535,7 +579,7 @@ import Cocoa
                     "availability": "available",
                     "quotaState": "known",
                     "windows": [
-                        ["id": "daily", "period": "daily", "label": "每日", "known": true, "remaining": 0.62, "stale": false, "resetCountdown": "12小时 15分后重置", "resetTime": futureDailyIso]
+                        ["id": "daily", "period": "daily", "label": "每日", "known": true, "remaining": 0.62, "stale": false, "resetCountdown": "旧日文本", "resetTime": futureDailyIso]
                     ]
                 ]
             ]
@@ -545,17 +589,80 @@ import Cocoa
         let novaGroup = futureStandaloneContract.standaloneGroups[0]
         check(novaGroup.displayName == "Nova Models" && novaGroup.description == "Models within this group: Nova Pro, Nova Lite" && novaGroup.windows.count == 2, "Nova Models preserves description and both 5h and weekly windows")
         check(novaGroup.barTitle(for: novaGroup.windows[0]) == "Nova Models · 5 小时" && novaGroup.barTitle(for: novaGroup.windows[1]) == "Nova Models · 每周", "Multi-window standalone group renders period-qualified bar titles")
-        check(novaGroup.windows[0].resetTime == future5hIso && novaGroup.windows[0].resetText == "4小时 42分后重置", "Standalone 5h window preserves resetTime and resetText")
-        check(novaGroup.windows[1].resetTime == futureWeeklyIso && novaGroup.windows[1].resetText == "3天 6小时后重置", "Standalone weekly window preserves resetTime and resetText")
+        check(novaGroup.windows[0].effectiveResetText(at: nowRef).contains("4小时 42分后重置"), "Standalone 5h window computes live countdown from resetTime")
+        check(novaGroup.windows[1].effectiveResetText(at: nowRef).contains("3天 6小时后重置"), "Standalone weekly window computes live countdown from resetTime")
         let pulseGroup = futureStandaloneContract.standaloneGroups[1]
         check(pulseGroup.windows.count == 1 && pulseGroup.windows[0].localizedLabel == "每日" && pulseGroup.barTitle(for: pulseGroup.windows[0]) == "Pulse Daily · 每日", "Daily standalone window renders localized Chinese daily label")
-        check(pulseGroup.windows[0].resetTime == futureDailyIso && pulseGroup.windows[0].resetText == "12小时 15分后重置", "Standalone daily window preserves resetTime and resetText")
+        check(pulseGroup.windows[0].effectiveResetText(at: nowRef).contains("12小时 15分后重置"), "Standalone daily window computes live countdown from resetTime")
         L10n.shared.setLanguage("en", notify: false)
         check(pulseGroup.windows[0].localizedLabel == "Daily" && pulseGroup.barTitle(for: pulseGroup.windows[0]) == "Pulse Daily · Daily", "Daily standalone window renders localized English Daily label")
         L10n.shared.setLanguage("zh-Hans", notify: false)
         check(QuotaPresentation.inferredBrands(for: "Nova Models").isEmpty && novaGroup.brands.isEmpty, "Unknown future pool does not mislabel brands as Gemini or Claude")
         let futureChoices = QuotaPresentation.monitoredScopeChoices(for: futureStandalonePayload).filter { !$0.isSeparator }
         check(futureChoices.contains(where: { $0.key == "nova-models" && $0.title == "Nova Models" }) && futureChoices.contains(where: { $0.key == "pulse-daily" && $0.title == "Pulse Daily" }), "Dynamic future standalone groups surface in monitoredScopeChoices")
+
+        check(ModelUsageFold.baseModelKey(for: "gemini-4-nova-tiered-high") == "gemini-4-nova", "ModelUsageFold.baseModelKey must strip -tiered-high suffix")
+        let sortedFold = ModelUsageFold.sortByUsage([
+            ["model": "a", "totalTokens": 100, "estimatedUsd": 1.0, "requestCount": 1],
+            ["model": "b", "totalTokens": 500, "estimatedUsd": 0.5, "requestCount": 2],
+            ["model": "c", "totalTokens": 500, "estimatedUsd": 2.0, "requestCount": 1]
+        ])
+        check(sortedFold.map { $0["model"] as? String ?? "" } == ["c", "b", "a"], "ModelUsageFold.sortByUsage must sort by totalTokens desc then estimatedUsd desc")
+
+        // Standby cooling & cooldown-elapsed plain-language reset text
+        let standbyOverduePayload: [String: Any] = [
+            "standbyRefreshStatus": [
+                "mode": "snapshot_cooldown_elapsed",
+                "hasLocalOAuthClient": false,
+                "canBackgroundRefresh": false,
+                "cooldownElapsedFamilies": ["gemini"]
+            ],
+            "quotaGroups": [
+                [
+                    "key": "gemini",
+                    "displayName": "Gemini",
+                    "brands": ["gemini"],
+                    "isStandalone": false,
+                    "availability": "available",
+                    "quotaState": "known",
+                    "windows": [
+                        [
+                            "id": "5h",
+                            "period": "5h",
+                            "label": "5 小时",
+                            "known": true,
+                            "remaining": 0.25,
+                            "stale": true,
+                            "resetCountdown": "重置时间已过",
+                            "resetTime": overdueIso
+                        ],
+                        [
+                            "id": "weekly",
+                            "period": "weekly",
+                            "label": "每周",
+                            "known": true,
+                            "remaining": 0.55,
+                            "stale": true,
+                            "resetCountdown": "旧文本",
+                            "resetTime": future5hIso
+                        ]
+                    ]
+                ]
+            ]
+        ]
+        let standbyContract = QuotaPresentation.contract(standbyOverduePayload)
+        check(standbyContract.standbyMode == "snapshot_cooldown_elapsed", "Contract parses standbyRefreshStatus.mode")
+        let standbyOverdueWin = standbyContract.quotaGroups[0].windows[0]
+        let standbyFutureWin = standbyContract.quotaGroups[0].windows[1]
+        check(standbyOverdueWin.effectiveResetText(at: nowRef, standbyMode: "snapshot_cooldown_elapsed", compact: true) == "预计已重置", "Compact overdue standby window shows 预计已重置")
+        check(standbyOverdueWin.effectiveResetText(at: nowRef, standbyMode: "snapshot_cooldown_elapsed", compact: false) == "预计已重置 · 切换后更新", "Wide overdue standby window shows 预计已重置 · 切换后更新")
+        check(standbyOverdueWin.effectiveResetText(at: nowRef) == "预计已重置 · 切换后更新", "Default effectiveResetText uses contract standbyMode")
+        let coolingCleanText = standbyFutureWin.effectiveResetText(at: nowRef, standbyMode: "snapshot_cooling", compact: false)
+        check(coolingCleanText.contains("4小时 42分后重置") && !coolingCleanText.contains("数据已过期"), "Future standby snapshot window keeps clean countdown without 数据已过期")
+        L10n.shared.setLanguage("en", notify: false)
+        check(standbyOverdueWin.effectiveResetText(at: nowRef, standbyMode: "snapshot_cooldown_elapsed", compact: true) == "Likely reset", "English compact overdue standby window shows Likely reset")
+        check(standbyOverdueWin.effectiveResetText(at: nowRef, standbyMode: "snapshot_cooldown_elapsed", compact: false) == "Likely reset · Syncs on switch", "English wide overdue standby window shows Likely reset · Syncs on switch")
+        L10n.shared.setLanguage("zh-Hans", notify: false)
 
         print("\(assertionCount) native quota assertions passed")
     }

@@ -217,9 +217,9 @@ export function extractGroupMemberLabels(description?: unknown): string[] {
 }
 
 const GROUP_MEMBER_TIER_PAREN_RE =
-  /\s*\((?:extra\s+high|extra\s+low|xhigh|high|medium|low|minimal|max|thinking|disabled|trial|preview|exp|tiered|latest)\)\s*$/i;
+  /\s*\((?:extra\s+high|extra\s+low|xhigh|extra|high|medium|low|minimal|max|thinking|disabled|trial|preview|exp|tiered|latest)\)\s*$/i;
 const GROUP_MEMBER_TIER_SUFFIX_RE =
-  /(?:[\s_-]+(?:extra[\s_-]+high|extra[\s_-]+low|xhigh|high|medium|low|minimal|max|thinking|disabled|trial|preview|exp|tiered|latest))+$/i;
+  /(?:[\s_-]+(?:extra[\s_-]+high|extra[\s_-]+low|xhigh|extra|high|medium|low|minimal|max|thinking|disabled|trial|preview|exp|tiered|latest))+$/i;
 
 export function normalizeGroupMemberKey(raw: string): string {
   let text = raw.trim().toLowerCase();
@@ -1549,11 +1549,13 @@ export function buildArgonStatus(
   familyWindows: FamilyWindows,
   nowMs: number,
   subscriptionTier?: string | null,
+  staleAfterSeconds?: number,
 ): ArgonStatus {
   return resolveStandaloneFamilyStatus('argon', models, groups, familyWindows, nowMs, {
     shortLabel: 'Argon',
     fullLabel: 'Gemini 4 Argon',
     subscriptionTier,
+    staleAfterSeconds,
   });
 }
 
@@ -1564,11 +1566,13 @@ export function buildCarbonStatus(
   nowMs: number,
   _argonStatus?: ArgonStatus,
   subscriptionTier?: string | null,
+  staleAfterSeconds?: number,
 ): ArgonStatus {
   return resolveStandaloneFamilyStatus('carbon', models, groups, familyWindows, nowMs, {
     shortLabel: 'Carbon',
     fullLabel: 'Gemini 4 Carbon',
     subscriptionTier,
+    staleAfterSeconds,
   });
 }
 
@@ -1585,8 +1589,8 @@ function autoPrettyModelTitle(rawIdOrName: string): string {
 
 export function normalizeBaseModelKey(rawId: string): string {
   let baseKey = rawId.trim().toLowerCase();
-  while (/-(?:extra-high|extra-low|low|medium|high|xhigh|minimal|max|thinking|trial|preview|exp|disabled|tiered|latest)$/i.test(baseKey)) {
-    baseKey = baseKey.replace(/-(?:extra-high|extra-low|low|medium|high|xhigh|minimal|max|thinking|trial|preview|exp|disabled|tiered|latest)$/i, '');
+  while (/-(?:extra-high|extra-low|low|medium|high|xhigh|extra|minimal|max|thinking|trial|preview|exp|disabled|tiered|latest)$/i.test(baseKey)) {
+    baseKey = baseKey.replace(/-(?:extra-high|extra-low|low|medium|high|xhigh|extra|minimal|max|thinking|trial|preview|exp|disabled|tiered|latest)$/i, '');
   }
   return baseKey
     .replace(/[^a-z0-9.]+/g, '-')
@@ -1609,8 +1613,8 @@ export function buildStandaloneModels(
   subscriptionTier?: string | null,
   staleAfterSeconds: number = 900,
 ): StandaloneModelStatus[] {
-  const resolvedArgon = argonStatus ?? buildArgonStatus(models, groups, familyWindows, nowMs, subscriptionTier);
-  const resolvedCarbon = carbonStatus ?? buildCarbonStatus(models, groups, familyWindows, nowMs, resolvedArgon, subscriptionTier);
+  const resolvedArgon = argonStatus ?? buildArgonStatus(models, groups, familyWindows, nowMs, subscriptionTier, staleAfterSeconds);
+  const resolvedCarbon = carbonStatus ?? buildCarbonStatus(models, groups, familyWindows, nowMs, resolvedArgon, subscriptionTier, staleAfterSeconds);
 
   const list: StandaloneModelStatus[] = [];
   const hasAuthoritativeGroups = groups.length > 0;
@@ -1755,8 +1759,8 @@ export function buildStandaloneModels(
     if (!baseKey || seenKeys.has(baseKey)) continue;
     const displayName = model.display_name
       ? model.display_name
-        .replace(/\s*\((?:Extra\s+High|Extra\s+Low|Low|Medium|High|XHigh|Minimal|Max|Thinking)\)\s*$/i, '')
-        .replace(/\s+(?:Trial|Preview|Exp|Extra\s+High|Extra\s+Low|Low|Medium|High|XHigh|Minimal|Max|Thinking)$/i, '')
+        .replace(/\s*\((?:Extra\s+High|Extra\s+Low|Low|Medium|High|XHigh|Extra|Minimal|Max|Thinking)\)\s*$/i, '')
+        .replace(/\s+(?:Trial|Preview|Exp|Extra\s+High|Extra\s+Low|Low|Medium|High|XHigh|Extra|Minimal|Max|Thinking)$/i, '')
         .trim()
       : autoPrettyModelTitle(baseKey);
     const existing = extraByBaseKey.get(baseKey);

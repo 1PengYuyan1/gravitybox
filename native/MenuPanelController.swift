@@ -891,8 +891,15 @@ final class MenuPanelController: NSViewController {
             updateMenuTrendBuckets(report: report, summary: summary)
         }
 
-        let models = ModelUsageFold.foldThinkingVariants((report["byModel"] as? [[String: Any]]) ?? (report["models"] as? [[String: Any]]) ?? [])
-        let modelKey = "\(L10n.shared.currentLocale):\(report["snapshotId"] ?? ""):\(periodKey):\(models.count):\(pricedCount):\(unpricedCount):\(showAllModels):\(total)"
+        let models = ModelUsageFold.sortByUsage(ModelUsageFold.foldThinkingVariants((report["byModel"] as? [[String: Any]]) ?? (report["models"] as? [[String: Any]]) ?? []))
+        let displayUnpricedCount = models.isEmpty
+            ? unpricedCount
+            : models.filter { row in
+                let usd = doubleVal(row, "estimatedUsd", fallback: doubleVal(row, "estimated_usd"))
+                let isPriced = (row["priced"] as? Bool) ?? (usd > 0)
+                return !isPriced
+            }.count
+        let modelKey = "\(L10n.shared.currentLocale):\(report["snapshotId"] ?? ""):\(periodKey):\(models.count):\(pricedCount):\(displayUnpricedCount):\(showAllModels):\(total)"
         if modelKey != renderedUsageModelKey {
             renderedUsageModelKey = modelKey
             rebuildMenuModelList(models: models, totalTokens: total)
@@ -908,8 +915,8 @@ final class MenuPanelController: NSViewController {
         } else if failed > 0 {
             footerParts.append(L10n.t("menu_panel.usage.failed_dbs", ["count": failed], fallback: "\(failed) 个会话库异常"))
         }
-        if unpricedCount > 0 {
-            footerParts.append(L10n.t("menu_panel.usage.unpriced_footer", ["count": unpricedCount], fallback: "\(unpricedCount) 款模型待定价"))
+        if displayUnpricedCount > 0 {
+            footerParts.append(L10n.t("menu_panel.usage.unpriced_footer", ["count": displayUnpricedCount], fallback: "\(displayUnpricedCount) 款模型待定价"))
         }
         let expiredCount = models.filter { ($0["pricingStatus"] as? String ?? "") == "expired" }.count
         if expiredCount > 0 {
@@ -1188,14 +1195,17 @@ final class MenuPanelController: NSViewController {
         let unknownText = L10n.t("common.unknown", fallback: "未知")
         let unavailableText = L10n.t("common.unavailable", fallback: "不可用")
         let modelQuotaText = L10n.t("quota.model_quota", fallback: "模型配额")
+        let now = Date()
+        let standbyMode = app.standbyRefreshMode(account)
         let contract = QuotaPresentation.contract(account)
 
         let quotaRowsFingerprint = [
             L10n.shared.currentLocale,
             id,
             email,
+            standbyMode ?? "",
             contract.displayGroups.map { g in
-                let ws = g.windows.map { "\($0.localizedLabel):\($0.percentage.map(String.init) ?? "-"):\($0.placeholder(availability: g.availability)):\($0.resetText):\($0.stale)" }.joined(separator: ",")
+                let ws = g.windows.map { "\($0.localizedLabel):\($0.percentage.map(String.init) ?? "-"):\($0.placeholder(availability: g.availability)):\($0.effectiveResetText(at: now, standbyMode: standbyMode, compact: true)):\($0.effectiveStale(at: now))" }.joined(separator: ",")
                 return "\(g.key)|\(g.displayName)|\(g.availability)|\(ws)"
             }.joined(separator: ";")
         ].joined(separator: "#")
@@ -1233,11 +1243,12 @@ final class MenuPanelController: NSViewController {
                     for win in quotaGroup.windows {
                         let row = MenuMeterRow(title: win.localizedLabel)
                         row.accessibilityGroupName = quotaGroup.displayName
+                        let effStale = win.effectiveStale(at: now)
                         row.apply(
                             percentage: win.percentage,
                             placeholder: win.placeholder(availability: quotaGroup.availability),
-                            reset: win.percentage == nil ? "" : win.resetText,
-                            stale: win.stale
+                            reset: win.percentage == nil ? "" : win.effectiveResetText(at: now, standbyMode: standbyMode, compact: true),
+                            stale: effStale
                         )
                         groupViews.append(row)
                         rowsForGroup.append(row)
@@ -1286,24 +1297,48 @@ final class MenuPanelController: NSViewController {
         if !contractWarn.isEmpty {
             warnings.append(contractWarn)
         }
-        quotaWarningLabel.stringValue = warnings.joined(separator: L10n.shared.isEnglish ? "; " : "；")
-        quotaWarningLabel.isHidden = warnings.isEmpty
+        if !warnings.isEmpty {
+            quotaWarningLabel.stringValue = warnings.joined(separator: L10n.shared.isEnglish ? "; " : "；")
+            quotaWarningLabel.textColor = accessibleWarningColor()
+            quotaWarningLabel.isHidden = false
+        } else if let singleNotice = app.singleAccountRefreshNotices[id]?.trimmingCharacters(in: .whitespacesAndNewlines), !singleNotice.isEmpty {
+            quotaWarningLabel.stringValue = singleNotice
+            quotaWarningLabel.textColor = .secondaryLabelColor
+            quotaWarningLabel.isHidden = false
+        } else {
+            quotaWarningLabel.stringValue = ""
+            quotaWarningLabel.isHidden = true
+        }
 
         let quota = account["quota"] as? [String: Any]
         let stamp = QuotaPresentation.number(quota?["last_updated"]) ?? QuotaPresentation.number(account["quota_last_updated"]) ?? 0
+        let offlinePrefix = !app.reachable ? L10n.t("menu_panel.quota.offline_prefix", fallback: "本机服务离线 · ") : ""
         if app.quotaRefreshing || (!id.isEmpty && app.refreshingAccountIds.contains(id)) {
             quotaFooterLabel.stringValue = L10n.t("menu_panel.quota.refreshing", fallback: "正在刷新配额…")
             quotaFooterLabel.textColor = .secondaryLabelColor
+            quotaFooterLabel.toolTip = nil
+        } else if standbyMode == "snapshot_cooldown_elapsed" {
+            quotaFooterLabel.stringValue = offlinePrefix + L10n.t("accounts.standby.reset_passed", fallback: "已到重置时间 · 切换后更新")
+            quotaFooterLabel.textColor = Design.blue
+            quotaFooterLabel.toolTip = L10n.t("accounts.standby.multi_device_hint")
+        } else if standbyMode == "snapshot_cooling", stamp > 0 {
+            let date = Date(timeIntervalSince1970: stamp)
+            let fmt = Calendar.current.isDateInToday(date) ? Self.timeFormatter : Self.dateTimeFormatter
+            quotaFooterLabel.stringValue = offlinePrefix + L10n.t("accounts.standby.recorded_at", ["time": fmt.string(from: date)], fallback: "记录于 \(fmt.string(from: date)) · 切换后同步")
+            quotaFooterLabel.textColor = .secondaryLabelColor
+            quotaFooterLabel.toolTip = L10n.t("accounts.standby.multi_device_hint")
         } else if stamp > 0 {
             let date = Date(timeIntervalSince1970: stamp)
             let fmt = Calendar.current.isDateInToday(date) ? Self.timeFormatter : Self.dateTimeFormatter
             let isStale = Date().timeIntervalSince(date) > app.quotaStaleThresholdSeconds
             let updatedStr = L10n.t("common.updated_at", ["time": fmt.string(from: date)], fallback: "更新于 \(fmt.string(from: date))")
-            quotaFooterLabel.stringValue = (!app.reachable ? L10n.t("menu_panel.quota.offline_prefix", fallback: "本机服务离线 · ") : "") + updatedStr + (isStale ? L10n.t("menu_panel.quota.stale_suffix", fallback: " · 待刷新") : "")
+            quotaFooterLabel.stringValue = offlinePrefix + updatedStr + (isStale ? L10n.t("menu_panel.quota.stale_suffix", fallback: " · 待刷新") : "")
             quotaFooterLabel.textColor = isStale ? accessibleWarningColor() : .secondaryLabelColor
+            quotaFooterLabel.toolTip = nil
         } else {
             quotaFooterLabel.stringValue = L10n.t("menu_panel.quota.no_record", fallback: "尚未取得配额记录")
             quotaFooterLabel.textColor = .secondaryLabelColor
+            quotaFooterLabel.toolTip = standbyMode == "snapshot_cooling" ? L10n.t("accounts.standby.multi_device_hint") : nil
         }
     }
 
@@ -1388,7 +1423,8 @@ final class MenuPanelController: NSViewController {
                 switchInFlight: app.accountSwitchInFlight,
                 globalBusy: app.quotaRefreshing,
                 singleBusy: app.refreshingAccountIds.contains(id),
-                singleError: app.singleAccountRefreshErrors[id]
+                singleError: app.singleAccountRefreshErrors[id],
+                singleNotice: app.singleAccountRefreshNotices[id]
             )
         }
 

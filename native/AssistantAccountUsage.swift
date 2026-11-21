@@ -195,6 +195,7 @@ extension Assistant {
             return
         }
         singleAccountRefreshErrors[id] = nil
+        singleAccountRefreshNotices[id] = nil
         refreshingAccountIds.insert(id)
         updateQuotaRefreshControls()
         menuPanelController?.syncFromAssistant()
@@ -204,8 +205,16 @@ extension Assistant {
             switch response {
             case .failure(let error):
                 self.singleAccountRefreshErrors[id] = error.localizedDescription
+                self.singleAccountRefreshNotices[id] = nil
             case .success(let value):
                 self.singleAccountRefreshErrors[id] = nil
+                if value["standbyDeferred"] as? Bool == true {
+                    let notice = (value["notice"] as? String ?? value["message"] as? String)?
+                        .trimmingCharacters(in: .whitespacesAndNewlines)
+                    self.singleAccountRefreshNotices[id] = (notice?.isEmpty == false) ? notice : nil
+                } else {
+                    self.singleAccountRefreshNotices[id] = nil
+                }
                 if let globalErr = self.quotaRefreshError, !InterfaceText.isMultiAccountSummary(globalErr) {
                     self.quotaRefreshError = nil
                 }
@@ -355,6 +364,8 @@ extension Assistant {
                         if shouldQuitAndRelaunch { self.relaunchAntigravityAfterSwitch() }
                         self.showMessage(L10n.t("assistant_account.switch_failed", ["error": error.localizedDescription]), error: true)
                     case .success(let value):
+                        self.singleAccountRefreshNotices[id] = nil
+                        self.singleAccountRefreshErrors[id] = nil
                         self.showMessage(value["message"] as? String ?? L10n.t("assistant_account.switched_to", ["email": email]))
                         if shouldQuitAndRelaunch { self.relaunchAntigravityAfterSwitch() }
                         self.invalidateUsageReportCache()
@@ -370,6 +381,8 @@ extension Assistant {
                     self.bridge.send(["command": "account_switch", "id": id, "target": "all", "autoRefreshToken": true]) { [weak self] response in
                         guard let self else { return }; self.accountSwitchInFlight = false
                         if case .success(let value) = response {
+                            self.singleAccountRefreshNotices[id] = nil
+                            self.singleAccountRefreshErrors[id] = nil
                             self.showMessage(value["message"] as? String ?? L10n.t("assistant_account.switched_to", ["email": email]))
                             if shouldQuitAndRelaunch { self.relaunchAntigravityAfterSwitch() }
                             self.invalidateUsageReportCache()
@@ -441,9 +454,17 @@ extension Assistant {
     }
     func finishQuotaRefresh(error: String?) {
         quotaRefreshing = false; quotaRefreshStartedAt = nil; pendingAccountTaskId = nil; quotaRefreshError = error; quotaRefreshPollTimer?.invalidate(); quotaRefreshPollTimer = nil
-        lastAutoQuotaRefreshTriggerAt = Date()
-        if error == nil { singleAccountRefreshErrors.removeAll() }
-        configureQuotaRefreshTimer()
+        let now = Date()
+        lastAutoQuotaRefreshTriggerAt = now
+        pendingAutoQuotaRefresh = false
+        if let minutes = configuration?.value.quotaRefreshMinutes, [5, 10, 15, 30, 60].contains(minutes) {
+            nextScheduledQuotaRefreshAt = now.addingTimeInterval(TimeInterval(minutes * 60))
+        }
+        if error == nil {
+            singleAccountRefreshErrors.removeAll()
+            singleAccountRefreshNotices.removeAll()
+        }
+        configureQuotaRefreshTimer(preserveSchedule: true)
         updateQuotaRefreshControls(); fetchAccountList(notifyPage: true); overview?.update(force: true); menuPanelController?.syncFromAssistant(); refresh()
     }
     func updateQuotaRefreshControls() {
