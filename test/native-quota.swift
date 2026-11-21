@@ -257,12 +257,90 @@ import Cocoa
         check(QuotaPresentation.effectiveMonitoredModelKey("gemini_all", activeAccount: ultraAccPayload) == "gemini", "Ultra remaps gemini_all to shared gemini pool")
         check(QuotaPresentation.monitoredScopeSubtitle(for: "gemini", activeAccount: ultraAccPayload).contains("Argon 与 Carbon 并入此共享池"), "Ultra gemini subtitle explains pooled Argon/Carbon")
         check(QuotaPresentation.monitoredModelDisplayName("argon", activeAccount: ultraAccPayload) == "Gemini", "Ultra display name resolves argon to Gemini")
-        var ultraWithNeonPayload = ultraAccPayload
-        ultraWithNeonPayload["models"] = [
+        var ultraWithOnlyOrchestrator = ultraAccPayload
+        ultraWithOnlyOrchestrator["models"] = [
             ["name": "gemini-pro-orchestrator-neon", "model_id": "gemini-pro-orchestrator-neon", "display_name": "Orchestrator (Neon)", "disabled": false]
         ]
-        check(QuotaPresentation.monitoredScopeSubtitle(for: "gemini", activeAccount: ultraWithNeonPayload).contains("Argon、Carbon 与 Neon 并入此共享池"), "Ultra gemini subtitle dynamically appends Neon when pooled")
-        check(QuotaPresentation.effectiveMonitoredModelKey("gemini-4-neon", activeAccount: ultraWithNeonPayload) == "gemini", "Ultra remaps neon to shared gemini pool")
+        check(!QuotaPresentation.pooledUltraGeminiModelNames(ultraWithOnlyOrchestrator).contains("Neon"), "Orchestrator meta-models must be excluded from pooledUltraGeminiModelNames")
+        var ultraWithDescriptionPayload = ultraAccPayload
+        ultraWithDescriptionPayload["quotaGroups"] = [
+            [
+                "key": "gemini",
+                "displayName": "Gemini",
+                "description": "Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon, Gemini 4 Hydrogen, Gemini 3.8 Flash",
+                "summaryLabel": "Gemini",
+                "brands": ["gemini"],
+                "isStandalone": false,
+                "availability": "available",
+                "quotaState": "known",
+                "windows": [["id": "five_hour", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.64, "stale": false]]
+            ],
+            [
+                "key": "claude_gpt",
+                "displayName": "Claude/GPT",
+                "summaryLabel": "Claude/GPT",
+                "brands": ["claude", "gpt"],
+                "isStandalone": false,
+                "availability": "available",
+                "quotaState": "known",
+                "windows": [["id": "five_hour", "period": "5h", "label": "5 小时", "known": true, "remaining": 1.0, "stale": false]]
+            ]
+        ]
+        check(QuotaPresentation.pooledUltraGeminiModelNames(ultraWithDescriptionPayload) == ["Neon", "Carbon", "Argon", "Hydrogen"], "pooledUltraGeminiModelNames dynamically extracts non-generic models from Gemini group description")
+        check(QuotaPresentation.monitoredScopeSubtitle(for: "gemini", activeAccount: ultraWithDescriptionPayload).contains("Neon、Carbon、Argon 与 Hydrogen 并入此共享池"), "Ultra gemini subtitle dynamically reflects models from group description")
+        var ultraWithTrailingSentenceDesc = ultraWithDescriptionPayload
+        ultraWithTrailingSentenceDesc["quotaGroups"] = [
+            [
+                "key": "gemini",
+                "displayName": "Gemini",
+                "description": "Models within this group: Gemini 4 Neon, Gemini 4 Argon, Gemini 3.8 Flash. Resets every 5 hours.",
+                "summaryLabel": "Gemini",
+                "brands": ["gemini"],
+                "isStandalone": false,
+                "availability": "available",
+                "quotaState": "known",
+                "windows": [["id": "five_hour", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.64, "stale": false]]
+            ],
+            [
+                "key": "claude_gpt",
+                "displayName": "Claude/GPT",
+                "summaryLabel": "Claude/GPT",
+                "brands": ["claude", "gpt"],
+                "isStandalone": false,
+                "availability": "available",
+                "quotaState": "known",
+                "windows": [["id": "five_hour", "period": "5h", "label": "5 小时", "known": true, "remaining": 1.0, "stale": false]]
+            ]
+        ]
+        check(QuotaPresentation.pooledUltraGeminiModelNames(ultraWithTrailingSentenceDesc) == ["Neon", "Argon"], "pooledUltraGeminiModelNames strips trailing sentences after member list without breaking decimal versions")
+        var ultraWithNonMemberDesc = ultraAccPayload
+        ultraWithNonMemberDesc["quotaGroups"] = [
+            [
+                "key": "gemini",
+                "displayName": "Gemini",
+                "description": "Resets at 12:30 UTC",
+                "summaryLabel": "Gemini",
+                "brands": ["gemini"],
+                "isStandalone": false,
+                "availability": "available",
+                "quotaState": "known",
+                "windows": [["id": "five_hour", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.64, "stale": false]]
+            ]
+        ]
+        ultraWithNonMemberDesc["models"] = [
+            ["name": "gemini-4-neon", "model_id": "gemini-4-neon", "display_name": "Gemini 4 Neon", "family": "gemini", "disabled": false]
+        ]
+        check(QuotaPresentation.pooledUltraGeminiModelNames(ultraWithNonMemberDesc) == ["Argon", "Carbon", "Neon"], "Non-member description with colon smoothly falls back to visible Gemini models")
+        var ultraWithVisibleModels = ultraAccPayload
+        ultraWithVisibleModels["models"] = [
+            ["name": "gemini-4-argon", "model_id": "gemini-4-argon", "display_name": "Gemini 4 Argon", "family": "gemini", "disabled": false],
+            ["name": "gemini-4-carbon", "model_id": "gemini-4-carbon", "display_name": "Gemini 4 Carbon", "family": "gemini", "disabled": false],
+            ["name": "gemini-4-neon-high", "model_id": "gemini-4-neon-high", "display_name": "Gemini 4 Neon (High)", "family": "gemini", "disabled": false],
+            ["name": "gemini-pro-orchestrator-nova", "model_id": "gemini-pro-orchestrator-nova", "display_name": "Orchestrator (Nova)", "family": "other", "disabled": false]
+        ]
+        check(QuotaPresentation.pooledUltraGeminiModelNames(ultraWithVisibleModels) == ["Argon", "Carbon", "Neon"], "pooledUltraGeminiModelNames falls back to visible non-orchestrator Gemini models")
+        check(QuotaPresentation.monitoredScopeSubtitle(for: "gemini", activeAccount: ultraWithVisibleModels).contains("Argon、Carbon 与 Neon 并入此共享池"), "Ultra gemini subtitle dynamically appends visible pooled Gemini models")
+        check(QuotaPresentation.effectiveMonitoredModelKey("gemini-4-neon", activeAccount: ultraWithVisibleModels) == "gemini", "Ultra remaps neon to shared gemini pool")
 
         let freeChoices = QuotaPresentation.monitoredScopeChoices(for: freeAccPayload)
         check(freeChoices.filter { !$0.isSeparator }.map(\.title) == ["全部可用模型", "Gemini", "Claude/GPT"], "Free monitored choices expose only available core pools")
@@ -372,6 +450,97 @@ import Cocoa
         let debugPortMissingEn = LiveStatus(["mode": "debug-port-missing", "locale": "en", "translationEnabled": true])
         check(debugPortMissingEn.enabled == false && debugPortMissingEn.title == "Debug Port Not Enabled" && debugPortMissingEn.color == .systemOrange, "English debug-port-missing status maps cleanly")
         L10n.shared.setLanguage("zh-Hans", notify: false)
+
+        // Antigravity 2.34.0 Orchestrator meta-model guard: legacy polluted payloads must NEVER produce standalone pools
+        check(QuotaPresentation.isOrchestratorMetaModel(id: "gemini-pro-coordinator"), "Detects gemini-pro-coordinator")
+        check(QuotaPresentation.isOrchestratorMetaModel(id: "gemini-pro-orchestrator"), "Detects gemini-pro-orchestrator")
+        check(QuotaPresentation.isOrchestratorMetaModel(id: "gemini-pro-orchestrator-neon"), "Detects gemini-pro-orchestrator-neon")
+        check(QuotaPresentation.isOrchestratorMetaModel(displayName: "Orchestrator (Neon)"), "Detects Orchestrator (Neon) display name")
+        check(QuotaPresentation.isOrchestratorMetaModel(displayName: "Orchestrator Neon"), "Detects Orchestrator Neon display name")
+        check(!QuotaPresentation.isOrchestratorMetaModel(id: "gemini-4-neon", displayName: "Gemini 4 Neon"), "Does not misclassify Gemini 4 Neon as orchestrator")
+        check(!QuotaPresentation.isOrchestratorMetaModel(id: "nova-models", displayName: "Nova Models"), "Does not misclassify Nova Models as orchestrator")
+
+        let legacyOrchestratorPolluted = QuotaPresentation.contract([
+            "subscription_tier": "ULTRA",
+            "quotaGroups": [
+                ["key": "gemini", "displayName": "Gemini", "description": "Models within this group: Gemini 4 Neon, Gemini 4 Carbon, Gemini 4 Argon", "brands": ["gemini"], "isStandalone": false, "availability": "available", "quotaState": "known", "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.98, "stale": false]]],
+                ["key": "claude_gpt", "displayName": "Claude/GPT", "brands": ["claude", "gpt"], "isStandalone": false, "availability": "available", "quotaState": "known", "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 1.0, "stale": false]]],
+                ["key": "gemini-pro-orchestrator-neon", "displayName": "Orchestrator (Neon)", "brands": ["gemini"], "isStandalone": true, "availability": "unknown", "quotaState": "stale", "windows": [["id": "model", "period": "unspecified", "label": "模型配额", "known": true, "remaining": 1.0, "stale": true, "resetCountdown": "4小时 15分后重置"]]]
+            ],
+            "standaloneModels": [
+                ["key": "gemini-pro-orchestrator-neon", "displayName": "Orchestrator (Neon)", "availability": "unknown", "quotaState": "stale", "remaining": 1.0, "period": "unspecified"]
+            ],
+            "models": [
+                ["name": "gemini-pro-orchestrator-neon", "model_id": "gemini-pro-orchestrator-neon", "display_name": "Orchestrator (Neon)", "family": "other", "own_percentage": 100, "disabled": false],
+                ["name": "gemini-4-neon-high", "model_id": "gemini-4-neon-high", "display_name": "Gemini 4 Neon (High)", "family": "other", "own_percentage": 98, "disabled": false]
+            ]
+        ])
+        check(legacyOrchestratorPolluted.displayGroups.count == 2 && legacyOrchestratorPolluted.standaloneGroups.isEmpty && legacyOrchestratorPolluted.standaloneModels.isEmpty, "Polluted Orchestrator (Neon) payload must produce zero standalone pools")
+
+        let legacyNoGroupsOrchestrator = QuotaPresentation.contract([
+            "familyWindows": [
+                "gemini": ["fiveHour": ["remaining": 0.98, "known": true, "stale": false]],
+                "claude": ["fiveHour": ["remaining": 1.0, "known": true, "stale": false]]
+            ],
+            "models": [
+                ["name": "gemini-pro-orchestrator-neon", "model_id": "gemini-pro-orchestrator-neon", "display_name": "Orchestrator (Neon)", "family": "other", "own_percentage": 100, "disabled": false],
+                ["name": "gemini-4-xenon-high", "model_id": "gemini-4-xenon-high", "display_name": "Gemini 4 Xenon", "family": "other", "own_percentage": 85, "disabled": false]
+            ]
+        ])
+        check(legacyNoGroupsOrchestrator.standaloneGroups.isEmpty && legacyNoGroupsOrchestrator.standaloneModels.isEmpty, "Swift must not invent standalone pools from rawModels when standaloneModels is absent")
+
+        // Future unknown multi-window standalone groups (5h + weekly + daily) with description & resetTime passthrough
+        let nowRef = Date(timeIntervalSince1970: 1_800_000_000)
+        let future5hIso = ISO8601DateFormatter().string(from: nowRef.addingTimeInterval(4 * 3600 + 42 * 60 + 10))
+        let futureDailyIso = ISO8601DateFormatter().string(from: nowRef.addingTimeInterval(12 * 3600 + 15 * 60 + 5))
+        let futureWeeklyIso = ISO8601DateFormatter().string(from: nowRef.addingTimeInterval(3 * 24 * 3600 + 6 * 3600 + 30))
+        let futureStandalonePayload: [String: Any] = [
+            "subscription_tier": "PRO",
+            "quotaGroups": [
+                ["key": "gemini", "displayName": "Gemini", "brands": ["gemini"], "isStandalone": false, "availability": "available", "quotaState": "known", "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.8, "stale": false, "resetTime": future5hIso]]],
+                ["key": "claude_gpt", "displayName": "Claude/GPT", "brands": ["claude", "gpt"], "isStandalone": false, "availability": "available", "quotaState": "known", "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.9, "stale": false, "resetTime": future5hIso]]],
+                [
+                    "key": "nova-models",
+                    "displayName": "Nova Models",
+                    "description": "Models within this group: Nova Pro, Nova Lite",
+                    "brands": ["nova"],
+                    "isStandalone": true,
+                    "availability": "available",
+                    "quotaState": "known",
+                    "windows": [
+                        ["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.75, "stale": false, "resetCountdown": "4小时 42分后重置", "resetTime": future5hIso],
+                        ["id": "weekly", "period": "weekly", "label": "每周", "known": true, "remaining": 0.45, "stale": false, "resetCountdown": "3天 6小时后重置", "resetTime": futureWeeklyIso]
+                    ]
+                ],
+                [
+                    "key": "pulse-daily",
+                    "displayName": "Pulse Daily",
+                    "brands": [],
+                    "isStandalone": true,
+                    "availability": "available",
+                    "quotaState": "known",
+                    "windows": [
+                        ["id": "daily", "period": "daily", "label": "每日", "known": true, "remaining": 0.62, "stale": false, "resetCountdown": "12小时 15分后重置", "resetTime": futureDailyIso]
+                    ]
+                ]
+            ]
+        ]
+        let futureStandaloneContract = QuotaPresentation.contract(futureStandalonePayload)
+        check(futureStandaloneContract.standaloneGroups.count == 2, "Preserves multiple future official standalone groups")
+        let novaGroup = futureStandaloneContract.standaloneGroups[0]
+        check(novaGroup.displayName == "Nova Models" && novaGroup.description == "Models within this group: Nova Pro, Nova Lite" && novaGroup.windows.count == 2, "Nova Models preserves description and both 5h and weekly windows")
+        check(novaGroup.barTitle(for: novaGroup.windows[0]) == "Nova Models · 5 小时" && novaGroup.barTitle(for: novaGroup.windows[1]) == "Nova Models · 每周", "Multi-window standalone group renders period-qualified bar titles")
+        check(novaGroup.windows[0].resetTime == future5hIso && novaGroup.windows[0].resetText == "4小时 42分后重置", "Standalone 5h window preserves resetTime and resetText")
+        check(novaGroup.windows[1].resetTime == futureWeeklyIso && novaGroup.windows[1].resetText == "3天 6小时后重置", "Standalone weekly window preserves resetTime and resetText")
+        let pulseGroup = futureStandaloneContract.standaloneGroups[1]
+        check(pulseGroup.windows.count == 1 && pulseGroup.windows[0].localizedLabel == "每日" && pulseGroup.barTitle(for: pulseGroup.windows[0]) == "Pulse Daily · 每日", "Daily standalone window renders localized Chinese daily label")
+        check(pulseGroup.windows[0].resetTime == futureDailyIso && pulseGroup.windows[0].resetText == "12小时 15分后重置", "Standalone daily window preserves resetTime and resetText")
+        L10n.shared.setLanguage("en", notify: false)
+        check(pulseGroup.windows[0].localizedLabel == "Daily" && pulseGroup.barTitle(for: pulseGroup.windows[0]) == "Pulse Daily · Daily", "Daily standalone window renders localized English Daily label")
+        L10n.shared.setLanguage("zh-Hans", notify: false)
+        check(QuotaPresentation.inferredBrands(for: "Nova Models").isEmpty && novaGroup.brands.isEmpty, "Unknown future pool does not mislabel brands as Gemini or Claude")
+        let futureChoices = QuotaPresentation.monitoredScopeChoices(for: futureStandalonePayload).filter { !$0.isSeparator }
+        check(futureChoices.contains(where: { $0.key == "nova-models" && $0.title == "Nova Models" }) && futureChoices.contains(where: { $0.key == "pulse-daily" && $0.title == "Pulse Daily" }), "Dynamic future standalone groups surface in monitoredScopeChoices")
 
         print("\(assertionCount) native quota assertions passed")
     }

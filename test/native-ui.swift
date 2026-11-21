@@ -2473,6 +2473,57 @@ import Cocoa
             freeDash.view.layoutSubtreeIfNeeded(); pump()
             check(freeDash.standaloneDivider.isHidden && freeDash.standaloneQuotaStack.isHidden, "Free overview with disabled Argon must show zero standalone rows")
 
+            // Future unknown multi-window standalone pool (5h + weekly + daily) & ModelIcons graceful fallback
+            check(ModelIcons.brands(for: "Nova Models").isEmpty && ModelIcons.image("nova") == nil && ModelIcons.fallbackIcon() != nil, "Unknown future pool degrades cleanly to fallback icon without mislabeling or crashing")
+            let fallbackHeader = MenuQuotaHelpers.groupHeader("Nova Models", brands: ["nova"], fontSize: 11.5, iconSize: 13)
+            check((fallbackHeader as? NSStackView)?.arrangedSubviews.contains(where: { $0 is NSImageView }) == true, "MenuQuotaHelpers.groupHeader renders fallback sparkles icon for unknown future pool")
+            let futureIso5h = ISO8601DateFormatter().string(from: Date().addingTimeInterval(3 * 3600 + 25 * 60))
+            let futureIsoDaily = ISO8601DateFormatter().string(from: Date().addingTimeInterval(11 * 3600 + 10 * 60))
+            let futureIsoWeekly = ISO8601DateFormatter().string(from: Date().addingTimeInterval(4 * 24 * 3600 + 2 * 3600))
+            let multiWinStandaloneAcc: [String: Any] = [
+                "activeEmail": "future@example.invalid",
+                "activeName": "Future User",
+                "activeTier": "PRO",
+                "isLiveVerified": true,
+                "quotaLastUpdated": Date().timeIntervalSince1970,
+                "quotaGroups": [
+                    ["key": "gemini", "displayName": "Gemini", "brands": ["gemini"], "isStandalone": false, "availability": "available", "quotaState": "known", "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.85, "stale": false, "resetTime": futureIso5h]]],
+                    ["key": "claude_gpt", "displayName": "Claude/GPT", "brands": ["claude", "gpt"], "isStandalone": false, "availability": "available", "quotaState": "known", "windows": [["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.90, "stale": false, "resetTime": futureIso5h]]],
+                    ["key": "gemini-pro-orchestrator-neon", "displayName": "Orchestrator (Neon)", "brands": ["gemini"], "isStandalone": true, "availability": "unknown", "quotaState": "stale", "windows": [["id": "model", "period": "unspecified", "label": "模型配额", "known": true, "remaining": 1.0, "stale": true]]],
+                    [
+                        "key": "nova-models",
+                        "displayName": "Nova Models",
+                        "brands": ["nova"],
+                        "isStandalone": true,
+                        "availability": "available",
+                        "quotaState": "known",
+                        "windows": [
+                            ["id": "5h", "period": "5h", "label": "5 小时", "known": true, "remaining": 0.72, "stale": false, "resetTime": futureIso5h],
+                            ["id": "weekly", "period": "weekly", "label": "每周", "known": true, "remaining": 0.44, "stale": false, "resetTime": futureIsoWeekly]
+                        ]
+                    ],
+                    [
+                        "key": "pulse-daily",
+                        "displayName": "Pulse Daily",
+                        "brands": [],
+                        "isStandalone": true,
+                        "availability": "available",
+                        "quotaState": "known",
+                        "windows": [
+                            ["id": "daily", "period": "daily", "label": "每日", "known": true, "remaining": 0.61, "stale": false, "resetTime": futureIsoDaily]
+                        ]
+                    ]
+                ]
+            ]
+            let multiWinDash = DashboardPage(app: dashHost)
+            multiWinDash.view.frame = NSRect(x: 0, y: 0, width: 920, height: 760)
+            multiWinDash.renderSummary(["accounts": multiWinStandaloneAcc], isStaleFallback: false)
+            multiWinDash.view.layoutSubtreeIfNeeded(); pump()
+            let multiWinTexts = allTextValues(multiWinDash.view)
+            check(!multiWinDash.standaloneDivider.isHidden && !multiWinDash.standaloneQuotaStack.isHidden, "Future multi-window standalone pools render standalone section")
+            check(multiWinTexts.contains("Nova Models · 5 小时") && multiWinTexts.contains("Nova Models · 每周") && multiWinTexts.contains("Pulse Daily · 每日"), "Dashboard renders all 5h, weekly, and daily windows for future standalone pools")
+            check(!multiWinTexts.contains(where: { $0.contains("Orchestrator") }), "Dashboard must never render Orchestrator meta-models as standalone pools")
+
             let singleWindowFreeGroups: [[String: Any]] = [
                 [
                     "key": "gemini",

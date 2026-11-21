@@ -11,10 +11,12 @@ import {
   buildArgonStatus,
   buildCarbonStatus,
   familyWindowsFromGroups,
+  isExcludedFromStandaloneModelPool,
   mergeGroupSets,
   mergeModelCatalogues,
   normalizeLiveGroups,
   normalizeLiveModels,
+  resolveModelsWithGroupDescriptions,
 } from './quota.js';
 import type { LiveLanguageServerStatus, ModelQuota, QuotaData, QuotaGroup } from './accounts.js';
 import { bt } from './i18n.js';
@@ -407,9 +409,14 @@ export async function probeLiveLanguageServerOnce(
       const tier = resolveProbeSubscriptionTier(userStatus, isEnterpriseVertex);
 
       const observedAt = Math.floor(Date.now() / 1000);
-      const clientConfigs = userStatus.cascadeModelConfigData?.clientModelConfigs || [];
-      const models = mergeModelCatalogues([normalizeLiveModels(clientConfigs, observedAt)]);
+      const cascadeData = userStatus.cascadeModelConfigData ?? {};
+      const clientConfigs = cascadeData.clientModelConfigs || cascadeData.client_model_configs || [];
+      const clientModelSorts = cascadeData.clientModelSorts ?? cascadeData.client_model_sorts;
       const groups = mergeGroupSets([normalizeLiveGroups(quotaSummaryData, observedAt)]);
+      const models = resolveModelsWithGroupDescriptions(
+        mergeModelCatalogues([normalizeLiveModels(clientConfigs, observedAt, { clientModelSorts })]),
+        groups,
+      );
       const windows = familyWindowsFromGroups(groups, Date.now());
       const applied = applyFamilyWindows(models, windows);
       const liveArgon = buildArgonStatus(applied, groups, windows, Date.now(), tier);
@@ -419,9 +426,9 @@ export async function probeLiveLanguageServerOnce(
         || (family === 'carbon' && (liveCarbon.mode === 'unified' || liveCarbon.mode === 'disabled'));
       const missingFamilies = (['gemini', 'claude', 'argon', 'carbon'] as const).filter(family =>
         !isIgnoredStandalone(family)
-        && models.some(model => model.family === family && model.disabled !== true)
-        && !groups.some(group => group.family === family && group.buckets.some(bucket => bucket.remaining_fraction_known))
-        && !((family === 'argon' || family === 'carbon') && models.some(m => m.family === family && m.own_percentage_known && !m.own_stale)));
+        && models.some(model => model.family === family && !isExcludedFromStandaloneModelPool(model))
+        && !groups.some(group => group.family === family && group.buckets.some(bucket => bucket.disabled !== true && bucket.remaining_fraction_known))
+        && !((family === 'argon' || family === 'carbon') && models.some(m => m.family === family && !isExcludedFromStandaloneModelPool(m) && m.own_percentage_known && !m.own_stale)));
       const quotaData: QuotaData = {
         models: applied.map(mappers.modelQuotaFromNormalized),
         quota_groups: groups.map(mappers.groupToQuotaGroup),

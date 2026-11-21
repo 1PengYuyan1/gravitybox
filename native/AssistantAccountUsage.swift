@@ -1,11 +1,14 @@
 import Cocoa
 
 extension Assistant {
+    private static let uiBootstrapCacheSchemaVersion = 2
+
     func loadUIBootstrapSnapshot() {
         #if !NATIVE_UI_TEST
         let url = state.appendingPathComponent("ui-bootstrap-cache-v1.json")
         guard let data = try? Data(contentsOf: url),
-              let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { return }
+              let raw = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any],
+              (raw["schema"] as? Int) == Self.uiBootstrapCacheSchemaVersion else { return }
         if let dash = raw["dashboardSummary"] as? [String: Any] {
             cachedDashboardBootstrapSummary = dash
             if let usg = dash["usage"] as? [String: Any], let periodsMap = usg["periods"] as? [String: Any] {
@@ -49,7 +52,7 @@ extension Assistant {
         let targetURL = state.appendingPathComponent("ui-bootstrap-cache-v1.json")
         let work = DispatchWorkItem { [weak self] in
             guard self != nil else { return }
-            var doc: [String: Any] = ["schema": 1, "savedAt": Date().timeIntervalSince1970]
+            var doc: [String: Any] = ["schema": Self.uiBootstrapCacheSchemaVersion, "savedAt": Date().timeIntervalSince1970]
             if let dashSnap, JSONSerialization.isValidJSONObject(dashSnap) {
                 doc["dashboardSummary"] = dashSnap
             }

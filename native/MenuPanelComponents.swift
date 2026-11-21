@@ -81,6 +81,15 @@ enum MenuQuotaHelpers {
             icon.setAccessibilityElement(false)
             return icon
         }
+        if views.isEmpty, let fallback = ModelIcons.fallbackIcon(size: iconSize) {
+            let icon = NSImageView(image: fallback)
+            icon.imageScaling = .scaleProportionallyUpOrDown
+            icon.contentTintColor = .secondaryLabelColor
+            icon.translatesAutoresizingMaskIntoConstraints = false
+            NSLayoutConstraint.activate([icon.widthAnchor.constraint(equalToConstant: iconSize), icon.heightAnchor.constraint(equalToConstant: iconSize)])
+            icon.setAccessibilityElement(false)
+            views.append(icon)
+        }
         let lbl = text(title, size: fontSize, weight: .semibold, color: .secondaryLabelColor)
         lbl.alignment = .left
         views.append(lbl)
